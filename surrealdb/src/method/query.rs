@@ -277,7 +277,7 @@ impl IndexedResults {
 	///
 	/// A query that only returns one result can be deserialized into an
 	/// `Option<T>`, while those that return multiple results should be
-	/// deserialized into a `Vec<T>`.
+	/// deserialized into a `Vec<T>`, `LinkedList<T>` or `HashSet<T>`.
 	///
 	/// # Examples
 	///
