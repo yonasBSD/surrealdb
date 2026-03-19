@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet, LinkedList};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, LinkedList, VecDeque};
 use std::hash::Hash;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -1618,6 +1618,107 @@ impl<T: SurrealValue + Hash + Eq> SurrealValue for HashSet<T> {
 		a.into_iter().map(|v| T::from_value(v)).collect::<Result<HashSet<T>, Error>>().map_err(
 			|e| Error::internal(format!("Failed to convert to {}: {}", Self::kind_of(), e)),
 		)
+	}
+}
+
+impl<T: SurrealValue + Ord> SurrealValue for BTreeSet<T> {
+	fn kind_of() -> Kind {
+		kind!(array<(T::kind_of())>)
+	}
+
+	fn is_value(value: &Value) -> bool {
+		if let Value::Array(Array(array)) = value {
+			array.iter().all(T::is_value)
+		} else {
+			false
+		}
+	}
+
+	fn into_value(self) -> Value {
+		Value::Array(Array(self.into_iter().map(SurrealValue::into_value).collect()))
+	}
+
+	fn from_value(value: Value) -> Result<Self, Error> {
+		let Value::Array(Array(array)) = value else {
+			return Err(ConversionError::from_value(Self::kind_of(), &value).into());
+		};
+
+		array.into_iter().map(|v| T::from_value(v)).collect::<Result<BTreeSet<T>, Error>>().map_err(
+			|error| {
+				Error::serialization(
+					format!("Failed to convert to {}: {error}", Self::kind_of()),
+					SerializationError::Deserialization,
+				)
+			},
+		)
+	}
+}
+
+impl<T: SurrealValue> SurrealValue for VecDeque<T> {
+	fn kind_of() -> Kind {
+		kind!(array<(T::kind_of())>)
+	}
+
+	fn is_value(value: &Value) -> bool {
+		if let Value::Array(Array(array)) = value {
+			array.iter().all(T::is_value)
+		} else {
+			false
+		}
+	}
+
+	fn into_value(self) -> Value {
+		Value::Array(Array(self.into_iter().map(SurrealValue::into_value).collect()))
+	}
+
+	fn from_value(value: Value) -> Result<Self, Error> {
+		let Value::Array(Array(array)) = value else {
+			return Err(ConversionError::from_value(Self::kind_of(), &value).into());
+		};
+
+		array.into_iter().map(|v| T::from_value(v)).collect::<Result<VecDeque<T>, Error>>().map_err(
+			|error| {
+				Error::serialization(
+					format!("Failed to convert to {}: {error}", Self::kind_of()),
+					SerializationError::Deserialization,
+				)
+			},
+		)
+	}
+}
+
+impl<T: SurrealValue + Ord> SurrealValue for BinaryHeap<T> {
+	fn kind_of() -> Kind {
+		kind!(array<(T::kind_of())>)
+	}
+
+	fn is_value(value: &Value) -> bool {
+		if let Value::Array(Array(array)) = value {
+			array.iter().all(T::is_value)
+		} else {
+			false
+		}
+	}
+
+	fn into_value(self) -> Value {
+		Value::Array(Array(self.into_iter().map(SurrealValue::into_value).collect()))
+	}
+
+	fn from_value(value: Value) -> Result<Self, Error> {
+		let Value::Array(Array(array)) = value else {
+			return Err(ConversionError::from_value(Self::kind_of(), &value).into());
+		};
+
+		array
+			.into_iter()
+			.map(|v| T::from_value(v))
+			.collect::<Result<BinaryHeap<T>, Error>>()
+			.map_err(|error| {
+				Error::serialization(
+					format!("Failed to convert to {}: {error}", Self::kind_of()),
+					SerializationError::Deserialization,
+				)
+			})
 	}
 }
 
