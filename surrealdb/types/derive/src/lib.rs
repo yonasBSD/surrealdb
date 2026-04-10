@@ -80,6 +80,37 @@ use crate_path::CratePath;
 ///     age: i64,
 /// }
 /// ```
+///
+/// # Recursive types
+///
+/// Recursive types (types that reference themselves) are supported. Fields that
+/// contain the type being derived will have their [`kind_of()`] output set to
+/// [`Kind::Any`], while all other fields are computed normally. Serialization
+/// and deserialization (`into_value` / `from_value`) are unaffected.
+///
+/// ```ignore
+/// #[derive(SurrealValue)]
+/// enum Expr {
+///     Literal(i64),
+///     Add(Box<Expr>, Box<Expr>),
+/// }
+/// ```
+///
+/// Detection is syntactic: the macro checks whether a field's type contains the
+/// same identifier as the type being derived. This handles direct self-reference
+/// through any wrapper (`Box<Self>`, `Vec<Self>`, `Option<Box<Self>>`, etc.) but
+/// does **not** detect indirect mutual recursion between separately-defined
+/// types. For example, if type `A` contains `B` and `B` contains `A`, each
+/// macro expansion only sees its own definition and cannot detect the cycle.
+///
+/// Qualified paths like `crate::MyType` or `super::MyType` are also not treated
+/// as self-referential, because the macro cannot determine the module path of
+/// the type being derived and these paths may refer to a different type with the
+/// same name. Similarly, qualified self paths like `<Self as Trait>::Output` are
+/// not detected since associated types are distinct from `Self`.
+///
+/// Such types will cause a stack overflow in `kind_of()` and require a manual
+/// [`SurrealValue`] implementation for at least one of the types involved.
 #[proc_macro_derive(SurrealValue, attributes(surreal))]
 pub fn surreal_value(input: TokenStream) -> TokenStream {
 	let input = parse_macro_input!(input as DeriveInput);

@@ -223,7 +223,8 @@ impl NamedFields {
 			.collect()
 	}
 
-	pub fn map_types(&self, crate_path: &CratePath) -> Vec<TokenStream2> {
+	pub fn map_types(&self, type_name: &Ident, crate_path: &CratePath) -> Vec<TokenStream2> {
+		let kind_ty = crate_path.kind();
 		self.fields
 			.iter()
 			.filter(|field| !field.flatten) // Flatten fields don't have a specific key
@@ -231,6 +232,13 @@ impl NamedFields {
 				let ty = &field.ty;
 				let struct_name = field.ident.to_string();
 				let obj_key = field.rename.as_ref().unwrap_or(&struct_name);
+
+				if crate::type_contains_ident(ty, type_name) {
+					return quote! {
+						map.insert(#obj_key.to_string(), #kind_ty::Any);
+					};
+				}
+
 				let potentially_wrapped_ty = if field.wrap {
 					let crate_path = crate_path.wrapper();
 					quote! { #crate_path::<#ty> }
