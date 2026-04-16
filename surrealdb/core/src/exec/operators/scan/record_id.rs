@@ -318,6 +318,7 @@ pub(crate) async fn execute_record_lookup(
 				None
 			};
 			let prefetch = effective_storage_limit.is_none();
+			let limit_hint = limit.map(|l| l + start);
 
 			let mut source = kv_scan_stream(
 				Arc::clone(&txn),
@@ -328,6 +329,7 @@ pub(crate) async fn execute_record_lookup(
 				crate::idx::planner::ScanDirection::Forward,
 				pre_skip,
 				prefetch,
+				limit_hint,
 			);
 
 			let mut pipeline = ScanPipeline::new(

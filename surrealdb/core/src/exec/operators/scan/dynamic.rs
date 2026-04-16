@@ -464,6 +464,7 @@ impl ExecOperator for DynamicScan {
 					storage_limit: effective_storage_limit,
 					pre_skip,
 					has_pushed_limit: effective_storage_limit.is_some(),
+					limit_hint: limit_val.map(|l| l + start_val),
 					knn_context: knn_context.clone(),
 					},
 				).await?
@@ -522,6 +523,9 @@ struct TableScanConfig {
 	/// runtime-selected BTree index covers the requested ordering.
 	/// If it doesn't, we fall back to a KV scan for correctness.
 	has_pushed_limit: bool,
+	/// Hint for the scanner's initial batch size, typically `limit + start`.
+	/// Caps the first fetch to avoid over-reading for small-limit queries.
+	limit_hint: Option<usize>,
 	/// KNN distance context for vector::distance::knn() support.
 	knn_context: Option<Arc<crate::exec::function::KnnContext>>,
 }
@@ -698,6 +702,7 @@ async fn resolve_table_scan_stream(
 				cfg.direction,
 				cfg.pre_skip,
 				prefetch,
+				cfg.limit_hint,
 			);
 			Ok((stream, cfg.pre_skip))
 		}

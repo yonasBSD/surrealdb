@@ -506,6 +506,10 @@ impl Transactor {
 	/// - Fetches subsequent batches of up to 16 MiB (local) or 4 MiB (remote)
 	/// - When `prefetch` is true, prefetches the next batch while the current batch is being
 	///   processed, and uses a larger initial batch size (500 items)
+	/// - When `limit_hint` is provided, caps the initial batch size to avoid over-fetching for
+	///   small-limit queries (e.g. `LIMIT 10` fetches 10 instead of 500). Subsequent batches are
+	///   unaffected.
+	#[allow(clippy::too_many_arguments)]
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::tr", skip_all)]
 	pub fn stream_keys_vals<K>(
 		&self,
@@ -515,6 +519,7 @@ impl Transactor {
 		skip: u32,
 		dir: Direction,
 		prefetch: bool,
+		limit_hint: Option<usize>,
 	) -> impl Stream<Item = Result<Vec<(Key, Val)>>> + '_
 	where
 		K: IntoBytes + Debug,
@@ -533,10 +538,19 @@ impl Transactor {
 		// Enable prefetching and larger initial batch for full scans.
 		// The scanner default is already NORMAL_FETCH_SIZE (500); when
 		// prefetching is active we double it to amortise the overlap cost.
+		// When a limit_hint is present, cap the initial batch size so that
+		// small-limit queries (e.g. LIMIT 10) don't fetch 500+ records from
+		// storage only to discard most of them.
+		let default_size = *crate::cnf::NORMAL_FETCH_SIZE;
 		if prefetch {
-			scanner = scanner
-				.prefetch(true)
-				.initial_batch_size(ScanLimit::Count(*crate::cnf::NORMAL_FETCH_SIZE * 2));
+			let batch = default_size * 2;
+			let batch = match limit_hint {
+				Some(hint) => batch.min(hint as u32),
+				None => batch,
+			};
+			scanner = scanner.prefetch(true).initial_batch_size(ScanLimit::Count(batch));
+		} else if let Some(hint) = limit_hint {
+			scanner = scanner.initial_batch_size(ScanLimit::Count(default_size.min(hint as u32)));
 		}
 		// Return the stream
 		scanner

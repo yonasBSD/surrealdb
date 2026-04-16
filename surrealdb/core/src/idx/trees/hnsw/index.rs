@@ -188,7 +188,8 @@ impl HnswIndex {
 	pub(in crate::idx) async fn index_pendings(&self, ctx: &FrozenContext) -> Result<usize> {
 		let tx = ctx.tx();
 		let rng = self.ikb.new_hp_range()?;
-		let mut stream = tx.stream_keys_vals(rng, None, None, 0, ScanDirection::Forward, false);
+		let mut stream =
+			tx.stream_keys_vals(rng, None, None, 0, ScanDirection::Forward, false, None);
 		// Loop until no more entries
 		let mut count = 0;
 		let mut docs = HnswDocs::new(&tx, self.ikb.clone()).await?;
@@ -430,7 +431,8 @@ impl HnswIndex {
 		F: FnMut(Key, VectorPendingUpdate),
 	{
 		let rng = self.ikb.new_hp_range()?;
-		let mut stream = tx.stream_keys_vals(rng, None, None, 0, ScanDirection::Forward, false);
+		let mut stream =
+			tx.stream_keys_vals(rng, None, None, 0, ScanDirection::Forward, false, None);
 		// Loop until no more entries
 		let mut count = 0;
 		while let Some(res) = stream.next().await {

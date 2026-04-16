@@ -207,6 +207,10 @@ pub(crate) fn determine_scan_direction(
 /// before any data is returned, avoiding I/O, allocation, and deserialization
 /// for rows that will be discarded anyway (the fast-path optimisation for
 /// `START` without a pushdown predicate).
+///
+/// When `limit_hint` is provided, the scanner's initial batch size is capped
+/// to avoid over-fetching for small-limit queries (e.g. `LIMIT 10` fetches
+/// 10 records instead of 500). Subsequent batches are unaffected.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn kv_scan_stream(
 	txn: Arc<Transaction>,
@@ -217,10 +221,11 @@ pub(crate) fn kv_scan_stream(
 	direction: ScanDirection,
 	pre_skip: usize,
 	prefetch: bool,
+	limit_hint: Option<usize>,
 ) -> ValueBatchStream {
 	let skip = pre_skip.min(u32::MAX as usize) as u32;
 	let stream = async_stream::try_stream! {
-		let kv_stream = txn.stream_keys_vals(beg..end, version, storage_limit, skip, direction, prefetch);
+		let kv_stream = txn.stream_keys_vals(beg..end, version, storage_limit, skip, direction, prefetch, limit_hint);
 		futures::pin_mut!(kv_stream);
 
 		while let Some(result) = kv_stream.next().await {

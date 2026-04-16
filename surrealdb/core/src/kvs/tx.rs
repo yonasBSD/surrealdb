@@ -696,6 +696,9 @@ impl Transaction {
 	/// - Fetches subsequent batches of up to 16 MiB (local) or 4 MiB (remote)
 	/// - When `prefetch` is true, prefetches the next batch while the current batch is being
 	///   processed, and uses a larger initial batch size (500 items)
+	/// - When `limit_hint` is provided, caps the initial batch size to avoid over-fetching for
+	///   small-limit queries
+	#[allow(clippy::too_many_arguments)]
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip_all)]
 	pub fn stream_keys_vals(
 		&self,
@@ -705,6 +708,7 @@ impl Transaction {
 		skip: u32,
 		dir: ScanDirection,
 		prefetch: bool,
+		limit_hint: Option<usize>,
 	) -> impl Stream<Item = Result<Vec<(Key, Val)>>> + '_ {
 		self.tr
 			.stream_keys_vals(
@@ -717,6 +721,7 @@ impl Transaction {
 					ScanDirection::Backward => Direction::Backward,
 				},
 				prefetch,
+				limit_hint,
 			)
 			.map_err(Error::from)
 			.map_err(Into::into)

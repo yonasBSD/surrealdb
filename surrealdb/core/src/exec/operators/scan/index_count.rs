@@ -388,6 +388,7 @@ async fn count_with_filter_fallback(
 		0,    // no skip
 		crate::idx::planner::ScanDirection::Forward,
 		false, // no prefetch for count scans
+		None,  // no limit hint
 	);
 	futures::pin_mut!(kv_stream);
 
