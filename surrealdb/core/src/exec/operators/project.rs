@@ -225,23 +225,59 @@ impl ExecOperator for Project {
 					// --- include_all path: per-row processing ---
 					// RecordId dereferencing and row-skipping requires per-row handling.
 					let mut values = Vec::with_capacity(batch.values.len());
-					for value in batch.values {
-						let row_ctx = eval_ctx.with_value_and_doc(&value);
-
-						let mut output_value = match &value {
-							Value::Object(original) => {
-								let mut obj = original.clone();
-								for field in fields.iter() {
-									evaluate_and_set_field(&mut obj, field, row_ctx.clone())
-										.await?;
+					if fields.is_empty() && omit.is_empty() {
+						// Pure SELECT * — move values directly, no clone needed
+						for value in batch.values {
+							match value {
+								Value::RecordId(rid) => {
+									let fetched =
+										super::fetch::fetch_record(eval_ctx.exec_ctx, &rid).await?;
+									if !matches!(fetched, Value::None) {
+										values.push(fetched);
+									}
 								}
-								Value::Object(obj)
+								other => values.push(other),
 							}
-							Value::RecordId(rid) => {
-								let fetched =
-									super::fetch::fetch_record(eval_ctx.exec_ctx, rid).await?;
-								match fetched {
-									Value::Object(mut obj) => {
+						}
+					} else {
+						for value in batch.values {
+							let row_ctx = eval_ctx.with_value_and_doc(&value);
+
+							let mut output_value = match &value {
+								Value::Object(original) => {
+									let mut obj = original.clone();
+									for field in fields.iter() {
+										evaluate_and_set_field(&mut obj, field, row_ctx.clone())
+											.await?;
+									}
+									Value::Object(obj)
+								}
+								Value::RecordId(rid) => {
+									let fetched =
+										super::fetch::fetch_record(eval_ctx.exec_ctx, rid).await?;
+									match fetched {
+										Value::Object(mut obj) => {
+											for field in fields.iter() {
+												evaluate_and_set_field(
+													&mut obj,
+													field,
+													row_ctx.clone(),
+												)
+												.await?;
+											}
+											Value::Object(obj)
+										}
+										Value::None => {
+											continue;
+										}
+										other => other,
+									}
+								}
+								other => {
+									if fields.is_empty() {
+										other.clone()
+									} else {
+										let mut obj = Object::default();
 										for field in fields.iter() {
 											evaluate_and_set_field(
 												&mut obj,
@@ -252,31 +288,14 @@ impl ExecOperator for Project {
 										}
 										Value::Object(obj)
 									}
-									Value::None => {
-										// Record doesn't exist - skip this row.
-										continue;
-									}
-									other => other,
 								}
-							}
-							other => {
-								if fields.is_empty() {
-									other.clone()
-								} else {
-									let mut obj = Object::default();
-									for field in fields.iter() {
-										evaluate_and_set_field(&mut obj, field, row_ctx.clone())
-											.await?;
-									}
-									Value::Object(obj)
-								}
-							}
-						};
+							};
 
-						for field in omit.iter() {
-							omit_field_sync(&mut output_value, field);
+							for field in omit.iter() {
+								omit_field_sync(&mut output_value, field);
+							}
+							values.push(output_value);
 						}
-						values.push(output_value);
 					}
 					values
 				} else {
@@ -622,9 +641,9 @@ impl ExecOperator for SelectProject {
 				let mut projected_values = Vec::with_capacity(batch.values.len());
 
 				for value in batch.values {
-					let projected = apply_projections(&value, &projections, &ctx).await?;
-					// Skip NONE values from non-existent records (e.g. mock ranges)
-					if matches!(&value, Value::RecordId(_)) && matches!(&projected, Value::None) {
+					let is_record_id = matches!(&value, Value::RecordId(_));
+					let projected = apply_projections(value, &projections, &ctx).await?;
+					if is_record_id && matches!(&projected, Value::None) {
 						continue;
 					}
 					projected_values.push(projected);
@@ -644,9 +663,9 @@ impl ExecOperator for SelectProject {
 // SelectProject helpers
 // ---------------------------------------------------------------------------
 
-/// Apply projections to a single value.
+/// Apply projections to a single value, taking ownership to avoid cloning.
 async fn apply_projections(
-	value: &Value,
+	value: Value,
 	projections: &[Projection],
 	ctx: &ExecutionContext,
 ) -> Result<Value, crate::expr::ControlFlow> {
@@ -654,73 +673,75 @@ async fn apply_projections(
 	let has_includes =
 		projections.iter().any(|p| matches!(p, Projection::Include(_) | Projection::Rename { .. }));
 
-	// Get the input object, dereferencing RecordId when needed.
-	// RecordIds must be dereferenced for SELECT * (all fields) and for
-	// specific field selections (e.g. SELECT id FROM [person:1]).
 	let input_obj = match value {
-		Value::Object(obj) => obj.clone(),
+		Value::Object(obj) => obj,
 		Value::RecordId(rid) if has_all || has_includes => {
-			match super::fetch::fetch_record(ctx, rid).await? {
+			match super::fetch::fetch_record(ctx, &rid).await? {
 				Value::Object(obj) => obj,
 				Value::None => return Ok(Value::None),
 				other => return Ok(other),
 			}
 		}
-		// Geometry values expose GeoJSON fields (type, coordinates, etc.)
 		Value::Geometry(geo) if has_all || has_includes => geo.as_object(),
-		_ => return Ok(value.clone()),
+		other => return Ok(other),
 	};
 
-	Ok(apply_projections_to_object(&input_obj, projections, has_all))
+	Ok(apply_projections_to_object(input_obj, projections, has_all))
 }
 
 /// Apply projections to an already-resolved object (sync version).
-/// This is the core projection logic used by both the async apply_projections
-/// and by tests.
+/// Takes ownership of the input object to avoid cloning in the `has_all` path.
 fn apply_projections_to_object(
-	input_obj: &Object,
+	input_obj: Object,
 	projections: &[Projection],
 	has_all: bool,
 ) -> Value {
-	// Build output object
-	let mut output = if has_all {
-		input_obj.clone()
-	} else {
-		Object::default()
-	};
-
-	// Apply includes and renames.
-	// Fields that don't exist on the input default to Value::None,
-	// matching SQL projection semantics (SELECT v FROM t always
-	// produces a `v` column, even when the record lacks it).
-	for projection in projections {
-		match projection {
-			Projection::Include(name) => {
-				let v = input_obj.get(name).cloned().unwrap_or(Value::None);
-				output.insert(name.clone(), v);
-			}
-			Projection::Rename {
-				from,
-				to,
-			} => {
-				let v = input_obj.get(from).cloned().unwrap_or(Value::None);
-				output.insert(to.clone(), v);
-				// If we had All, remove the original name to avoid
-				// having both `from` and `to` in output.
-				if has_all {
-					output.remove(from);
+	if has_all {
+		let mut output = input_obj;
+		for projection in projections {
+			match projection {
+				Projection::Include(name) => {
+					if !output.contains_key(name) {
+						output.insert(name.clone(), Value::None);
+					}
 				}
-			}
-			Projection::Omit(name) => {
-				output.remove(name.as_str());
-			}
-			Projection::All => {
-				// Already handled above
+				Projection::Rename {
+					from,
+					to,
+				} => {
+					let v = output.remove(from).unwrap_or(Value::None);
+					output.insert(to.clone(), v);
+				}
+				Projection::Omit(name) => {
+					output.remove(name.as_str());
+				}
+				Projection::All => {}
 			}
 		}
+		Value::Object(output)
+	} else {
+		let mut output = Object::default();
+		for projection in projections {
+			match projection {
+				Projection::Include(name) => {
+					let v = input_obj.get(name).cloned().unwrap_or(Value::None);
+					output.insert(name.clone(), v);
+				}
+				Projection::Rename {
+					from,
+					to,
+				} => {
+					let v = input_obj.get(from).cloned().unwrap_or(Value::None);
+					output.insert(to.clone(), v);
+				}
+				Projection::Omit(name) => {
+					output.remove(name.as_str());
+				}
+				Projection::All => {}
+			}
+		}
+		Value::Object(output)
 	}
-
-	Value::Object(output)
 }
 
 #[cfg(test)]
@@ -738,7 +759,7 @@ mod tests {
 		let projections =
 			vec![Projection::Include("a".to_string()), Projection::Include("c".to_string())];
 
-		let result = apply_projections_to_object(&obj, &projections, false);
+		let result = apply_projections_to_object(obj, &projections, false);
 		if let Value::Object(result_obj) = result {
 			assert!(result_obj.contains_key("a"));
 			assert!(!result_obj.contains_key("b"));
@@ -757,7 +778,7 @@ mod tests {
 			to: "new_name".to_string(),
 		}];
 
-		let result = apply_projections_to_object(&obj, &projections, false);
+		let result = apply_projections_to_object(obj, &projections, false);
 		if let Value::Object(result_obj) = result {
 			assert!(!result_obj.contains_key("old_name"));
 			assert!(result_obj.contains_key("new_name"));
@@ -777,7 +798,7 @@ mod tests {
 
 		let projections = vec![Projection::All, Projection::Omit("b".to_string())];
 
-		let result = apply_projections_to_object(&obj, &projections, true);
+		let result = apply_projections_to_object(obj, &projections, true);
 		if let Value::Object(result_obj) = result {
 			assert!(result_obj.contains_key("a"));
 			assert!(!result_obj.contains_key("b"));
