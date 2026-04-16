@@ -318,6 +318,35 @@ pub(crate) async fn filter_and_process_batch(
 		&& (!check_perms || state.field_permissions.is_empty())
 		&& let Some(pred) = predicate
 	{
+		if pred.is_sync() {
+			let eval_ctx = EvalContext::from_exec_ctx(ctx);
+			let mut write_idx = 0;
+			for read_idx in 0..batch.len() {
+				let keep = {
+					let row_ctx = eval_ctx.with_value(&batch[read_idx]);
+					pred.try_evaluate_sync(&row_ctx)
+				};
+				match keep {
+					Some(Ok(result)) if result.is_truthy() => {
+						if write_idx != read_idx {
+							batch.swap(write_idx, read_idx);
+						}
+						write_idx += 1;
+					}
+					Some(Ok(_)) => {}
+					Some(Err(e)) => return Err(e),
+					None => {
+						if write_idx != read_idx {
+							batch.swap(write_idx, read_idx);
+						}
+						write_idx += 1;
+					}
+				}
+			}
+			batch.truncate(write_idx);
+			return Ok(());
+		}
+
 		let eval_ctx = EvalContext::from_exec_ctx(ctx);
 		let results = pred.evaluate_batch(eval_ctx, &batch[..]).await?;
 		let mut write_idx = 0;

@@ -370,6 +370,27 @@ pub trait PhysicalExpr: ToSql + SendSyncRequirement + Debug {
 	fn try_simple_field(&self) -> Option<&str> {
 		None
 	}
+
+	/// Try to evaluate this expression synchronously.
+	///
+	/// Returns `Some(result)` if the expression can be evaluated without any
+	/// async work. Returns `None` if async evaluation is needed (subqueries,
+	/// I/O, etc.).
+	///
+	/// The default returns `None`, falling through to async `evaluate`.
+	/// Override for purely synchronous expressions like literals, field access,
+	/// and comparisons between sync operands.
+	fn try_evaluate_sync(&self, _ctx: &EvalContext<'_>) -> Option<FlowResult<Value>> {
+		None
+	}
+
+	/// Whether this expression is always synchronous.
+	///
+	/// Used by batch operations to choose between sync and async code paths.
+	/// Default: `false` (conservative — assume async is needed).
+	fn is_sync(&self) -> bool {
+		false
+	}
 }
 
 #[cfg(test)]

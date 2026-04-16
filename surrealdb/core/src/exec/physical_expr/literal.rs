@@ -44,6 +44,14 @@ impl PhysicalExpr for Literal {
 	fn try_literal(&self) -> Option<&Value> {
 		Some(&self.0)
 	}
+
+	fn try_evaluate_sync(&self, _ctx: &EvalContext<'_>) -> Option<FlowResult<Value>> {
+		Some(Ok(self.0.clone()))
+	}
+
+	fn is_sync(&self) -> bool {
+		true
+	}
 }
 
 impl ToSql for Literal {
@@ -232,6 +240,40 @@ impl PhysicalExpr for Param {
 	fn access_mode(&self) -> AccessMode {
 		// Parameter references are read-only
 		AccessMode::ReadOnly
+	}
+
+	fn try_evaluate_sync(&self, ctx: &EvalContext<'_>) -> Option<FlowResult<Value>> {
+		match self.0.as_str() {
+			"this" | "self" => {
+				if let Some(v) = ctx.current_value {
+					return Some(Ok(v.clone()));
+				}
+				if let Some(local_params) = ctx.local_params
+					&& let Some(v) = local_params.get(&self.0)
+				{
+					return Some(Ok(v.clone()));
+				}
+				if let Some(v) = ctx.exec_ctx.value(&self.0) {
+					return Some(Ok(v.clone()));
+				}
+				return Some(Ok(Value::None));
+			}
+			_ => {}
+		}
+		if let Some(local_params) = ctx.local_params
+			&& let Some(value) = local_params.get(&self.0)
+		{
+			return Some(Ok(value.clone()));
+		}
+		if let Some(v) = ctx.exec_ctx.value(&self.0) {
+			return Some(Ok(v.clone()));
+		}
+		if self.0.as_str() == "parent"
+			&& let Some(v) = ctx.document_root
+		{
+			return Some(Ok(v.clone()));
+		}
+		None
 	}
 }
 

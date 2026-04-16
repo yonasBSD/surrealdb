@@ -5,6 +5,7 @@ use surrealdb_types::{SqlFormat, ToSql};
 
 use crate::exec::physical_expr::{EvalContext, PhysicalExpr};
 use crate::exec::{AccessMode, CombineAccessModes, ContextLevel, ExecOperator};
+use crate::expr::FlowResult;
 use crate::val::Value;
 
 // ============================================================================
@@ -110,6 +111,18 @@ impl PhysicalExpr for IdiomExpr {
 		} else {
 			None
 		}
+	}
+
+	fn try_evaluate_sync(&self, ctx: &EvalContext<'_>) -> Option<FlowResult<Value>> {
+		if self.start_expr.is_none() && self.parts.len() == 1 {
+			self.parts[0].try_evaluate_sync(ctx)
+		} else {
+			None
+		}
+	}
+
+	fn is_sync(&self) -> bool {
+		self.start_expr.is_none() && self.parts.len() == 1 && self.parts[0].is_sync()
 	}
 
 	fn embedded_operators(&self) -> Vec<(&str, &Arc<dyn ExecOperator>)> {

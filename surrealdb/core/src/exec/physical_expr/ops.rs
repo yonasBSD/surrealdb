@@ -163,6 +163,139 @@ impl PhysicalExpr for BinaryOp {
 		self.left.access_mode().combine(self.right.access_mode())
 	}
 
+	fn try_evaluate_sync(&self, ctx: &EvalContext<'_>) -> Option<FlowResult<Value>> {
+		use crate::expr::operator::BinaryOperator;
+		use crate::fnc::operate;
+
+		if !self.left.is_sync() || !self.right.is_sync() {
+			return None;
+		}
+
+		macro_rules! try_eval {
+			($expr:expr) => {
+				match $expr.try_evaluate_sync(ctx) {
+					Some(Ok(v)) => v,
+					Some(Err(e)) => return Some(Err(e)),
+					None => return None,
+				}
+			};
+		}
+
+		macro_rules! op {
+			($expr:expr) => {
+				match $expr {
+					Ok(v) => v,
+					Err(e) => return Some(Err(e.into())),
+				}
+			};
+		}
+
+		let left = try_eval!(self.left);
+
+		let result = match &self.op {
+			BinaryOperator::And => {
+				if !left.is_truthy() {
+					left
+				} else {
+					try_eval!(self.right)
+				}
+			}
+			BinaryOperator::Or | BinaryOperator::TenaryCondition => {
+				if left.is_truthy() {
+					left
+				} else {
+					try_eval!(self.right)
+				}
+			}
+			BinaryOperator::NullCoalescing => {
+				if !left.is_nullish() {
+					left
+				} else {
+					try_eval!(self.right)
+				}
+			}
+
+			BinaryOperator::Add => op!(operate::add(left, try_eval!(self.right))),
+			BinaryOperator::Subtract => op!(operate::sub(left, try_eval!(self.right))),
+			BinaryOperator::Multiply => op!(operate::mul(left, try_eval!(self.right))),
+			BinaryOperator::Divide => op!(operate::div(left, try_eval!(self.right))),
+			BinaryOperator::Remainder => op!(operate::rem(left, try_eval!(self.right))),
+			BinaryOperator::Power => op!(operate::pow(left, try_eval!(self.right))),
+
+			BinaryOperator::Equal => op!(operate::equal(&left, &try_eval!(self.right))),
+			BinaryOperator::ExactEqual => op!(operate::exact(&left, &try_eval!(self.right))),
+			BinaryOperator::NotEqual => op!(operate::not_equal(&left, &try_eval!(self.right))),
+			BinaryOperator::AllEqual => op!(operate::all_equal(&left, &try_eval!(self.right))),
+			BinaryOperator::AnyEqual => op!(operate::any_equal(&left, &try_eval!(self.right))),
+
+			BinaryOperator::LessThan => op!(operate::less_than(&left, &try_eval!(self.right))),
+			BinaryOperator::LessThanEqual => {
+				op!(operate::less_than_or_equal(&left, &try_eval!(self.right)))
+			}
+			BinaryOperator::MoreThan => op!(operate::more_than(&left, &try_eval!(self.right))),
+			BinaryOperator::MoreThanEqual => {
+				op!(operate::more_than_or_equal(&left, &try_eval!(self.right)))
+			}
+
+			BinaryOperator::Contain => op!(operate::contain(&left, &try_eval!(self.right))),
+			BinaryOperator::NotContain => {
+				op!(operate::not_contain(&left, &try_eval!(self.right)))
+			}
+			BinaryOperator::ContainAll => {
+				op!(operate::contain_all(&left, &try_eval!(self.right)))
+			}
+			BinaryOperator::ContainAny => {
+				op!(operate::contain_any(&left, &try_eval!(self.right)))
+			}
+			BinaryOperator::ContainNone => {
+				op!(operate::contain_none(&left, &try_eval!(self.right)))
+			}
+			BinaryOperator::Inside => op!(operate::inside(&left, &try_eval!(self.right))),
+			BinaryOperator::NotInside => {
+				op!(operate::not_inside(&left, &try_eval!(self.right)))
+			}
+			BinaryOperator::AllInside => {
+				op!(operate::inside_all(&left, &try_eval!(self.right)))
+			}
+			BinaryOperator::AnyInside => {
+				op!(operate::inside_any(&left, &try_eval!(self.right)))
+			}
+			BinaryOperator::NoneInside => {
+				op!(operate::inside_none(&left, &try_eval!(self.right)))
+			}
+
+			BinaryOperator::Outside => op!(operate::outside(&left, &try_eval!(self.right))),
+			BinaryOperator::Intersects => {
+				op!(operate::intersects(&left, &try_eval!(self.right)))
+			}
+
+			BinaryOperator::Range => Value::Range(Box::new(crate::val::Range {
+				start: std::ops::Bound::Included(left),
+				end: std::ops::Bound::Excluded(try_eval!(self.right)),
+			})),
+			BinaryOperator::RangeInclusive => Value::Range(Box::new(crate::val::Range {
+				start: std::ops::Bound::Included(left),
+				end: std::ops::Bound::Included(try_eval!(self.right)),
+			})),
+			BinaryOperator::RangeSkip => Value::Range(Box::new(crate::val::Range {
+				start: std::ops::Bound::Excluded(left),
+				end: std::ops::Bound::Excluded(try_eval!(self.right)),
+			})),
+			BinaryOperator::RangeSkipInclusive => Value::Range(Box::new(crate::val::Range {
+				start: std::ops::Bound::Excluded(left),
+				end: std::ops::Bound::Included(try_eval!(self.right)),
+			})),
+
+			BinaryOperator::Matches(_) | BinaryOperator::NearestNeighbor(_) => Value::Bool(true),
+		};
+
+		Some(Ok(result))
+	}
+
+	fn is_sync(&self) -> bool {
+		self.left.is_sync() && self.right.is_sync()
+	}
+
 	fn expr_children(&self) -> Vec<(&str, &Arc<dyn PhysicalExpr>)> {
 		vec![("left", &self.left), ("right", &self.right)]
 	}
@@ -344,6 +477,59 @@ impl PhysicalExpr for SimpleBinaryOp {
 
 	fn access_mode(&self) -> AccessMode {
 		AccessMode::ReadOnly
+	}
+
+	fn try_evaluate_sync(&self, ctx: &EvalContext<'_>) -> Option<FlowResult<Value>> {
+		use crate::expr::operator::BinaryOperator;
+		use crate::fnc::operate;
+
+		let current = ctx.current_value.unwrap_or(&Value::NONE);
+		let field_val: &Value = if let Value::Object(obj) = current {
+			obj.get(&self.field_name).unwrap_or(&Value::NONE)
+		} else {
+			return None;
+		};
+
+		let (left, right) = if self.reversed {
+			(&self.literal, field_val)
+		} else {
+			(field_val, &self.literal)
+		};
+
+		let result = match &self.op {
+			BinaryOperator::Equal => operate::equal(left, right),
+			BinaryOperator::ExactEqual => operate::exact(left, right),
+			BinaryOperator::NotEqual => operate::not_equal(left, right),
+			BinaryOperator::AllEqual => operate::all_equal(left, right),
+			BinaryOperator::AnyEqual => operate::any_equal(left, right),
+
+			BinaryOperator::LessThan => operate::less_than(left, right),
+			BinaryOperator::LessThanEqual => operate::less_than_or_equal(left, right),
+			BinaryOperator::MoreThan => operate::more_than(left, right),
+			BinaryOperator::MoreThanEqual => operate::more_than_or_equal(left, right),
+
+			BinaryOperator::Contain => operate::contain(left, right),
+			BinaryOperator::NotContain => operate::not_contain(left, right),
+			BinaryOperator::ContainAll => operate::contain_all(left, right),
+			BinaryOperator::ContainAny => operate::contain_any(left, right),
+			BinaryOperator::ContainNone => operate::contain_none(left, right),
+			BinaryOperator::Inside => operate::inside(left, right),
+			BinaryOperator::NotInside => operate::not_inside(left, right),
+			BinaryOperator::AllInside => operate::inside_all(left, right),
+			BinaryOperator::AnyInside => operate::inside_any(left, right),
+			BinaryOperator::NoneInside => operate::inside_none(left, right),
+
+			BinaryOperator::Outside => operate::outside(left, right),
+			BinaryOperator::Intersects => operate::intersects(left, right),
+
+			_ => unreachable!("SimpleBinaryOp created for unsupported operator {:?}", self.op),
+		};
+
+		Some(result.map_err(Into::into))
+	}
+
+	fn is_sync(&self) -> bool {
+		true
 	}
 }
 
