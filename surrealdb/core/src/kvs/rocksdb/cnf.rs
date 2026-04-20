@@ -18,6 +18,17 @@ pub(super) static ROCKSDB_THREAD_COUNT: LazyLock<usize> =
 pub(super) static ROCKSDB_JOBS_COUNT: LazyLock<usize> =
 	lazy_env_parse!("SURREAL_ROCKSDB_JOBS_COUNT", usize, || num_cpus::get() * 2);
 
+/// Scans whose estimated byte size is at or below this threshold execute
+/// inline on the async executor thread; above this threshold they are offloaded
+/// to the blocking threadpool so they do not stall other async tasks. This
+/// applies uniformly to all `ScanLimit` variants: `Bytes(b)` compares `b`
+/// directly, while `Count(c)` and `BytesOrCount(b, c)` convert the entry count
+/// to an approximate byte size using the caller-supplied per-entry size. The
+/// unbounded `count()` path is always offloaded via `affinitypool::spawn_local`
+/// regardless of this value (default: 4 MiB)
+pub(super) static ROCKSDB_INLINE_SCAN_THRESHOLD: LazyLock<u32> =
+	lazy_env_parse!(bytes, "SURREAL_ROCKSDB_INLINE_SCAN_THRESHOLD", u32, 4 * 1024 * 1024);
+
 /// The maximum number of open files which can be opened by RocksDB (default:
 /// 1024)
 pub(super) static ROCKSDB_MAX_OPEN_FILES: LazyLock<usize> =

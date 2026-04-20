@@ -65,6 +65,11 @@ pub use tr::{LockType, TransactionType, Transactor};
 pub(crate) use tx::CachePolicy;
 pub use tx::Transaction;
 
+/// The estimated bytes per key.
+pub const ESTIMATED_BYTES_PER_KEY: u32 = 128;
+/// The estimated bytes per key-value entry.
+pub const ESTIMATED_BYTES_PER_KV: u32 = 512;
+
 /// The key part of a key-value pair. An alias for [`Vec<u8>`].
 pub type Key = Vec<u8>;
 

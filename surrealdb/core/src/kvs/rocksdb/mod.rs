@@ -20,15 +20,15 @@ use garbage_collector::GarbageCollector;
 use memory_manager::MemoryManager;
 use rocksdb::{
 	ColumnFamilyDescriptor, DBCompactionStyle, DBCompressionType, FlushOptions, LogLevel,
-	OptimisticTransactionDB, OptimisticTransactionOptions, Options, ReadOptions, WriteOptions,
-	properties,
+	OptimisticTransactionDB, OptimisticTransactionOptions, Options, ReadOptions,
+	SnapshotWithThreadMode, WriteOptions, properties,
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 
-use super::Direction;
 use super::api::ScanLimit;
 use super::config::{RocksDbConfig, SyncMode};
 use super::err::{Error, Result};
+use super::{Direction, ESTIMATED_BYTES_PER_KEY, ESTIMATED_BYTES_PER_KV};
 use crate::key::debug::Sprintable;
 use crate::kvs::api::Transactable;
 use crate::kvs::ds::{Metric, Metrics};
@@ -53,7 +53,6 @@ pub struct Datastore {
 	/// Garbage collector for advancing the version GC watermark
 	garbage_collector: Option<Arc<GarbageCollector>>,
 }
-
 pub struct Transaction {
 	/// Is the transaction complete?
 	done: AtomicBool,
@@ -61,21 +60,46 @@ pub struct Transaction {
 	write: bool,
 	/// Whether user-defined timestamps (versioning) are enabled
 	versioned: bool,
-	/// The underlying datastore transaction
-	inner: Mutex<Option<rocksdb::Transaction<'static, OptimisticTransactionDB>>>,
-	/// The read options containing the Snapshot
+	/// The read options containing the snapshot
 	read_options: ReadOptions,
+	/// The inner transaction and the transaction snapshot
+	inner: Mutex<Option<TransactionInner>>,
 	/// The current transaction state
 	transaction_state: Arc<AtomicU8>,
 	/// Reference to the disk space manager for checking current operational state during commit.
 	disk_space_manager: Option<Arc<DiskSpaceManager>>,
 	/// Commit coordinator for batching transaction commits when sync writes are enabled
 	commit_coordinator: Option<Arc<CommitCoordinator>>,
-	// The above, supposedly 'static transaction
-	// actually points here, so we need to ensure
-	// the memory is kept alive. This pointer must
-	// be declared last, so that it is dropped last.
+	/// The above, supposedly 'static transaction actually points here, so we
+	/// need to ensure the memory is kept alive. This pointer must be declared
+	/// last, so that it is dropped last.
 	db: Pin<Arc<OptimisticTransactionDB>>,
+}
+
+/// The rocksdb transaction and its pre-captured snapshot, bundled together so
+/// that the snapshot is always dropped before the transaction it borrows from.
+///
+/// `snapshot` holds a `'static` reference into the boxed transaction: the
+/// RocksDB snapshot's `db` field points at the `Transaction` allocation **inside**
+/// `tx: Box<...>`, which has a stable address while `TransactionInner` is moved
+/// (only the `Box` pointer moves, not the heap allocation). `tx` must outlive
+/// `snapshot`. Two paths guarantee this:
+///
+/// * On natural drop, struct fields drop in declaration order. `snapshot` is declared before `tx`
+///   and therefore drops first — while `tx` is still alive.
+/// * On commit, the commit path destructures this struct, drops `snapshot` first, then consumes the
+///   boxed transaction with `(*inner).commit()` (where `inner` is the
+///   `Box<rocksdb::Transaction<…>>`).
+struct TransactionInner {
+	/// The snapshot for the underlying datastore transaction.
+	///
+	/// Declared before `tx` so it drops first on natural drop: the snapshot
+	/// must be released before the boxed `Transaction` is destroyed.
+	snapshot:
+		SnapshotWithThreadMode<'static, rocksdb::Transaction<'static, OptimisticTransactionDB>>,
+	/// The underlying datastore transaction (boxed so `snapshot` can safely
+	/// hold a `&Transaction` into a stable allocation when `TransactionInner` moves).
+	tx: Box<rocksdb::Transaction<'static, OptimisticTransactionDB>>,
 }
 
 impl Datastore {
@@ -392,21 +416,80 @@ impl Datastore {
 		// sync=<interval> or sync=never, no per-transaction fsync is needed either.
 		wo.set_sync(false);
 		// Create a new transaction
-		let inner = self.db.transaction_opt(&wo, &to);
+		let tx = self.db.transaction_opt(&wo, &to);
+		// When versioning is enabled the default column family uses a
+		// user-defined-timestamp (UDT) comparator. RocksDB then requires every
+		// `OptimisticTransaction` to have a `read_timestamp_` strictly less
+		// than `kMaxTxnTimestamp` (the default `u64::MAX` sentinel) and
+		// strictly less than whatever `commit_timestamp_` we later set at
+		// commit time. Specifically:
+		//
+		// - `DBImpl::GetLatestSequenceForKey`, invoked from the commit-time conflict check
+		//   (`TransactionUtil::CheckKey`), asserts `timestamp != nullptr` whenever the column
+		//   family's comparator has a non-zero timestamp size. `OptimisticTransaction` only
+		//   populates that buffer when `read_timestamp_ < kMaxTxnTimestamp`, so without this call
+		//   the first writeable commit aborts the process with `Assertion 'timestamp' failed`.
+		// - `OptimisticTransaction::SetCommitTimestamp` rejects any `commit_ts <= read_timestamp_`
+		//   with `Status::InvalidArgument`, which the Rust wrapper silently drops. A too-large
+		//   `read_ts` (e.g. `u64::MAX - 1`) would therefore make the `set_commit_ timestamp` call
+		//   in `commit()` a no-op, leading to a downstream `Must assign a commit timestamp` error.
+		// - UDT-based validation fires when `read_ts < observed_ts`, so a too-small `read_ts` (e.g.
+		//   `0`) would false-positive on every key whose latest version is visible through our
+		//   snapshot.
+		//
+		// Seeding `read_ts` from the globally-monotonic HLC after
+		// `transaction_opt()` (which captured the snapshot) satisfies all
+		// three: every HLC assigned to a visible prior commit is strictly
+		// smaller (their `set_commit_timestamp` + `db.Write` both happened
+		// before our snapshot, hence before this call), and the HLC we use at
+		// commit time via `HlcTimeStamp::next()` is strictly larger (the HLC
+		// is a process-wide CAS counter).
+		if self.versioned {
+			let read_ts = HlcTimeStamp::next();
+			tx.set_read_timestamp_for_validation(read_ts.0);
+		}
 		// SAFETY: The transaction lifetime is tied to the database through the db field.
 		// The database is guaranteed to outlive the transaction because:
 		// 1. The transaction holds a Pin<Arc<OptimisticTransactionDB>> reference
 		// 2. The transaction struct ensures db is dropped after inner
 		// 3. The Pin ensures the database isn't moved or dropped while referenced
-		let inner = unsafe {
+		let tx = unsafe {
 			std::mem::transmute::<
 				rocksdb::Transaction<'_, OptimisticTransactionDB>,
 				rocksdb::Transaction<'static, OptimisticTransactionDB>,
-			>(inner)
+			>(tx)
 		};
-		// Set the read options
+		// Heap-allocate before capturing the snapshot so `SnapshotWithThreadMode`'s
+		// `db: &Transaction` points at a stable address: moving `TransactionInner`
+		// only moves the `Box` pointer, not the transaction allocation.
+		let tx = Box::new(tx);
+		// Capture the transaction's internal snapshot (set by `set_snapshot(true)`
+		// above) and extend its lifetime to `'static`. Using the transaction's
+		// own snapshot ensures reads always see the sequence number used for
+		// commit-time conflict detection; using a different snapshot (e.g. from
+		// `db.snapshot()`) would allow read/conflict-detection to disagree and
+		// break optimistic concurrency correctness.
+		//
+		// SAFETY: The snapshot borrows `&*tx` into the boxed transaction. The
+		// transmute is sound because `tx` and `snapshot` live in the same
+		// `TransactionInner` (with `snapshot` declared before `tx` so it drops
+		// first), and the commit path drops `snapshot` before consuming the
+		// boxed `Transaction` (see `Transactable::commit`).
+		let snapshot = unsafe {
+			std::mem::transmute::<
+				SnapshotWithThreadMode<'_, rocksdb::Transaction<'static, OptimisticTransactionDB>>,
+				SnapshotWithThreadMode<
+					'static,
+					rocksdb::Transaction<'static, OptimisticTransactionDB>,
+				>,
+			>(tx.as_ref().snapshot())
+		};
+		// Build the default read options pointing at the captured snapshot.
+		// `set_snapshot` copies the internal snapshot pointer into the
+		// `ReadOptions`, so `ReadOptions` remains valid as long as the
+		// underlying rocksdb snapshot (owned by `inner`) is alive.
 		let mut ro = ReadOptions::default();
-		ro.set_snapshot(&inner.snapshot());
+		ro.set_snapshot(&snapshot);
 		ro.set_async_io(true);
 		ro.fill_cache(true);
 		// When versioned, default reads fetch the latest version
@@ -418,8 +501,11 @@ impl Datastore {
 			done: AtomicBool::new(false),
 			write,
 			versioned: self.versioned,
-			inner: Mutex::new(Some(inner)),
 			read_options: ro,
+			inner: Mutex::new(Some(TransactionInner {
+				tx,
+				snapshot,
+			})),
 			transaction_state: Arc::new(Default::default()),
 			disk_space_manager: self.disk_space_manager.clone(),
 			commit_coordinator: self.commit_coordinator.clone(),
@@ -475,17 +561,18 @@ impl Transaction {
 		}
 	}
 
-	/// Return the appropriate ReadOptions for a versioned read.
-	/// When the datastore is versioned and a specific version is requested,
-	/// a new ReadOptions is built with that timestamp. Otherwise the
-	/// transaction's default (latest-version) ReadOptions is returned.
-	fn read_options(
+	/// Build a fresh `ReadOptions` for a versioned point read.
+	///
+	/// The caller must pass the already-borrowed `TransactionInner` so the read uses
+	/// the transaction's captured snapshot (matching the conflict-detection
+	/// view that will be used at commit time).
+	fn versioned_read_options(
 		&self,
 		version: Option<u64>,
-		inner: &rocksdb::Transaction<'_, OptimisticTransactionDB>,
+		inner: &TransactionInner,
 	) -> ReadOptions {
 		let mut ro = ReadOptions::default();
-		ro.set_snapshot(&inner.snapshot());
+		ro.set_snapshot(&inner.snapshot);
 		ro.set_async_io(true);
 		ro.fill_cache(true);
 		if self.versioned {
@@ -493,6 +580,277 @@ impl Transaction {
 			ro.set_timestamp(ts.to_le_bytes().to_vec());
 		}
 		ro
+	}
+
+	/// Build a fresh `ReadOptions` for a scan over the given key range.
+	/// Sets the iterate bounds, the captured snapshot, async-io, caching
+	/// flags, and (when applicable) the version timestamp.
+	fn scan_read_options(
+		&self,
+		rng: &Range<Key>,
+		version: Option<u64>,
+		inner: &TransactionInner,
+	) -> ReadOptions {
+		let mut ro = ReadOptions::default();
+		ro.set_snapshot(&inner.snapshot);
+		ro.set_iterate_lower_bound(rng.start.clone());
+		ro.set_iterate_upper_bound(rng.end.clone());
+		ro.set_async_io(true);
+		ro.fill_cache(true);
+		if self.versioned {
+			let ts = version.unwrap_or(u64::MAX);
+			ro.set_timestamp(ts.to_le_bytes().to_vec());
+		}
+		ro
+	}
+
+	/// Build a fresh `ReadOptions` for a count operation.
+	/// Sets the iterate bounds, the captured snapshot, async-io, disables
+	/// caching flags, and (when applicable) the version timestamp.
+	fn count_read_options(
+		&self,
+		rng: &Range<Key>,
+		version: Option<u64>,
+		inner: &TransactionInner,
+	) -> ReadOptions {
+		let mut ro = ReadOptions::default();
+		ro.set_snapshot(&inner.snapshot);
+		ro.set_iterate_lower_bound(rng.start.clone());
+		ro.set_iterate_upper_bound(rng.end.clone());
+		ro.set_async_io(true);
+		ro.fill_cache(false);
+		if self.versioned {
+			let ts = version.unwrap_or(u64::MAX);
+			ro.set_timestamp(ts.to_le_bytes().to_vec());
+		}
+		ro
+	}
+
+	/// Whether a scan with the given limit should be offloaded to the blocking
+	/// threadpool rather than executed inline on the async executor thread.
+	///
+	/// Small bounded scans run inline to avoid the cross-thread wakeup latency
+	/// of the blocking pool. Larger scans are offloaded so they do not stall
+	/// other async tasks on the executor.
+	///
+	/// The decision is made in bytes: `ScanLimit::Bytes(b)` is compared
+	/// directly against the threshold, while `ScanLimit::Count(c)` converts
+	/// the entry count to an approximate byte size using the caller-supplied
+	/// per-entry estimate.
+	///
+	/// For `ScanLimit::BytesOrCount(b, c)`, iteration stops when *either* the
+	/// byte budget `b` or the entry cap `c` is hit. The count-based estimate
+	/// `c * bytes_per_entry` can understate worst-case I/O when real entries
+	/// are larger than the heuristic. If `b` alone exceeds the inline
+	/// threshold, we treat `b` as the authoritative upper bound so large byte
+	/// budgets are not misclassified as small inline scans when `c` is small
+	/// (e.g. scanner batches with a SQL `LIMIT`).
+	/// Pass `ESTIMATED_BYTES_PER_KEY` for key-only scans (`keys`/`keysr`) and
+	/// `ESTIMATED_BYTES_PER_KV` for key+value scans (`scan`/`scanr`), where the
+	/// estimate is combined key+value bytes per entry (not value-only).
+	///
+	/// `skip` is included in the byte estimate because the skip loop in
+	/// `consume_keys`/`consume_vals` advances the underlying iterator
+	/// entry-by-entry before any result is collected. A large skip combined
+	/// with a small limit would otherwise be classified as inline and block
+	/// the async executor for the entire skip traversal.
+	fn should_offload(limit: ScanLimit, skip: u32, bytes_per_entry: u32) -> bool {
+		// Get the allowed inline scan threshold
+		let threshold = *cnf::ROCKSDB_INLINE_SCAN_THRESHOLD;
+		// Estimate the byte cost of the skip prefix that the iterator
+		// must traverse before returning any result.
+		let skip_bytes = skip.saturating_mul(bytes_per_entry);
+		// Calculate the estimated bytes based on the configured inline limit.
+		let limit_bytes = match limit {
+			ScanLimit::Count(c) => c.saturating_mul(bytes_per_entry),
+			ScanLimit::Bytes(b) => b,
+			ScanLimit::BytesOrCount(b, c) => {
+				let count_estimate = c.saturating_mul(bytes_per_entry);
+				if b > threshold {
+					b
+				} else {
+					b.min(count_estimate)
+				}
+			}
+		};
+		// Check if the combined skip+limit estimate is greater than the threshold
+		skip_bytes.saturating_add(limit_bytes) > threshold
+	}
+
+	/// Synchronous implementation of `count` taking an already-acquired lock
+	/// guard. Always dispatched via `affinitypool::spawn_local` from `count()`;
+	/// this function is never called directly on the async executor thread.
+	///
+	/// Writeable transactions lock the transaction inner and iterate on the
+	/// inner transaction so that pending writes in this transaction are
+	/// visible to the iterator. Read-only transactions iterate directly on
+	/// the database, holding the inner lock only long enough to build the
+	/// `ReadOptions` (which copies out the raw snapshot pointer).
+	fn count_blocking(
+		&self,
+		rng: Range<Key>,
+		version: Option<u64>,
+		guard: MutexGuard<'_, Option<TransactionInner>>,
+	) -> Result<usize> {
+		// Get the inner transaction state
+		let inner =
+			guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+		// Get the ReadOptions with the snapshot and iterate bounds
+		let ro = self.count_read_options(&rng, version, inner);
+		// Initialize the result
+		let mut res: usize = 0;
+		// If the transaction is writable, we create the iterator on the
+		// transaction. This ensures that all writes in this transaction
+		// are merged with each iterator step, making the writes visible to
+		// the iterator.
+		if self.write {
+			// Create the iterator on the transaction
+			let mut iter = inner.tx.raw_iterator_opt(ro);
+			// Seek to the start key
+			iter.seek(&rng.start);
+			// Count the items
+			while iter.valid() {
+				res += 1;
+				iter.next();
+			}
+			// Catch any iterator errors
+			iter.status()?;
+		}
+		// If the transaction is readonly, we iterate directly on the
+		// database. This is faster than iterating on the transaction,
+		// as it avoids the `BaseDeltaIterator` wrapper used by the
+		// transactional iterator.
+		else {
+			// Release the inner lock before the scan: `ReadOptions` already
+			// holds the raw snapshot pointer, and the underlying rocksdb
+			// snapshot stays alive for as long as the boxed `inner.tx` (owned by this
+			// `Transaction`) is alive. Read-only transactions never take the
+			// inner out of the mutex, so the snapshot is safe to use unlocked.
+			drop(guard);
+			// Create the iterator on the database
+			let mut iter = self.db.raw_iterator_opt(ro);
+			// Seek to the start key
+			iter.seek(&rng.start);
+			// Count the items
+			while iter.valid() {
+				res += 1;
+				iter.next();
+			}
+			// Catch any iterator errors
+			iter.status()?;
+		}
+		// Return result
+		Ok(res)
+	}
+
+	/// Synchronous implementation of `keys` and `keysr` taking an already-acquired
+	/// lock guard.
+	///
+	/// Dispatches forward or backward iteration based on `dir`. Read-only
+	/// transactions release the inner lock before iterating; writeable
+	/// transactions hold the lock for the duration of the iterator so that
+	/// pending writes are visible.
+	fn keys_blocking(
+		&self,
+		rng: Range<Key>,
+		limit: ScanLimit,
+		skip: u32,
+		version: Option<u64>,
+		dir: Direction,
+		guard: MutexGuard<'_, Option<TransactionInner>>,
+	) -> Result<Vec<Key>> {
+		// Get the inner transaction state
+		let inner =
+			guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+		// Get the ReadOptions with the snapshot and iterate bounds
+		let ro = self.scan_read_options(&rng, version, inner);
+		// If the transaction is writable, we create the iterator on the
+		// transaction. This ensures that all writes in this transaction
+		// are merged with each iterator step, making the writes visible to
+		// the iterator.
+		if self.write {
+			// Create the iterator on the transaction
+			let mut iter = inner.tx.raw_iterator_opt(ro);
+			// Seek to the start (or end) key based on direction
+			match dir {
+				Direction::Forward => iter.seek(&rng.start),
+				Direction::Backward => iter.seek_for_prev(&rng.end),
+			}
+			// Consume the iterator
+			consume_keys(&mut iter, limit, skip, dir)
+		}
+		// If the transaction is readonly, we iterate directly on the
+		// database. This is faster than iterating on the transaction,
+		// as it avoids the `BaseDeltaIterator` wrapper used by the
+		// transactional iterator.
+		else {
+			// Release the inner lock before the scan
+			drop(guard);
+			// Create the iterator on the database
+			let mut iter = self.db.raw_iterator_opt(ro);
+			// Seek to the start (or end) key based on direction
+			match dir {
+				Direction::Forward => iter.seek(&rng.start),
+				Direction::Backward => iter.seek_for_prev(&rng.end),
+			}
+			// Consume the iterator
+			consume_keys(&mut iter, limit, skip, dir)
+		}
+	}
+
+	/// Synchronous implementation of `scan` and `scanr` taking an already-acquired
+	/// lock guard.
+	///
+	/// Dispatches forward or backward iteration based on `dir`. Read-only
+	/// transactions release the inner lock before iterating; writeable
+	/// transactions hold the lock for the duration of the iterator so that
+	/// pending writes are visible.
+	fn scan_blocking(
+		&self,
+		rng: Range<Key>,
+		limit: ScanLimit,
+		skip: u32,
+		version: Option<u64>,
+		dir: Direction,
+		guard: MutexGuard<'_, Option<TransactionInner>>,
+	) -> Result<Vec<(Key, Val)>> {
+		// Get the inner transaction state
+		let inner =
+			guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+		// Get the ReadOptions with the snapshot and iterate bounds
+		let ro = self.scan_read_options(&rng, version, inner);
+		// If the transaction is writable, we create the iterator on the
+		// transaction. This ensures that all writes in this transaction
+		// are merged with each iterator step, making the writes visible to
+		// the iterator.
+		if self.write {
+			// Create the iterator on the transaction
+			let mut iter = inner.tx.raw_iterator_opt(ro);
+			// Seek to the start (or end) key based on direction
+			match dir {
+				Direction::Forward => iter.seek(&rng.start),
+				Direction::Backward => iter.seek_for_prev(&rng.end),
+			}
+			// Consume the iterator
+			consume_vals(&mut iter, limit, skip, dir)
+		}
+		// If the transaction is readonly, we iterate directly on the
+		// database. This is faster than iterating on the transaction,
+		// as it avoids the `BaseDeltaIterator` wrapper used by the
+		// transactional iterator.
+		else {
+			// Release the inner lock before the scan
+			drop(guard);
+			// Create the iterator on the database
+			let mut iter = self.db.raw_iterator_opt(ro);
+			// Seek to the start (or end) key based on direction
+			match dir {
+				Direction::Forward => iter.seek(&rng.start),
+				Direction::Backward => iter.seek_for_prev(&rng.end),
+			}
+			// Consume the iterator
+			consume_vals(&mut iter, limit, skip, dir)
+		}
 	}
 }
 
@@ -526,7 +884,7 @@ impl Transactable for Transaction {
 		let inner =
 			inner.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
 		// Cancel this transaction
-		inner.rollback()?;
+		inner.tx.rollback()?;
 		// Continue
 		Ok(())
 	}
@@ -546,20 +904,29 @@ impl Transactable for Transaction {
 		if self.is_restricted(true) && self.contains_writes() {
 			return Err(Error::ReadAndDeleteOnly);
 		}
-		// Get the inner transaction
-		let inner = self
+		// Take ownership of the transaction state. The sync mutex guard is
+		// released as soon as this statement completes, so no lock is held
+		// across subsequent awaits (e.g. the commit coordinator wait below).
+		let TransactionInner {
+			tx: inner,
+			snapshot,
+		} = self
 			.inner
 			.lock()
 			.await
 			.take()
 			.ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+		// Explicitly drop the snapshot before consuming the boxed transaction.
+		// `snapshot` borrows the transaction inside `inner`, and `commit` consumes
+		// it, so the snapshot must be released first.
+		drop(snapshot);
 		// When versioned, stamp all writes with the current HLC timestamp
 		if self.versioned {
 			let ts = HlcTimeStamp::next();
 			inner.set_commit_timestamp(ts.0);
 		}
 		// Always commit the RocksDB transaction on the caller thread for parallel commits
-		inner.commit()?;
+		(*inner).commit()?;
 		// If we have a coordinator, wait for the grouped fsync
 		if let Some(coordinator) = &self.commit_coordinator {
 			coordinator.wait_for_sync().await?;
@@ -584,15 +951,15 @@ impl Transactable for Transaction {
 			return Err(Error::TransactionFinished);
 		}
 		// Lock the inner transaction
-		let inner = self.inner.lock().await;
+		let guard = self.inner.lock().await;
 		// Get the inner transaction
 		let inner =
-			inner.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+			guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
 		// Get the key
 		let res = if version.is_some() {
-			inner.get_pinned_opt(key, &self.read_options(version, inner))
+			inner.tx.get_pinned_opt(key, &self.versioned_read_options(version, inner))
 		} else {
-			inner.get_pinned_opt(key, &self.read_options)
+			inner.tx.get_pinned_opt(key, &self.read_options)
 		}?
 		.is_some();
 		// Return result
@@ -610,16 +977,16 @@ impl Transactable for Transaction {
 		if self.closed() {
 			return Err(Error::TransactionFinished);
 		}
-		// Lock the inner transaction
-		let inner = self.inner.lock().await;
+		// Lock the transaction inner
+		let guard = self.inner.lock().await;
 		// Get the inner transaction
 		let inner =
-			inner.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+			guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
 		// Get the key
 		let res = if version.is_some() {
-			inner.get_opt(key, &self.read_options(version, inner))
+			inner.tx.get_opt(key, &self.versioned_read_options(version, inner))
 		} else {
-			inner.get_opt(key, &self.read_options)
+			inner.tx.get_opt(key, &self.read_options)
 		}?;
 		// Return result
 		Ok(res)
@@ -636,16 +1003,16 @@ impl Transactable for Transaction {
 		if self.closed() {
 			return Err(Error::TransactionFinished);
 		}
-		// Lock the inner transaction
-		let inner = self.inner.lock().await;
-		// Get the inner transaction
+		// Lock the transaction inner
+		let guard = self.inner.lock().await;
+		// Get the transaction inner
 		let inner =
-			inner.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+			guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
 		// Get the keys
 		let res = if version.is_some() {
-			inner.multi_get_opt(keys, &self.read_options(version, inner))
+			inner.tx.multi_get_opt(keys, &self.versioned_read_options(version, inner))
 		} else {
-			inner.multi_get_opt(keys, &self.read_options)
+			inner.tx.multi_get_opt(keys, &self.read_options)
 		};
 		// Convert result
 		let res = res.into_iter().map(|r| r.map_err(Into::into)).collect::<Result<_>>()?;
@@ -668,13 +1035,13 @@ impl Transactable for Transaction {
 		if self.is_restricted(false) {
 			return Err(Error::ReadAndDeleteOnly);
 		}
-		// Lock the inner transaction
-		let inner = self.inner.lock().await;
-		// Get the inner transaction
+		// Lock the transaction inner
+		let guard = self.inner.lock().await;
+		// Get the transaction inner
 		let inner =
-			inner.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+			guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
 		// Set the key
-		inner.put(key, val)?;
+		inner.tx.put(key, val)?;
 		// Mark this transaction as containing a write operation
 		self.store_writes();
 		// Return result
@@ -696,14 +1063,14 @@ impl Transactable for Transaction {
 		if self.is_restricted(false) {
 			return Err(Error::ReadAndDeleteOnly);
 		}
-		// Lock the inner transaction
-		let inner = self.inner.lock().await;
-		// Get the inner transaction
+		// Lock the transaction inner
+		let guard = self.inner.lock().await;
+		// Get the transaction inner
 		let inner =
-			inner.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+			guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
 		// Set the key if empty
-		match inner.get_pinned_opt(&key, &self.read_options)? {
-			None => inner.put(key, val)?,
+		match inner.tx.get_pinned_opt(&key, &self.read_options)? {
+			None => inner.tx.put(key, val)?,
 			_ => return Err(Error::TransactionKeyAlreadyExists),
 		};
 		// Mark this transaction as containing a write operation
@@ -727,15 +1094,15 @@ impl Transactable for Transaction {
 		if self.is_restricted(false) {
 			return Err(Error::ReadAndDeleteOnly);
 		}
-		// Lock the inner transaction
-		let inner = self.inner.lock().await;
-		// Get the inner transaction
+		// Lock the transaction inner
+		let guard = self.inner.lock().await;
+		// Get the transaction inner
 		let inner =
-			inner.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+			guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
 		// Set the key if empty
-		match (inner.get_pinned_opt(&key, &self.read_options)?, chk) {
-			(Some(v), Some(w)) if v.eq(&w) => inner.put(key, val)?,
-			(None, None) => inner.put(key, val)?,
+		match (inner.tx.get_pinned_opt(&key, &self.read_options)?, chk) {
+			(Some(v), Some(w)) if v.eq(&w) => inner.tx.put(key, val)?,
+			(None, None) => inner.tx.put(key, val)?,
 			_ => return Err(Error::TransactionConditionNotMet),
 		};
 		// Mark this transaction as containing a write operation
@@ -755,13 +1122,13 @@ impl Transactable for Transaction {
 		if !self.writeable() {
 			return Err(Error::TransactionReadonly);
 		}
-		// Lock the inner transaction
-		let inner = self.inner.lock().await;
-		// Get the inner transaction
+		// Lock the transaction inner
+		let guard = self.inner.lock().await;
+		// Get the transaction inner
 		let inner =
-			inner.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+			guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
 		// Remove the key
-		inner.delete(key)?;
+		inner.tx.delete(key)?;
 		// Mark this transaction as containing a delete operation
 		self.store_deletes();
 		// Return result
@@ -779,15 +1146,15 @@ impl Transactable for Transaction {
 		if !self.writeable() {
 			return Err(Error::TransactionReadonly);
 		}
-		// Lock the inner transaction
-		let inner = self.inner.lock().await;
-		// Get the inner transaction
+		// Lock the transaction inner
+		let guard = self.inner.lock().await;
+		// Get the transaction inner
 		let inner =
-			inner.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+			guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
 		// Delete the key if valid
-		match (inner.get_pinned_opt(&key, &self.read_options)?, chk) {
-			(Some(v), Some(w)) if v.eq(&w) => inner.delete(key)?,
-			(None, None) => inner.delete(key)?,
+		match (inner.tx.get_pinned_opt(&key, &self.read_options)?, chk) {
+			(Some(v), Some(w)) if v.eq(&w) => inner.tx.delete(key)?,
+			(None, None) => inner.tx.delete(key)?,
 			_ => return Err(Error::TransactionConditionNotMet),
 		};
 		// Mark this transaction as containing a delete operation
@@ -797,6 +1164,11 @@ impl Transactable for Transaction {
 	}
 
 	/// Count the total number of keys within a range.
+	///
+	/// `count()` has no `ScanLimit` parameter, so it always iterates the
+	/// entire provided key range without an early-exit limit. It is therefore
+	/// always offloaded to the blocking threadpool to avoid stalling the
+	/// async executor during the full range scan.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(rng = rng.sprint()))]
 	async fn count(&self, rng: Range<Key>, version: Option<u64>) -> Result<usize> {
 		// Versioned queries require a versioned datastore
@@ -807,50 +1179,21 @@ impl Transactable for Transaction {
 		if self.closed() {
 			return Err(Error::TransactionFinished);
 		}
-		// Capture versioned flag for the blocking closure
-		let versioned = self.versioned;
-		// Execute on the blocking threadpool
-		let res = affinitypool::spawn_local(move || -> Result<_> {
-			// Set the key range
-			let beg = rng.start.as_slice();
-			let end = rng.end.as_slice();
-			// Load the inner transaction
-			let inner = self.inner.blocking_lock();
-			// Get the inner transaction
-			let inner =
-				inner.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-			// Set the ReadOptions with the snapshot
-			let mut ro = ReadOptions::default();
-			ro.set_snapshot(&inner.snapshot());
-			ro.set_iterate_lower_bound(beg);
-			ro.set_iterate_upper_bound(end);
-			ro.set_async_io(true);
-			ro.fill_cache(false);
-			if versioned {
-				let ts = version.unwrap_or(u64::MAX);
-				ro.set_timestamp(ts.to_le_bytes().to_vec());
-			}
-			// Create the iterator
-			let mut iter = inner.raw_iterator_opt(ro);
-			// Seek to the start key
-			iter.seek(&rng.start);
-			// Count the items
-			let mut res = 0;
-			while iter.valid() {
-				res += 1;
-				iter.next();
-			}
-			// Drop the iterator
-			drop(iter);
-			// Return result
-			Ok(res)
+		// Always offload to the blocking threadpool
+		affinitypool::spawn_local(move || {
+			let guard = self.inner.blocking_lock();
+			self.count_blocking(rng, version, guard)
 		})
-		.await?;
-		// Return result
-		Ok(res)
+		.await
 	}
 
 	/// Retrieve a range of keys.
+	///
+	/// Small bounded scans run inline on the async executor thread to avoid
+	/// the cross-thread wakeup latency of the blocking threadpool. Large
+	/// bounded scans are offloaded to avoid stalling other async tasks on the
+	/// executor. See `ROCKSDB_INLINE_SCAN_THRESHOLD`. The unbounded `count()`
+	/// path is always offloaded separately and does not use `ScanLimit`.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(rng = rng.sprint()))]
 	async fn keys(
 		&self,
@@ -867,36 +1210,17 @@ impl Transactable for Transaction {
 		if self.closed() {
 			return Err(Error::TransactionFinished);
 		}
-		// Set the key range
-		let beg = rng.start.as_slice();
-		let end = rng.end.as_slice();
-		// Lock the inner transaction
-		let inner = self.inner.lock().await;
-		// Get the inner transaction
-		let inner =
-			inner.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-		// Set the ReadOptions with the snapshot
-		let mut ro = ReadOptions::default();
-		ro.set_snapshot(&inner.snapshot());
-		ro.set_iterate_lower_bound(beg);
-		ro.set_iterate_upper_bound(end);
-		ro.set_async_io(true);
-		ro.fill_cache(true);
-		// Enable versioning if enabled
-		if self.versioned {
-			let ts = version.unwrap_or(u64::MAX);
-			ro.set_timestamp(ts.to_le_bytes().to_vec());
+		// Dispatch inline for small bounded scans, offload for large bounded
+		if Self::should_offload(limit, skip, ESTIMATED_BYTES_PER_KEY) {
+			affinitypool::spawn_local(move || {
+				let guard = self.inner.blocking_lock();
+				self.keys_blocking(rng, limit, skip, version, Direction::Forward, guard)
+			})
+			.await
+		} else {
+			let guard = self.inner.lock().await;
+			self.keys_blocking(rng, limit, skip, version, Direction::Forward, guard)
 		}
-		// Create the iterator
-		let mut iter = inner.raw_iterator_opt(ro);
-		// Seek to the start key
-		iter.seek(&rng.start);
-		// Consume the iterator
-		let res = consume_keys(&mut iter, limit, skip, Direction::Forward);
-		// Drop the iterator
-		drop(iter);
-		// Return result
-		Ok(res)
 	}
 
 	/// Retrieve a range of keys, in reverse.
@@ -916,36 +1240,17 @@ impl Transactable for Transaction {
 		if self.closed() {
 			return Err(Error::TransactionFinished);
 		}
-		// Set the key range
-		let beg = rng.start.as_slice();
-		let end = rng.end.as_slice();
-		// Lock the inner transaction
-		let inner = self.inner.lock().await;
-		// Get the inner transaction
-		let inner =
-			inner.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-		// Set the ReadOptions with the snapshot
-		let mut ro = ReadOptions::default();
-		ro.set_snapshot(&inner.snapshot());
-		ro.set_iterate_lower_bound(beg);
-		ro.set_iterate_upper_bound(end);
-		ro.set_async_io(true);
-		ro.fill_cache(true);
-		// Enable versioning if enabled
-		if self.versioned {
-			let ts = version.unwrap_or(u64::MAX);
-			ro.set_timestamp(ts.to_le_bytes().to_vec());
+		// Dispatch inline for small bounded scans, offload for large bounded
+		if Self::should_offload(limit, skip, ESTIMATED_BYTES_PER_KEY) {
+			affinitypool::spawn_local(move || {
+				let guard = self.inner.blocking_lock();
+				self.keys_blocking(rng, limit, skip, version, Direction::Backward, guard)
+			})
+			.await
+		} else {
+			let guard = self.inner.lock().await;
+			self.keys_blocking(rng, limit, skip, version, Direction::Backward, guard)
 		}
-		// Create the iterator
-		let mut iter = inner.raw_iterator_opt(ro);
-		// Seek to the start key
-		iter.seek_for_prev(&rng.end);
-		// Consume the iterator
-		let res = consume_keys(&mut iter, limit, skip, Direction::Backward);
-		// Drop the iterator
-		drop(iter);
-		// Return result
-		Ok(res)
 	}
 
 	/// Retrieve a range of key-value pairs.
@@ -965,36 +1270,17 @@ impl Transactable for Transaction {
 		if self.closed() {
 			return Err(Error::TransactionFinished);
 		}
-		// Set the key range
-		let beg = rng.start.as_slice();
-		let end = rng.end.as_slice();
-		// Lock the inner transaction
-		let inner = self.inner.lock().await;
-		// Get the inner transaction
-		let inner =
-			inner.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-		// Set the ReadOptions with the snapshot
-		let mut ro = ReadOptions::default();
-		ro.set_snapshot(&inner.snapshot());
-		ro.set_iterate_lower_bound(beg);
-		ro.set_iterate_upper_bound(end);
-		ro.set_async_io(true);
-		ro.fill_cache(true);
-		// Enable versioning if enabled
-		if self.versioned {
-			let ts = version.unwrap_or(u64::MAX);
-			ro.set_timestamp(ts.to_le_bytes().to_vec());
+		// Dispatch inline for small bounded scans, offload for large bounded
+		if Self::should_offload(limit, skip, ESTIMATED_BYTES_PER_KV) {
+			affinitypool::spawn_local(move || {
+				let guard = self.inner.blocking_lock();
+				self.scan_blocking(rng, limit, skip, version, Direction::Forward, guard)
+			})
+			.await
+		} else {
+			let guard = self.inner.lock().await;
+			self.scan_blocking(rng, limit, skip, version, Direction::Forward, guard)
 		}
-		// Create the iterator
-		let mut iter = inner.raw_iterator_opt(ro);
-		// Seek to the start key
-		iter.seek(&rng.start);
-		// Consume the iterator
-		let res = consume_vals(&mut iter, limit, skip, Direction::Forward);
-		// Drop the iterator
-		drop(iter);
-		// Return result
-		Ok(res)
 	}
 
 	/// Retrieve a range of key-value pairs, in reverse.
@@ -1014,52 +1300,33 @@ impl Transactable for Transaction {
 		if self.closed() {
 			return Err(Error::TransactionFinished);
 		}
-		// Set the key range
-		let beg = rng.start.as_slice();
-		let end = rng.end.as_slice();
-		// Lock the inner transaction
-		let inner = self.inner.lock().await;
-		// Get the inner transaction
-		let inner =
-			inner.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-		// Set the ReadOptions with the snapshot
-		let mut ro = ReadOptions::default();
-		ro.set_snapshot(&inner.snapshot());
-		ro.set_iterate_lower_bound(beg);
-		ro.set_iterate_upper_bound(end);
-		ro.set_async_io(true);
-		ro.fill_cache(true);
-		// Enable versioning if enabled
-		if self.versioned {
-			let ts = version.unwrap_or(u64::MAX);
-			ro.set_timestamp(ts.to_le_bytes().to_vec());
+		// Dispatch inline for small bounded scans, offload for large bounded
+		if Self::should_offload(limit, skip, ESTIMATED_BYTES_PER_KV) {
+			affinitypool::spawn_local(move || {
+				let guard = self.inner.blocking_lock();
+				self.scan_blocking(rng, limit, skip, version, Direction::Backward, guard)
+			})
+			.await
+		} else {
+			let guard = self.inner.lock().await;
+			self.scan_blocking(rng, limit, skip, version, Direction::Backward, guard)
 		}
-		// Create the iterator
-		let mut iter = inner.raw_iterator_opt(ro);
-		// Seek to the start key
-		iter.seek_for_prev(&rng.end);
-		// Consume the iterator
-		let res = consume_vals(&mut iter, limit, skip, Direction::Backward);
-		// Drop the iterator
-		drop(iter);
-		// Return result
-		Ok(res)
 	}
 
 	/// Set a new save point on the transaction.
 	async fn new_save_point(&self) -> Result<()> {
-		let inner = self.inner.lock().await;
-		if let Some(inner) = inner.as_ref() {
-			inner.set_savepoint();
+		let guard = self.inner.lock().await;
+		if let Some(state) = guard.as_ref() {
+			state.tx.set_savepoint();
 		}
 		Ok(())
 	}
 
 	/// Rollback to the last save point.
 	async fn rollback_to_save_point(&self) -> Result<()> {
-		let inner = self.inner.lock().await;
-		if let Some(inner) = inner.as_ref() {
-			inner.rollback_to_savepoint()?;
+		let guard = self.inner.lock().await;
+		if let Some(state) = guard.as_ref() {
+			state.tx.rollback_to_savepoint()?;
 		}
 		Ok(())
 	}
@@ -1085,26 +1352,29 @@ fn consume_keys<D: rocksdb::DBAccess>(
 	limit: ScanLimit,
 	skip: u32,
 	dir: Direction,
-) -> Vec<Key> {
+) -> Result<Vec<Key>> {
 	// Skip entries efficiently without allocation
 	for _ in 0..skip {
-		if iter.item().is_some() {
+		if iter.valid() {
 			match dir {
 				Direction::Forward => iter.next(),
 				Direction::Backward => iter.prev(),
 			}
 		} else {
-			return Vec::new();
+			// Catch any iterator errors
+			iter.status()?;
+			// Return an empty result
+			return Ok(Vec::new());
 		}
 	}
-	match limit {
+	let res = match limit {
 		ScanLimit::Count(c) => {
 			// Create the result set
 			let mut res = Vec::with_capacity(c.min(4096) as usize);
 			// Check that we don't exceed the count limit
 			while res.len() < c as usize {
-				// Check the key and value
-				if let Some((k, _)) = iter.item() {
+				// Check the key
+				if let Some(k) = iter.key() {
 					res.push(k.to_vec());
 					match dir {
 						Direction::Forward => iter.next(),
@@ -1119,13 +1389,13 @@ fn consume_keys<D: rocksdb::DBAccess>(
 		}
 		ScanLimit::Bytes(b) => {
 			// Create the result set
-			let mut res = Vec::with_capacity((b as usize / 128).min(4096)); // Assuming 128 bytes per entry
+			let mut res = Vec::with_capacity((b / ESTIMATED_BYTES_PER_KEY).min(4096) as usize);
 			// Count the bytes fetched
 			let mut bytes_fetched = 0usize;
 			// Check that we don't exceed the byte limit
 			while bytes_fetched < b as usize {
-				// Check the key and value
-				if let Some((k, _)) = iter.item() {
+				// Check the key
+				if let Some(k) = iter.key() {
 					bytes_fetched += k.len();
 					res.push(k.to_vec());
 					match dir {
@@ -1146,8 +1416,8 @@ fn consume_keys<D: rocksdb::DBAccess>(
 			let mut bytes_fetched = 0usize;
 			// Check that we don't exceed the count limit AND the byte limit
 			while res.len() < c as usize && bytes_fetched < b as usize {
-				// Check the key and value
-				if let Some((k, _)) = iter.item() {
+				// Check the key
+				if let Some(k) = iter.key() {
 					bytes_fetched += k.len();
 					res.push(k.to_vec());
 					match dir {
@@ -1161,7 +1431,11 @@ fn consume_keys<D: rocksdb::DBAccess>(
 			// Return the result
 			res
 		}
-	}
+	};
+	// Catch any iterator errors
+	iter.status()?;
+	// Return the result
+	Ok(res)
 }
 
 // Consume and iterate over keys and values
@@ -1170,19 +1444,22 @@ fn consume_vals<D: rocksdb::DBAccess>(
 	limit: ScanLimit,
 	skip: u32,
 	dir: Direction,
-) -> Vec<(Key, Val)> {
+) -> Result<Vec<(Key, Val)>> {
 	// Skip entries efficiently without allocation
 	for _ in 0..skip {
-		if iter.item().is_some() {
+		if iter.valid() {
 			match dir {
 				Direction::Forward => iter.next(),
 				Direction::Backward => iter.prev(),
 			}
 		} else {
-			return Vec::new();
+			// Catch any iterator errors
+			iter.status()?;
+			// Return an empty result
+			return Ok(Vec::new());
 		}
 	}
-	match limit {
+	let res = match limit {
 		ScanLimit::Count(c) => {
 			// Create the result set
 			let mut res = Vec::with_capacity(c.min(4096) as usize);
@@ -1204,7 +1481,7 @@ fn consume_vals<D: rocksdb::DBAccess>(
 		}
 		ScanLimit::Bytes(b) => {
 			// Create the result set
-			let mut res = Vec::with_capacity((b as usize / 512).min(4096)); // Assuming 512 bytes per entry
+			let mut res = Vec::with_capacity((b / ESTIMATED_BYTES_PER_KV).min(4096) as usize);
 			// Count the bytes fetched
 			let mut bytes_fetched = 0usize;
 			// Check that we don't exceed the byte limit
@@ -1246,5 +1523,9 @@ fn consume_vals<D: rocksdb::DBAccess>(
 			// Return the result
 			res
 		}
-	}
+	};
+	// Catch any iterator errors
+	iter.status()?;
+	// Return the result
+	Ok(res)
 }

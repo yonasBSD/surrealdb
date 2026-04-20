@@ -17,10 +17,10 @@ use surrealkv::{
 };
 use tokio::sync::RwLock;
 
-use super::Direction;
 use super::api::ScanLimit;
 use super::config::{SurrealKvConfig, SyncMode};
 use super::err::{Error, Result};
+use super::{Direction, ESTIMATED_BYTES_PER_KEY, ESTIMATED_BYTES_PER_KV};
 use crate::key::debug::Sprintable;
 use crate::kvs::api::Transactable;
 use crate::kvs::timestamp::{
@@ -1008,7 +1008,7 @@ fn consume_keys(cursor: &mut impl Cursor, limit: ScanLimit, skip: u32) -> Result
 		}
 		ScanLimit::Bytes(b) => {
 			// Create the result set
-			let mut res = Vec::with_capacity((b as usize / 128).min(4096)); // Assuming 128 bytes per entry
+			let mut res = Vec::with_capacity((b / ESTIMATED_BYTES_PER_KEY).min(4096) as usize);
 			// Count the bytes fetched
 			let mut bytes_fetched = 0usize;
 			// Check that we don't exceed the byte limit
@@ -1071,7 +1071,7 @@ fn consume_vals(cursor: &mut impl Cursor, limit: ScanLimit, skip: u32) -> Result
 		}
 		ScanLimit::Bytes(b) => {
 			// Create the result set
-			let mut res = Vec::with_capacity((b as usize / 512).min(4096)); // Assuming 512 bytes per entry
+			let mut res = Vec::with_capacity((b / ESTIMATED_BYTES_PER_KV).min(4096) as usize);
 			// Count the bytes fetched
 			let mut bytes_fetched = 0usize;
 			// Check that we don't exceed the byte limit

@@ -8,13 +8,10 @@ use tokio::sync::RwLock;
 
 use super::api::ScanLimit;
 use super::err::{Error, Result};
-use super::util;
+use super::{ESTIMATED_BYTES_PER_KEY, ESTIMATED_BYTES_PER_KV, util};
 use crate::key::debug::Sprintable;
 use crate::kvs::api::Transactable;
 use crate::kvs::{Key, Val};
-
-const ESTIMATED_BYTES_PER_KEY: u32 = 128;
-const ESTIMATED_BYTES_PER_VAL: u32 = 512;
 
 pub struct Datastore {
 	db: Db,
@@ -345,7 +342,7 @@ impl Transactable for Transaction {
 		// Extract the limit count
 		let count = match limit {
 			ScanLimit::Count(c) => c,
-			ScanLimit::Bytes(b) => (b / ESTIMATED_BYTES_PER_VAL).max(1),
+			ScanLimit::Bytes(b) => (b / ESTIMATED_BYTES_PER_KV).max(1),
 			ScanLimit::BytesOrCount(_, c) => c,
 		};
 		// Scan the keys
@@ -392,7 +389,7 @@ impl Transactable for Transaction {
 		// Extract the limit count
 		let count = match limit {
 			ScanLimit::Count(c) => c,
-			ScanLimit::Bytes(b) => (b / ESTIMATED_BYTES_PER_VAL).max(1),
+			ScanLimit::Bytes(b) => (b / ESTIMATED_BYTES_PER_KV).max(1),
 			ScanLimit::BytesOrCount(_, c) => c,
 		};
 		// Scan the keys in reverse
@@ -504,7 +501,7 @@ fn consume_vals<I: Iterator<Item = (Key, Val)>>(iter: &mut I, limit: ScanLimit) 
 		}
 		ScanLimit::Bytes(b) => {
 			// Create the result set
-			let mut res = Vec::with_capacity((b / ESTIMATED_BYTES_PER_VAL).min(4096) as usize);
+			let mut res = Vec::with_capacity((b / ESTIMATED_BYTES_PER_KV).min(4096) as usize);
 			// Count the bytes fetched
 			let mut bytes_fetched = 0usize;
 			// Check that we don't exceed the byte limit
