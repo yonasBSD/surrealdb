@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use tracing::instrument;
 
-use crate::exec::field_path::{FieldPath, FieldPathPart};
+use crate::exec::field_path::FieldPath;
 use crate::exec::{
 	AccessMode, CardinalityHint, CombineAccessModes, ContextLevel, EvalContext, ExecOperator,
 	ExecutionContext, FlowResult, OperatorMetrics, PhysicalExpr, ValueBatch, ValueBatchStream,
@@ -29,17 +29,17 @@ use crate::val::{Object, Value};
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-/// Parse an output name string into a [`FieldPath`].
+/// Wrap an output name string into a single-part [`FieldPath`].
 ///
-/// Simple dot-separated names (e.g. `"tags.id"`) are split into nested
-/// [`FieldPathPart::Field`] components so that the projection can build nested
-/// objects.  Names containing `[`, `(`, or spaces are kept as a single field.
+/// The name is treated as an opaque flat key. Callers that need a nested
+/// output path must supply a structurally multi-part [`FieldPath`] directly
+/// via [`FieldSelection::from_field_path`] or
+/// [`FieldSelection::with_alias_path`] — typically by calling
+/// `idiom_to_field_path` on the parsed idiom, which preserves the
+/// distinction between `AS foo.bar` (nested) and `` AS `foo.bar` ``
+/// (flat, single Part::Field whose identifier contains a dot).
 fn parse_output_path(name: &str) -> FieldPath {
-	if name.contains('.') && !name.contains(['[', '(', ' ']) {
-		FieldPath(name.split('.').map(|s| FieldPathPart::Field(s.to_string())).collect())
-	} else {
-		FieldPath::field(name.to_string())
-	}
+	FieldPath::field(name.to_string())
 }
 
 /// Set a value at the given [`FieldPath`] on an [`Object`].
@@ -74,8 +74,15 @@ pub struct FieldSelection {
 
 impl FieldSelection {
 	/// Create a new field selection from an output name string.
-	/// If the name contains dots and represents a simple field path (no special characters),
-	/// it will be split into path components for nested object construction.
+	///
+	/// The name is treated as an opaque flat key (a single-part
+	/// [`FieldPath`]). Callers that need a nested output path must supply
+	/// a structurally multi-part [`FieldPath`] directly via
+	/// [`FieldSelection::from_field_path`] or
+	/// [`FieldSelection::with_alias_path`] — typically by calling
+	/// `idiom_to_field_path` on the parsed idiom, which preserves the
+	/// distinction between `AS foo.bar` (nested) and `` AS `foo.bar` ``
+	/// (flat).
 	pub fn new(output_name: String, expr: Arc<dyn PhysicalExpr>) -> Self {
 		Self {
 			output_path: parse_output_path(&output_name),
@@ -84,12 +91,17 @@ impl FieldSelection {
 		}
 	}
 
-	/// Create a new field selection with an explicit alias.
-	/// Used when the user specified an alias in the query (e.g., `SELECT expr AS alias`).
-	/// For projection functions, the alias takes precedence over dynamic field names.
-	pub fn with_alias(output_name: String, expr: Arc<dyn PhysicalExpr>) -> Self {
+	/// Create a new field selection with an explicit alias whose output path
+	/// was derived directly from the parsed alias idiom.
+	///
+	/// Used when the user specified an alias in the query
+	/// (e.g., `SELECT expr AS alias`). Preserves the single-part vs
+	/// multi-part distinction (`` AS `foo.bar` `` vs `AS foo.bar`) without
+	/// round-tripping through a string. For projection functions, the
+	/// alias takes precedence over dynamic field names.
+	pub fn with_alias_path(output_path: FieldPath, expr: Arc<dyn PhysicalExpr>) -> Self {
 		Self {
-			output_path: parse_output_path(&output_name),
+			output_path,
 			expr,
 			has_explicit_alias: true,
 		}

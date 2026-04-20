@@ -63,7 +63,7 @@ pub struct Scanner<'a, I> {
 	enable_prefetch: bool,
 	/// The initial batch size (default: NORMAL_FETCH_SIZE, typically 500 items)
 	initial_batch_size: ScanLimit,
-	/// The subsequent batch size (default: 16 MiB bytes)
+	/// The subsequent batch size (default: 4 MiB bytes)
 	subsequent_batch_size: ScanLimit,
 }
 

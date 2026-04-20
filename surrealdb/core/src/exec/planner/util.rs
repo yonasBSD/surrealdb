@@ -1458,11 +1458,25 @@ pub(super) fn idiom_to_field_name(idiom: &crate::expr::idiom::Idiom) -> String {
 }
 
 /// Extract a field path from an idiom for nested output construction.
+///
+/// The resulting [`FieldPath`] is built by walking the idiom's [`Part`]s
+/// directly, so the structural distinction between a multi-part idiom
+/// (`foo.bar` → nested path `[foo, bar]`) and a single-part idiom whose
+/// identifier happens to contain a dot (`` `foo.bar` `` → flat key
+/// `"foo.bar"`) is preserved all the way through projection.
+///
+/// Execution-only parts (array filters, indices, method calls, etc.) are
+/// dropped via [`Idiom::simplify`], matching the historical behaviour of
+/// only considering "simple" paths for nested output: for example,
+/// `tags[WHERE type = 'library'][0].value` still nests under
+/// `tags.value`.
 pub(super) fn idiom_to_field_path(idiom: &crate::expr::idiom::Idiom) -> FieldPath {
 	use surrealdb_types::ToSql;
 
 	use crate::expr::part::Part;
 
+	// Graph traversals with an alias collapse to a single flat field name
+	// (the alias), matching how lookups materialise into the result.
 	for part in idiom.0.iter() {
 		if let Part::Lookup(lookup) = part
 			&& lookup.alias.is_some()
@@ -1471,38 +1485,25 @@ pub(super) fn idiom_to_field_path(idiom: &crate::expr::idiom::Idiom) -> FieldPat
 		}
 	}
 
-	let has_lookups = idiom.0.iter().any(|p| matches!(p, Part::Lookup(_)));
-
-	if !has_lookups {
-		let name = idiom_to_field_name(idiom);
-		// FIXME: This should be implemented in a way that requries first formating to a string.
-		// It should instead manually figure out the parts of the field.
-		// This will probably break if a field name has a dot in the name like in valid path
-		// "foo.`a.b`"
-		if name.contains('.') && !name.contains(['[', '(', ' ']) {
-			return FieldPath(
-				name.split('.').map(|s| FieldPathPart::Field(s.to_string())).collect(),
-			);
-		}
-		return FieldPath::field(name);
-	}
-
-	let mut parts = Vec::new();
-	for part in idiom.0.iter() {
+	// Walk the simplified idiom parts directly. Do NOT stringify and split
+	// on '.', because that conflates `AS foo.bar` (multi-part idiom, nested
+	// output) with `` AS `foo.bar` `` (single Part::Field whose identifier
+	// contains a dot, flat output key).
+	let simplified = idiom.simplify();
+	let mut parts = Vec::with_capacity(simplified.0.len());
+	for part in simplified.0.iter() {
 		match part {
-			Part::Lookup(lookup) => {
-				let lookup_key = lookup.to_sql();
-				parts.push(FieldPathPart::Lookup(lookup_key));
-			}
-			Part::Field(name) => {
-				parts.push(FieldPathPart::Field(name.clone()));
-			}
-			_ => {}
+			Part::Field(name) => parts.push(FieldPathPart::Field(name.clone())),
+			Part::Lookup(lookup) => parts.push(FieldPathPart::Lookup(lookup.to_sql())),
+			// Unsupported part kinds (e.g. `Part::Start` for parameter
+			// starts) fall back to a single flat field derived from the
+			// idiom's field name, matching the previous behaviour.
+			_ => return FieldPath::field(idiom_to_field_name(idiom)),
 		}
 	}
 
 	if parts.is_empty() {
-		return FieldPath::field(idiom.to_sql());
+		return FieldPath::field(idiom_to_field_name(idiom));
 	}
 
 	FieldPath(parts)

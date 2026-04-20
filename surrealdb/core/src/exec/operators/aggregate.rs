@@ -84,8 +84,13 @@ pub struct AggregateField {
 
 impl AggregateField {
 	/// Create a new AggregateField from an output name string.
-	/// If the name contains dots and represents a simple field path (no special characters),
-	/// it will be split into path components for nested object construction.
+	///
+	/// The name is treated as an opaque flat key. Callers that need a
+	/// nested output path (e.g. for `AS foo.bar`) must supply the path
+	/// components directly via [`AggregateField::with_output_path`] —
+	/// typically by walking the parsed alias idiom's [`crate::expr::part::Part`]s
+	/// so that `AS foo.bar` nests as `[foo, bar]` while
+	/// `` AS `foo.bar` `` stays a single flat key `"foo.bar"`.
 	pub fn new(
 		name: String,
 		is_group_key: bool,
@@ -93,11 +98,29 @@ impl AggregateField {
 		aggregate_expr_info: Option<AggregateExprInfo>,
 		fallback_expr: Option<Arc<dyn PhysicalExpr>>,
 	) -> Self {
-		let output_path = if name.contains('.') && !name.contains(['[', '(', ' ']) {
-			name.split('.').map(|s| s.to_string()).collect()
-		} else {
-			vec![name]
-		};
+		Self::with_output_path(
+			vec![name],
+			is_group_key,
+			group_key_index,
+			aggregate_expr_info,
+			fallback_expr,
+		)
+	}
+
+	/// Create a new AggregateField from a pre-built nested output path.
+	///
+	/// Used when the output path was derived structurally from the parsed
+	/// alias idiom, preserving the distinction between multi-part aliases
+	/// (`AS foo.bar` → `["foo", "bar"]`) and single-part aliases whose
+	/// identifier happens to contain a dot (`` AS `foo.bar` `` →
+	/// `["foo.bar"]`).
+	pub fn with_output_path(
+		output_path: Vec<String>,
+		is_group_key: bool,
+		group_key_index: Option<usize>,
+		aggregate_expr_info: Option<AggregateExprInfo>,
+		fallback_expr: Option<Arc<dyn PhysicalExpr>>,
+	) -> Self {
 		Self {
 			output_path,
 			is_group_key,

@@ -413,9 +413,14 @@ impl<'ctx> Planner<'ctx> {
 				for field in field_list {
 					if let Field::Single(selector) = field {
 						let field_selection = if let Some(alias) = &selector.alias {
-							let output_name = idiom_to_field_name(alias);
+							// Build the output path directly from the alias
+							// idiom so `AS foo.bar` produces a nested
+							// `[foo, bar]` path, while `` AS `foo.bar` ``
+							// (a single Part::Field containing a dot) stays
+							// a flat key `"foo.bar"`.
+							let output_path = idiom_to_field_path(alias);
 							let expr = self.physical_expr(selector.expr).await?;
-							FieldSelection::with_alias(output_name, expr)
+							FieldSelection::with_alias_path(output_path, expr)
 						} else {
 							let output_name_or_path = match &selector.expr {
 								Expr::Idiom(idiom) => Ok(idiom_to_field_path(idiom)),
@@ -550,14 +555,19 @@ impl<'ctx> Planner<'ctx> {
 							if let Some(alias) = &selector.alias {
 								let output_name = idiom_to_field_name(alias);
 
-								// Dotted aliases (e.g. `AS status.events`) require
-								// nested object construction, which SelectProject
-								// doesn't support. Fall back to the full Project
-								// operator which handles this via
-								// parse_output_path + set_field_on_object.
-								if output_name.contains('.')
-									&& !output_name.contains(['[', '(', ' '])
-								{
+								// Multi-part aliases (e.g. `AS status.events`)
+								// require nested object construction, which
+								// SelectProject doesn't support. Fall back to
+								// the full Project operator, which builds
+								// the output path via `idiom_to_field_path`
+								// and `set_field_on_object`.
+								//
+								// Single-part aliases whose identifier
+								// contains a dot (e.g. `` `foo.bar` ``) stay
+								// on the fast path — SelectProject renames
+								// them into a flat key, preserving the
+								// backtick-quoted literal identifier.
+								if alias.0.len() > 1 {
 									needs_fallback = true;
 									break;
 								}

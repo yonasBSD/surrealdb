@@ -11,8 +11,65 @@ use crate::exec::operators::{
 	AggregateExprInfo, AggregateField, ExtractedAggregate, aggregate_field_name,
 };
 use crate::expr::field::{Field, Fields};
+use crate::expr::part::Part;
 use crate::expr::visit::{MutVisitor, VisitMut};
 use crate::expr::{Expr, Function, FunctionCall, Idiom, Literal};
+
+/// Build a nested output path from an idiom by walking its [`Part`]s
+/// directly so a single [`Part::Field`] whose identifier contains a dot
+/// (e.g. `` AS `foo.bar` ``) stays a flat `["foo.bar"]` key rather than
+/// being split on `.`.
+///
+/// Mirrors the behaviour of `idiom_to_field_path` in the projection
+/// planner so both pipelines agree on output field names:
+///
+/// - Graph-traversal aliases (`` ->friends->person AS buddy ``) are detected before simplification
+///   and collapse to the alias identifier.
+/// - Execution-only parts (array filters, indices, method calls, etc.) are dropped via
+///   [`Idiom::simplify`].
+/// - Simplified paths that still contain non-[`Part::Field`] components fall back to the simplified
+///   SQL form so the streaming path produces the same flat key the compute-only path would.
+fn alias_output_path(idiom: &Idiom) -> Vec<String> {
+	use surrealdb_types::ToSql;
+
+	// Graph traversals with an inline alias collapse to a single flat
+	// field name (the alias identifier), matching `idiom_to_field_name`.
+	// Delegate to `idiom_to_field_name` rather than recursing into
+	// `alias_output_path`, because a multi-part inline alias (e.g.
+	// `->x AS foo.bar` where the alias is parsed as `[Field(foo),
+	// Field(bar)]`) must flatten to a single `"foo.bar"` key to match
+	// `idiom_to_field_path`, not nest into `["foo", "bar"]`.
+	for part in idiom.0.iter() {
+		if let Part::Lookup(lookup) = part
+			&& lookup.alias.is_some()
+		{
+			return vec![idiom_to_field_name(idiom)];
+		}
+	}
+
+	let simplified = idiom.simplify();
+	let mut parts = Vec::with_capacity(simplified.0.len());
+	for part in simplified.0.iter() {
+		match part {
+			Part::Field(name) => parts.push(name.clone()),
+			// Unaliased graph traversals become their own output key (e.g.
+			// `->knows` or `<-foo<-bar`), matching `idiom_to_field_path`'s
+			// `Part::Lookup` arm. Without this, `->knows.name` would
+			// collapse to the flat `"->knows.name"` key here while the
+			// projection planner would nest into `{ "->knows": { name: _ } }`.
+			Part::Lookup(lookup) => parts.push(lookup.to_sql()),
+			// Other unsupported parts (e.g. `Part::Start` for parameter
+			// starts) fall back to a single flat key derived from the
+			// simplified SQL form, matching `idiom_to_field_path`'s
+			// fallback arm.
+			_ => return vec![simplified.to_sql()],
+		}
+	}
+	if parts.is_empty() {
+		return vec![simplified.to_sql()];
+	}
+	parts
+}
 
 // ============================================================================
 // impl Planner — Aggregation
@@ -99,10 +156,20 @@ impl<'ctx> Planner<'ctx> {
 							});
 						}
 						Field::Single(selector) => {
-							let output_name = if let Some(alias) = &selector.alias {
-								idiom_to_field_name(alias)
+							// For an explicit alias, walk the idiom parts
+							// so `AS foo.bar` nests as `[foo, bar]` while
+							// `` AS `foo.bar` `` stays a flat single key.
+							// For an unaliased idiom expression (e.g.
+							// `SELECT address.city ...`), walk the source
+							// idiom's parts to preserve the same nesting
+							// structure. Other unaliased expressions
+							// derive a flat name.
+							let output_path = if let Some(alias) = &selector.alias {
+								alias_output_path(alias)
+							} else if let Expr::Idiom(idiom) = &selector.expr {
+								alias_output_path(idiom)
 							} else {
-								derive_field_name(&selector.expr)
+								vec![derive_field_name(&selector.expr)]
 							};
 
 							let group_key_index = find_group_key_index(
@@ -118,8 +185,8 @@ impl<'ctx> Planner<'ctx> {
 								self.extract_aggregate_info(selector.expr.clone()).await?
 							};
 
-							aggregates.push(AggregateField::new(
-								output_name,
+							aggregates.push(AggregateField::with_output_path(
+								output_path,
 								is_group_key,
 								group_key_index,
 								aggregate_expr_info,
