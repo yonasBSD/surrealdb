@@ -161,7 +161,7 @@ impl<'source, 'ast> Parser<'source, 'ast> {
 					match c {
 						c @ b'0'..=b'9' => char += (c - b'0') as u32,
 						c @ b'a'..=b'f' => char += (c - b'a' + 10) as u32,
-						c @ b'A'..=b'F' => char += (c - b'a' + 10) as u32,
+						c @ b'A'..=b'F' => char += (c - b'A' + 10) as u32,
 						// Lexer already verified that there are only hex digits in the escape
 						// code.
 						_ => unreachable!(),
@@ -184,11 +184,11 @@ impl<'source, 'ast> Parser<'source, 'ast> {
 						x @ b'0'..=b'9' => {
 							char += (x - b'0') as u32;
 						}
-						x @ b'A'..=b'F' => {
-							char += (x - b'A' + 10) as u32;
-						}
 						x @ b'a'..=b'f' => {
 							char += (x - b'a' + 10) as u32;
+						}
+						x @ b'A'..=b'F' => {
+							char += (x - b'A' + 10) as u32;
 						}
 						// Lexer already verified that there are only hex digits in the escape
 						// code.
@@ -319,58 +319,42 @@ impl<'source, 'ast> Parser<'source, 'ast> {
 					offset_idx += const { '⟩'.len_utf8() } as u32;
 				}
 				EscapeTokenKind::EscUnicodeFixed => {
-					let mut char = 0u32;
+					let mut accum = 0u32;
 					let slice = lexer.slice();
 					let slice = &&slice.as_bytes()["\\u".len()..];
 					for i in 0..4 {
+						accum <<= 4;
 						match slice[i] {
-							c @ b'0'..=b'9' => {
-								char *= 10;
-								char += (c - b'0') as u32
-							}
-							c @ b'a'..=b'f' => {
-								char *= 10;
-								char += (c - b'a' + 10) as u32
-							}
-							c @ b'A'..=b'F' => {
-								char *= 10;
-								char += (c - b'a' + 10) as u32
-							}
+							c @ b'0'..=b'9' => accum += (c - b'0') as u32,
+							c @ b'a'..=b'f' => accum += (c - b'a' + 10) as u32,
+							c @ b'A'..=b'F' => accum += (c - b'A' + 10) as u32,
 							// Lexer already verified that there are only hex digits in the escape
 							// code.
 							_ => unreachable!(),
 						}
 					}
 
-					offset_idx += char::from_u32(char)
+					offset_idx += char::from_u32(accum)
 						.expect("escape string should be valid")
 						.len_utf8() as u32;
 				}
 				EscapeTokenKind::EscUnicodeBracket => {
-					let mut char = 0u32;
+					let mut accum = 0u32;
 					let slice = lexer.slice().as_bytes();
 					let slice = &slice["\\u{".len()..(slice.len() - 1)];
 					for c in slice {
+						accum <<= 4;
 						match c {
-							b'0'..=b'9' => {
-								char *= 10;
-								char += (c - b'0') as u32
-							}
-							b'a'..=b'f' => {
-								char *= 10;
-								char += (c - b'a' + 10) as u32
-							}
-							b'A'..=b'F' => {
-								char *= 10;
-								char += (c - b'a' + 10) as u32
-							}
+							b'0'..=b'9' => accum += (c - b'0') as u32,
+							b'a'..=b'f' => accum += (c - b'a' + 10) as u32,
+							b'A'..=b'F' => accum += (c - b'A' + 10) as u32,
 							// Lexer already verified that there are only hex digits in the escape
 							// code.
 							_ => unreachable!(),
 						}
 					}
 
-					offset_idx += char::from_u32(char)
+					offset_idx += char::from_u32(accum)
 						.expect("escape string should be valid")
 						.len_utf8() as u32;
 				}

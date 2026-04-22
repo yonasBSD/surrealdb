@@ -11,7 +11,7 @@ fn whitespace_callback(lexer: &mut Lexer<BaseTokenKind>) {
 #[derive(Logos, Clone, Copy, PartialEq, Eq, Debug)]
 #[logos(extras = Joined)]
 #[logos(error(LexError, LexError::from_lexer))]
-#[logos(subpattern duration_part = r"[0-9]+(y|w|d|h|m|s|ms|us|µs|ns)")]
+#[logos(subpattern duration_part = r"[0-9]+(y|w|d|h|m(s)?|s|us|µs|ns)")]
 #[logos(subpattern backtick_ident = r"`([^`\\]|\\.)*`")]
 #[logos(subpattern bracket_ident = r"⟨([^⟩\\]|\\.)*⟩")]
 #[logos(subpattern whitespace = r"[ \t\n\r\u{0085}\u{00A0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200A}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}]+")]
@@ -192,12 +192,18 @@ pub enum BaseTokenKind {
 	NegInfinity,
 	#[regex(r"[0-9][0-9_]*f")]
 	#[regex(r"[0-9][0-9_]*(\.[0-9][0-9_]*)?([eE][-+]?[0-9][0-9_]*)?(f)?")]
+	// Don't allow a float postfix to be immediatly followed by an identifier
+	#[regex(r"[0-9][0-9_]*(\.[0-9][0-9_]*)?([eE][-+]?[0-9][0-9_]*)?f[_\p{XID_START}]",callback = |_| None)]
 	Float,
 	#[regex(r"[0-9][0-9_]*(\.[0-9][0-9_]*)?([eE][-+]?[0-9][0-9_]*)?dec")]
+	// Don't allow a decimal postfix to be immediatly followed by an identifier
+	#[regex(r"[0-9][0-9_]*(\.[0-9][0-9_]*)?([eE][-+]?[0-9][0-9_]*)?dec[_\p{XID_START}]",callback = |_| None)]
 	Decimal,
 	#[regex(r"[0-9][0-9_]*", priority = 3)]
 	Int,
-	#[regex(r"(?&duration_part)+")]
+	#[regex(r"(?&duration_part)+", priority = 5)]
+	// Don't allow a duration postfix to be immediatly followed by an identifier
+	#[regex(r"(?&duration_part)+[_\p{XID_START}]", callback = |_| None,priority = 4)]
 	Duration,
 
 	// Algorithms

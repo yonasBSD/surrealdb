@@ -66,6 +66,9 @@ fn text_test() {
 				generate_warnings: true,
 				feature_bearer_access: true,
 				feature_surrealism: true,
+				quirk_redefine: false,
+				quirk_block_first_no_semi: false,
+				quirk_delete_permission_field: false,
 			},
 		);
 
@@ -120,23 +123,7 @@ fn text_test() {
 const IGNORE_TESTS: &[&str] = &[
 	"language/control_flow/transaction/cancel_behaviour.surql",
 	"language/control_flow/transaction/commit_behaviour.surql",
-	"language/statements/define/field/permissions_full_2.0.surql",
-	"language/statements/remove/config/api.surql",
-	"language/statements/remove/config/default.surql",
-	"language/statements/remove/config/graphql.surql",
-	"language/statements/remove/config/not_exists.surql",
-	"language/statements/select/fetch/objects.surql",
-	"language/statements/alter/alter_param.surql",
-	"language/statements/alter/alter_user.surql",
-	"language/statements/alter/alter_function.surql",
-	"language/statements/alter/alter_event.surql",
-	"language/statements/alter/alter_config.surql",
-	"language/statements/alter/alter_bucket.surql",
-	"language/statements/alter/alter_api.surql",
-	"language/statements/alter/alter_analyzer.surql",
-	"language/statements/alter/alter_access.surql",
 	"language/graph/edge_clauses.surql",
-	"reproductions/alter_auth_limit_escalation.surql",
 	"reproductions/7169_from_only_in_graph_lookup.surql",
 ];
 
@@ -170,6 +157,9 @@ fn all_language_tests() {
 				generate_warnings: true,
 				feature_bearer_access: true,
 				feature_surrealism: true,
+				quirk_redefine: true,
+				quirk_block_first_no_semi: true,
+				quirk_delete_permission_field: true,
 			},
 		);
 
