@@ -57,66 +57,51 @@ pub trait RpcProtocol {
 	// ------------------------------
 
 	/// A pointer to all active sessions
-	fn session_map(&self) -> &HashMap<Option<Uuid>, Arc<RwLock<Session>>>;
+	fn session_map(&self) -> &HashMap<Uuid, Arc<RwLock<Session>>>;
 
 	/// Registers a new session with the given ID
-	async fn attach(&self, session_id: Option<Uuid>) -> Result<DbResult, surrealdb_types::Error> {
-		let mut session = Session::default().with_rt(Self::LQ_SUPPORT);
-		session.id = session_id;
-		match session_id {
-			Some(id) => {
-				if self.session_map().contains_key(&Some(id)) {
-					return Err(session_exists(id));
-				}
-				self.session_map().insert(Some(id), Arc::new(RwLock::new(session)));
-				Ok(DbResult::Other(PublicValue::None))
-			}
-			None => Err(invalid_params("Expected a session ID")),
+	async fn attach(&self, session_id: Uuid) -> Result<DbResult, surrealdb_types::Error> {
+		if self.session_map().contains_key(&session_id) {
+			return Err(session_exists(session_id));
 		}
+		let mut session = Session::default().with_rt(Self::LQ_SUPPORT);
+		session.id = Some(session_id);
+		self.session_map().insert(session_id, Arc::new(RwLock::new(session)));
+		Ok(DbResult::Other(PublicValue::None))
 	}
 
 	/// Detaches a session from the given ID
-	async fn detach(&self, session_id: Option<Uuid>) -> Result<DbResult, surrealdb_types::Error> {
-		match session_id {
-			Some(id) => {
-				self.del_session(&id).await;
-				Ok(DbResult::Other(PublicValue::None))
-			}
-			None => Err(invalid_params("Expected a session ID")),
-		}
+	async fn detach(&self, session_id: Uuid) -> Result<DbResult, surrealdb_types::Error> {
+		self.del_session(&session_id).await;
+		Ok(DbResult::Other(PublicValue::None))
 	}
 
 	/// The current session for this RPC context
-	fn get_session(
-		&self,
-		id: &Option<Uuid>,
-	) -> Result<Arc<RwLock<Session>>, surrealdb_types::Error> {
+	fn get_session(&self, id: &Uuid) -> Result<Arc<RwLock<Session>>, surrealdb_types::Error> {
 		match self.session_map().get(id) {
 			Some(session) => Ok(session),
 			None => Err(session_not_found(*id)),
 		}
 	}
 
-	/// Mutable access to the current session for this RPC context
-	fn set_session(&self, id: Option<Uuid>, session: Arc<RwLock<Session>>) {
+	/// Stores a session for the given ID
+	fn set_session(&self, id: Uuid, session: Arc<RwLock<Session>>) {
 		self.session_map().insert(id, session);
 	}
 
 	/// Deletes a session
 	async fn del_session(&self, id: &Uuid) {
-		self.session_map().remove(&Some(*id));
-		// Cleanup live queries
-		self.cleanup_lqs(Some(id)).await;
+		self.session_map().remove(id);
+		self.cleanup_lqs(id).await;
 	}
 
-	/// Lists all non-default sessions
+	/// Lists all sessions
 	async fn sessions(&self) -> Result<DbResult, surrealdb_types::Error> {
 		let array = self
 			.session_map()
 			.to_vec()
 			.into_iter()
-			.filter_map(|(key, _)| key)
-			.map(|x| PublicValue::Uuid(PublicUuid::from(x)))
+			.map(|(key, _)| PublicValue::Uuid(PublicUuid::from(key)))
 			.collect();
 		Ok(DbResult::Other(PublicValue::Array(array)))
 	}
@@ -153,7 +138,7 @@ pub trait RpcProtocol {
 	fn handle_live(
 		&self,
 		_lqid: &Uuid,
-		_session_id: Option<Uuid>,
+		_session_id: Uuid,
 	) -> impl std::future::Future<Output = ()> + Send {
 		async { unimplemented!("handle_live function must be implemented if LQ_SUPPORT = true") }
 	}
@@ -163,10 +148,7 @@ pub trait RpcProtocol {
 	}
 
 	/// Handles the cleanup of live queries
-	fn cleanup_lqs(
-		&self,
-		session_id: Option<&Uuid>,
-	) -> impl std::future::Future<Output = ()> + Send;
+	fn cleanup_lqs(&self, session_id: &Uuid) -> impl std::future::Future<Output = ()> + Send;
 
 	/// Handles the cleanup of all live queries
 	fn cleanup_all_lqs(&self) -> impl std::future::Future<Output = ()> + Send;
@@ -175,11 +157,17 @@ pub trait RpcProtocol {
 	// Method execution
 	// ------------------------------
 
-	/// Executes a method on this RPC implementation
+	/// Executes a method on this RPC implementation.
+	///
+	/// `session` is the resolved session ID (always valid). `client_session`
+	/// is the raw value from the client request (`None` when the client did
+	/// not specify one). Session-management methods (`attach`, `detach`) use
+	/// `client_session` to reject calls with no explicit session ID.
 	async fn execute(
 		&self,
 		txn: Option<Uuid>,
-		session: Option<Uuid>,
+		session: Uuid,
+		client_session: Option<Uuid>,
 		method: Method,
 		params: PublicArray,
 	) -> Result<DbResult, surrealdb_types::Error> {
@@ -212,8 +200,14 @@ pub trait RpcProtocol {
 			Method::Commit => self.commit(txn, session, params).await,
 			Method::Cancel => self.cancel(txn, session, params).await,
 			Method::Sessions => self.sessions().await,
-			Method::Attach => self.attach(session).await,
-			Method::Detach => self.detach(session).await,
+			Method::Attach => match client_session {
+				Some(id) => self.attach(id).await,
+				None => Err(invalid_params("Expected a session ID")),
+			},
+			Method::Detach => match client_session {
+				Some(id) => self.detach(id).await,
+				None => Err(invalid_params("Expected a session ID")),
+			},
 			// Deprecated methods
 			Method::Select => self.select(txn, session, params).await,
 			Method::Insert => self.insert(txn, session, params).await,
@@ -250,7 +244,7 @@ pub trait RpcProtocol {
 	/// clients (especially HTTP) to sync their local state with the server session.
 	async fn yuse(
 		&self,
-		session_id: Option<Uuid>,
+		session_id: Uuid,
 		params: PublicArray,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		let session_lock = self.get_session(&session_id)?;
@@ -384,7 +378,7 @@ pub trait RpcProtocol {
 
 	async fn signup(
 		&self,
-		session_id: Option<Uuid>,
+		session_id: Uuid,
 		params: PublicArray,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		// Process the method arguments
@@ -405,7 +399,7 @@ pub trait RpcProtocol {
 
 	async fn signin(
 		&self,
-		session_id: Option<Uuid>,
+		session_id: Uuid,
 		params: PublicArray,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		// Process the method arguments
@@ -426,7 +420,7 @@ pub trait RpcProtocol {
 
 	async fn authenticate(
 		&self,
-		session_id: Option<Uuid>,
+		session_id: Uuid,
 		params: PublicArray,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		// Process the method arguments
@@ -483,7 +477,7 @@ pub trait RpcProtocol {
 	/// - The refresh token is invalid, expired, or already revoked
 	async fn refresh(
 		&self,
-		session_id: Option<Uuid>,
+		session_id: Uuid,
 		params: PublicArray,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		// Process the method arguments
@@ -508,10 +502,7 @@ pub trait RpcProtocol {
 		out.map(DbResult::Other).map_err(types_error_from_anyhow)
 	}
 
-	async fn invalidate(
-		&self,
-		session_id: Option<Uuid>,
-	) -> Result<DbResult, surrealdb_types::Error> {
+	async fn invalidate(&self, session_id: Uuid) -> Result<DbResult, surrealdb_types::Error> {
 		// Get a write lock on the session
 		let session_lock = self.get_session(&session_id)?;
 		let mut session = session_lock.write().await;
@@ -564,14 +555,14 @@ pub trait RpcProtocol {
 		Ok(DbResult::Other(PublicValue::None))
 	}
 
-	async fn reset(&self, session_id: Option<Uuid>) -> Result<DbResult, surrealdb_types::Error> {
+	async fn reset(&self, session_id: Uuid) -> Result<DbResult, surrealdb_types::Error> {
 		// Get a write lock on the session
 		let session_lock = self.get_session(&session_id)?;
 		let mut session = session_lock.write().await;
 		// Reset the current session
 		crate::iam::reset::reset(&mut session);
 		// Cleanup live queries
-		self.cleanup_lqs(session_id.as_ref()).await;
+		self.cleanup_lqs(&session_id).await;
 		// Return nothing on success
 		Ok(DbResult::Other(PublicValue::None))
 	}
@@ -583,7 +574,7 @@ pub trait RpcProtocol {
 	async fn info(
 		&self,
 		_txn: Option<Uuid>,
-		session_id: Option<Uuid>,
+		session_id: Uuid,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		let session_lock = self.get_session(&session_id)?;
 		let session = session_lock.read().await;
@@ -602,7 +593,7 @@ pub trait RpcProtocol {
 
 	async fn set(
 		&self,
-		session_id: Option<Uuid>,
+		session_id: Uuid,
 		params: PublicArray,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		let session_lock = self.get_session(&session_id)?;
@@ -644,7 +635,7 @@ pub trait RpcProtocol {
 
 	async fn unset(
 		&self,
-		session_id: Option<Uuid>,
+		session_id: Uuid,
 		params: PublicArray,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		let session_lock = self.get_session(&session_id)?;
@@ -677,7 +668,7 @@ pub trait RpcProtocol {
 	async fn kill(
 		&self,
 		txn: Option<Uuid>,
-		session_id: Option<Uuid>,
+		session_id: Uuid,
 		params: PublicArray,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		let session_lock = self.get_session(&session_id)?;
@@ -709,7 +700,7 @@ pub trait RpcProtocol {
 	async fn live(
 		&self,
 		txn: Option<Uuid>,
-		session_id: Option<Uuid>,
+		session_id: Uuid,
 		params: PublicArray,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		let session_lock = self.get_session(&session_id)?;
@@ -763,7 +754,7 @@ pub trait RpcProtocol {
 	async fn select(
 		&self,
 		txn: Option<Uuid>,
-		session_id: Option<Uuid>,
+		session_id: Uuid,
 		params: PublicArray,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		let session_lock = self.get_session(&session_id)?;
@@ -828,7 +819,7 @@ pub trait RpcProtocol {
 	async fn insert(
 		&self,
 		txn: Option<Uuid>,
-		session_id: Option<Uuid>,
+		session_id: Uuid,
 		params: PublicArray,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		let session_lock = self.get_session(&session_id)?;
@@ -873,7 +864,7 @@ pub trait RpcProtocol {
 	async fn insert_relation(
 		&self,
 		txn: Option<Uuid>,
-		session_id: Option<Uuid>,
+		session_id: Uuid,
 		params: PublicArray,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		let session_lock = self.get_session(&session_id)?;
@@ -924,7 +915,7 @@ pub trait RpcProtocol {
 	async fn create(
 		&self,
 		txn: Option<Uuid>,
-		session_id: Option<Uuid>,
+		session_id: Uuid,
 		params: PublicArray,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		let session_lock = self.get_session(&session_id)?;
@@ -978,7 +969,7 @@ pub trait RpcProtocol {
 	async fn upsert(
 		&self,
 		txn: Option<Uuid>,
-		session_id: Option<Uuid>,
+		session_id: Uuid,
 		params: PublicArray,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		let session_lock = self.get_session(&session_id)?;
@@ -1036,7 +1027,7 @@ pub trait RpcProtocol {
 	async fn update(
 		&self,
 		_txn: Option<Uuid>,
-		session_id: Option<Uuid>,
+		session_id: Uuid,
 		params: PublicArray,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		let session_lock = self.get_session(&session_id)?;
@@ -1091,7 +1082,7 @@ pub trait RpcProtocol {
 	async fn merge(
 		&self,
 		txn: Option<Uuid>,
-		session_id: Option<Uuid>,
+		session_id: Uuid,
 		params: PublicArray,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		let session_lock = self.get_session(&session_id)?;
@@ -1145,7 +1136,7 @@ pub trait RpcProtocol {
 	async fn patch(
 		&self,
 		_txn: Option<Uuid>,
-		session_id: Option<Uuid>,
+		session_id: Uuid,
 		params: PublicArray,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		let session_lock = self.get_session(&session_id)?;
@@ -1210,7 +1201,7 @@ pub trait RpcProtocol {
 	async fn relate(
 		&self,
 		_txn: Option<Uuid>,
-		session_id: Option<Uuid>,
+		session_id: Uuid,
 		params: PublicArray,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		let session_lock = self.get_session(&session_id)?;
@@ -1267,7 +1258,7 @@ pub trait RpcProtocol {
 	async fn delete(
 		&self,
 		txn: Option<Uuid>,
-		session_id: Option<Uuid>,
+		session_id: Uuid,
 		params: PublicArray,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		let session_lock = self.get_session(&session_id)?;
@@ -1323,7 +1314,7 @@ pub trait RpcProtocol {
 	async fn query(
 		&self,
 		txn: Option<Uuid>,
-		session_id: Option<Uuid>,
+		session_id: Uuid,
 		params: PublicArray,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		let session_lock = self.get_session(&session_id)?;
@@ -1370,7 +1361,7 @@ pub trait RpcProtocol {
 	async fn run(
 		&self,
 		_txn: Option<Uuid>,
-		session_id: Option<Uuid>,
+		session_id: Uuid,
 		params: PublicArray,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		let session_lock = self.get_session(&session_id)?;
@@ -1529,7 +1520,7 @@ pub trait RpcProtocol {
 	async fn begin(
 		&self,
 		_txn: Option<Uuid>,
-		_session_id: Option<Uuid>,
+		_session_id: Uuid,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		Err(method_not_allowed(Method::Begin.to_string()))
 	}
@@ -1538,7 +1529,7 @@ pub trait RpcProtocol {
 	async fn commit(
 		&self,
 		_txn: Option<Uuid>,
-		_session_id: Option<Uuid>,
+		_session_id: Uuid,
 		_params: PublicArray,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		Err(method_not_allowed(Method::Commit.to_string()))
@@ -1548,7 +1539,7 @@ pub trait RpcProtocol {
 	async fn cancel(
 		&self,
 		_txn: Option<Uuid>,
-		_session_id: Option<Uuid>,
+		_session_id: Uuid,
 		_params: PublicArray,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		Err(method_not_allowed(Method::Cancel.to_string()))
@@ -1563,7 +1554,7 @@ enum QueryForm<'a> {
 async fn run_query<T>(
 	this: &T,
 	txn: Option<Uuid>,
-	session_id: Option<Uuid>,
+	session_id: Uuid,
 	query: QueryForm<'_>,
 	vars: Option<PublicVariables>,
 ) -> Result<Vec<QueryResult>>

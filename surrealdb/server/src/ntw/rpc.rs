@@ -176,33 +176,49 @@ async fn post_handler(
 	{
 		return Err(NetError::InvalidType.into());
 	}
-	// Use the shared HTTP instance with persistent sessions
 	let rpc = &*rpc_state.http;
-	// Update the default session (None key) with the session from middleware
-	// This is used for requests that don't specify a session_id
-	rpc.set_session(None, Arc::new(RwLock::new(session)));
+	// Isolate this request's session under a unique key to prevent
+	// concurrent requests from racing on a shared session slot.
+	let request_session_id = Uuid::new_v4();
+	rpc.register_ephemeral_session(request_session_id, Arc::new(RwLock::new(session)));
 	// Check to see available memory
 	if ALLOC.is_beyond_threshold() {
+		rpc.remove_ephemeral_session(&request_session_id);
 		return Err(NetError::ServerOverloaded.into());
 	}
 	// Parse the HTTP request body
-	match fmt.req_http(body) {
+	let result = match fmt.req_http(body) {
 		Ok(req) => {
+			// Preserve the raw client-provided session_id for methods that
+			// require an explicit ID (attach/detach).
+			let client_session: Option<Uuid> = req.session_id.map(Into::into);
+			let session_id = client_session.unwrap_or(request_session_id);
+			// Echo back the request id and client-supplied session id
+			// (if any) so HTTP responses match the WebSocket convention.
+			let req_id = req.id;
 			// Execute the specified method
 			let res = RpcProtocol::execute(
 				rpc,
 				req.txn.map(Into::into),
-				req.session_id.map(Into::into),
+				session_id,
+				client_session,
 				req.method,
 				req.params,
 			)
 			.await;
-			// Return the HTTP response
-			Ok(fmt.res_http(match res {
-				Ok(result) => DbResponse::success(None, None, result),
-				Err(err) => DbResponse::failure(None, None, err),
-			})?)
+			// Build the HTTP response. Do not use `?` here: a failure from
+			// `res_http` would short-circuit the function and bypass the
+			// ephemeral-session cleanup below, leaking an entry per failed
+			// serialization for the server lifetime.
+			let db_response = match res {
+				Ok(result) => DbResponse::success(req_id, client_session, result),
+				Err(err) => DbResponse::failure(req_id, client_session, err),
+			};
+			fmt.res_http(db_response).map_err(Into::into)
 		}
 		Err(err) => Err(err.into()),
-	}
+	};
+	// Clean up the per-request session
+	rpc.remove_ephemeral_session(&request_session_id);
+	result
 }

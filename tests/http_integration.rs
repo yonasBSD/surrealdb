@@ -701,6 +701,97 @@ mod http_integration {
 		Ok(())
 	}
 
+	/// Regression test for GHSA-4vgr-h27g-cf9p. Spawns many authenticated
+	/// and unauthenticated POST `/rpc` requests in parallel and asserts
+	/// every unauthenticated request is rejected while every authenticated
+	/// one succeeds. A shared-slot regression would cause at least one
+	/// unauthenticated task to observe an authenticated session and
+	/// succeed.
+	#[test(tokio::test)]
+	async fn rpc_session_isolation_under_concurrency() -> Result<(), Box<dyn std::error::Error>> {
+		let (addr, _server) = common::start_server_with_defaults().await.unwrap();
+		let url = std::sync::Arc::new(format!("http://{addr}/rpc"));
+		let ns = Ulid::new().to_string();
+		let db = Ulid::new().to_string();
+
+		let mut headers = reqwest::header::HeaderMap::new();
+		headers.insert("surreal-ns", ns.parse()?);
+		headers.insert("surreal-db", db.parse()?);
+		headers.insert(header::CONTENT_TYPE, "application/json".parse()?);
+		headers.insert(header::ACCEPT, "application/json".parse()?);
+		let client = reqwest::Client::builder()
+			.connect_timeout(Duration::from_millis(10))
+			.default_headers(headers)
+			.build()?;
+
+		ensure_namespace_and_database(&client, &addr, &ns, &db).await?;
+
+		const PAIRS: usize = 16;
+		let mut handles = Vec::with_capacity(PAIRS * 2);
+		for i in 0..PAIRS {
+			let client_auth = client.clone();
+			let url_auth = url.clone();
+			handles.push(tokio::spawn(async move {
+				let body = json!({
+					"id": format!("auth-{i}"),
+					"method": "query",
+					"params": ["INFO FOR ROOT"],
+				});
+				let res = client_auth
+					.post(url_auth.as_str())
+					.basic_auth(USER, Some(PASS))
+					.body(body.to_string())
+					.send()
+					.await
+					.expect("auth send");
+				let body: serde_json::Value = res.json().await.expect("auth json");
+				(true, body)
+			}));
+
+			let client_unauth = client.clone();
+			let url_unauth = url.clone();
+			handles.push(tokio::spawn(async move {
+				let body = json!({
+					"id": format!("unauth-{i}"),
+					"method": "query",
+					"params": ["INFO FOR ROOT"],
+				});
+				let res = client_unauth
+					.post(url_unauth.as_str())
+					.body(body.to_string())
+					.send()
+					.await
+					.expect("unauth send");
+				let body: serde_json::Value = res.json().await.expect("unauth json");
+				(false, body)
+			}));
+		}
+
+		for handle in handles {
+			let (authenticated, body) = handle.await?;
+			let status = body
+				.get("result")
+				.and_then(|r| r.as_array())
+				.and_then(|a| a.first())
+				.and_then(|r| r["status"].as_str());
+			if authenticated {
+				assert_eq!(
+					status,
+					Some("OK"),
+					"authenticated concurrent INFO FOR ROOT must succeed: {body}"
+				);
+			} else {
+				assert_ne!(
+					status,
+					Some("OK"),
+					"unauthenticated concurrent INFO FOR ROOT must NOT succeed (session leak): {body}"
+				);
+			}
+		}
+
+		Ok(())
+	}
+
 	#[test(tokio::test)]
 	async fn signin_endpoint() -> Result<(), Box<dyn std::error::Error>> {
 		let (addr, _server) = common::start_server_with_defaults().await.unwrap();

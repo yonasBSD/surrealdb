@@ -2756,6 +2756,70 @@ pub async fn multi_session_management(cfg_server: Option<Format>, cfg_format: Fo
 	server.finish().unwrap();
 }
 
+/// LIVE query notifications emitted for the connection's default session
+/// must not leak the internal connection UUID on the wire. Clients that send
+/// no explicit `session_id` historically received `session_id: null` and raw
+/// WebSocket consumers rely on that invariant.
+pub async fn live_notification_default_session_is_null(
+	cfg_server: Option<Format>,
+	cfg_format: Format,
+) {
+	let (addr, mut server) = common::start_server_with_defaults().await.unwrap();
+	let mut socket = Socket::connect(&addr, cfg_server, cfg_format).await.unwrap();
+	socket.send_message_signin(USER, PASS, None, None, None).await.unwrap();
+	ensure_namespace_and_database(&mut socket, NS, DB).await.unwrap();
+	socket.send_message_use(Some(NS), Some(DB)).await.unwrap();
+	socket.send_message_query("DEFINE TABLE tester").await.unwrap();
+	// Register a LIVE query using the connection's default session
+	// (no explicit session_id supplied).
+	let res = socket.send_request("live", json!(["tester"])).await.unwrap();
+	let live_id = res["result"].as_str().unwrap().to_string();
+	// Trigger a notification
+	socket.send_request("query", json!(["CREATE tester:id SET name = 'foo'"])).await.unwrap();
+	// Collect all messages and find the notification
+	let msgs =
+		socket.receive_all_other_messages(1, Duration::from_secs(2)).await.unwrap_or_default();
+	let msg = msgs
+		.iter()
+		.find(|v| common::is_notification_from_lq(v, &live_id))
+		.unwrap_or_else(|| panic!("No notification for live id {live_id}: {msgs:?}"));
+	// The outer wire message must NOT contain a `session` field because
+	// the LIVE query was not associated with an explicit client session.
+	let obj = msg.as_object().unwrap();
+	assert!(
+		!obj.contains_key("session") || obj.get("session").is_some_and(|v| v.is_null()),
+		"default-session LIVE notification must not leak a session id: {msg:?}"
+	);
+	server.finish().unwrap();
+}
+
+/// The connection's implicit session UUID must not be detachable. Tearing it
+/// down would leave the WebSocket in an inconsistent state, so the server
+/// explicitly rejects the request.
+pub async fn detach_connection_session_rejected(cfg_server: Option<Format>, cfg_format: Format) {
+	let (addr, mut server) = common::start_server_with_defaults().await.unwrap();
+	// Pin the connection id so we know the implicit session UUID
+	let conn_id = "00000000-0000-0000-0000-000000000000";
+	let mut headers = HeaderMap::new();
+	headers.insert(HDR_SURREAL, HeaderValue::from_static(conn_id));
+	let mut socket =
+		Socket::connect_with_headers(&addr, cfg_server, cfg_format, headers).await.unwrap();
+	socket.send_message_signin(USER, PASS, None, None, None).await.unwrap();
+	socket.send_message_use(Some(NS), Some(DB)).await.unwrap();
+	// Attempting to detach the connection's implicit session must fail
+	let res = socket.send_request_with_session("detach", json!([]), conn_id).await.unwrap();
+	assert!(res.get("error").is_some(), "expected detach({conn_id}) to be rejected, got: {res:?}");
+	// The connection must still be functional after a rejected detach
+	let res = socket.send_request("query", json!(["RETURN 1"])).await.unwrap();
+	assert_eq!(res["result"][0]["result"], 1);
+	// And the implicit session must never appear in sessions()
+	let res = socket.send_request("sessions", json!([])).await.unwrap();
+	let ids: Vec<&str> =
+		res["result"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+	assert!(!ids.contains(&conn_id), "implicit connection session leaked via sessions(): {ids:?}");
+	server.finish().unwrap();
+}
+
 define_include_tests! {
 	#[test_log::test(tokio::test)]
 	ping,
@@ -2845,4 +2909,8 @@ define_include_tests! {
 	multi_session_authentication,
 	#[test_log::test(tokio::test)]
 	multi_session_management,
+	#[test_log::test(tokio::test)]
+	live_notification_default_session_is_null,
+	#[test_log::test(tokio::test)]
+	detach_connection_session_rejected,
 }

@@ -50,7 +50,7 @@ pub struct Websocket {
 	/// The datastore accessible to all RPC WebSocket connections
 	pub(crate) datastore: Arc<Datastore>,
 	/// The active sessions for this WebSocket connection
-	pub(crate) sessions: HashMap<Option<Uuid>, Arc<RwLock<Session>>>,
+	pub(crate) sessions: HashMap<Uuid, Arc<RwLock<Session>>>,
 	/// The active transactions for this WebSocket connection
 	pub(crate) transactions: DashMap<Uuid, Arc<Transaction>>,
 	/// A cancellation token called when shutting down the server
@@ -87,10 +87,9 @@ impl Websocket {
 			channel: sender.clone(),
 			datastore,
 		});
-		// Store the default session with None key
-		// Enable realtime queries for WebSocket connections
+		// Store the default session keyed by connection id
 		let session = session.with_rt(true);
-		rpc.set_session(None, Arc::new(RwLock::new(session)));
+		rpc.set_session(id, Arc::new(RwLock::new(session)));
 		// Add this WebSocket to the list
 		state.web_sockets.write().await.insert(id, rpc.clone());
 		// Start telemetry metrics for this connection
@@ -383,10 +382,13 @@ impl Websocket {
 							}
 							// Otherwise process the request message
 							else {
+								let client_session: Option<Uuid> = req.session_id.map(Into::into);
+								let session_id = client_session.unwrap_or(rpc.id);
 								// Process the message
 								let result = Self::process_message(
 									rpc.clone(),
-									req.session_id.map(Into::into),
+									session_id,
+									client_session,
 									req.txn.map(Into::into),
 									req.method,
 									req.params,
@@ -428,7 +430,8 @@ impl Websocket {
 	/// Process a WebSocket message and generate a response
 	async fn process_message(
 		rpc: Arc<Websocket>,
-		session_id: Option<Uuid>,
+		session_id: Uuid,
+		client_session: Option<Uuid>,
 		txn: Option<Uuid>,
 		method: Method,
 		params: Array,
@@ -444,7 +447,7 @@ impl Websocket {
 			));
 		}
 		// Execute the specified method
-		RpcProtocol::execute(rpc.as_ref(), txn, session_id, method, params).await
+		RpcProtocol::execute(rpc.as_ref(), txn, session_id, client_session, method, params).await
 	}
 
 	/// Reject a WebSocket message due to server overloading
@@ -478,8 +481,39 @@ impl RpcProtocol for Websocket {
 	}
 
 	/// A pointer to all active sessions
-	fn session_map(&self) -> &HashMap<Option<Uuid>, Arc<RwLock<Session>>> {
+	fn session_map(&self) -> &HashMap<Uuid, Arc<RwLock<Session>>> {
 		&self.sessions
+	}
+
+	/// Lists all explicitly attached sessions.
+	///
+	/// Filters out this connection's implicit default session keyed by
+	/// `self.id` so clients cannot enumerate or target it via `detach`.
+	async fn sessions(&self) -> Result<DbResult, TypesError> {
+		let connection_id = self.id;
+		let array: Array = self
+			.session_map()
+			.to_vec()
+			.into_iter()
+			.filter(|(key, _)| *key != connection_id)
+			.map(|(key, _)| Value::Uuid(surrealdb_types::Uuid::from(key)))
+			.collect();
+		Ok(DbResult::Other(Value::Array(array)))
+	}
+
+	/// Detaches an explicitly attached session.
+	///
+	/// Explicitly rejects attempts to detach the connection's implicit
+	/// default session (`self.id`) as a defence-in-depth measure: tearing
+	/// it down would leave the connection in an inconsistent state.
+	async fn detach(&self, session_id: Uuid) -> Result<DbResult, TypesError> {
+		if session_id == self.id {
+			return Err(surrealdb_core::rpc::invalid_params(
+				"Cannot detach the implicit connection session",
+			));
+		}
+		self.del_session(&session_id).await;
+		Ok(DbResult::Other(Value::None))
 	}
 
 	// ------------------------------
@@ -525,7 +559,7 @@ impl RpcProtocol for Websocket {
 	const LQ_SUPPORT: bool = true;
 
 	/// Handles the execution of a LIVE statement
-	async fn handle_live(&self, lqid: &Uuid, session_id: Option<Uuid>) {
+	async fn handle_live(&self, lqid: &Uuid, session_id: Uuid) {
 		self.state.live_queries.write().await.insert(*lqid, (self.id, session_id));
 		trace!("Registered live query {lqid} on websocket {}", self.id);
 	}
@@ -533,20 +567,16 @@ impl RpcProtocol for Websocket {
 	/// Handles the execution of a KILL statement
 	async fn handle_kill(&self, lqid: &Uuid) {
 		if let Some((id, session_id)) = self.state.live_queries.write().await.remove(lqid) {
-			if let Some(session_id) = session_id {
-				trace!("Unregistered live query {lqid} on websocket {id} for session {session_id}");
-			} else {
-				trace!("Unregistered live query {lqid} on websocket {id} for default session");
-			}
+			trace!("Unregistered live query {lqid} on websocket {id} for session {session_id}");
 		}
 	}
 
 	/// Handles the cleanup of live queries
-	async fn cleanup_lqs(&self, session_id: Option<&Uuid>) {
+	async fn cleanup_lqs(&self, session_id: &Uuid) {
 		let mut gc = Vec::new();
 		// Find all live queries for to this connection
 		self.state.live_queries.write().await.retain(|key, value| {
-			if value.0 == self.id && value.1.as_ref() == session_id {
+			if value.0 == self.id && value.1 == *session_id {
 				trace!("Removing live query: {key}");
 				gc.push(*key);
 				return false;
@@ -585,7 +615,7 @@ impl RpcProtocol for Websocket {
 	async fn begin(
 		&self,
 		_txn: Option<Uuid>,
-		_session_id: Option<Uuid>,
+		_session_id: Uuid,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		// Create a new transaction
 		let tx = self
@@ -610,7 +640,7 @@ impl RpcProtocol for Websocket {
 	async fn commit(
 		&self,
 		_txn: Option<Uuid>,
-		_session_id: Option<Uuid>,
+		_session_id: Uuid,
 		params: Array,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		// Extract the transaction ID from params
@@ -637,7 +667,7 @@ impl RpcProtocol for Websocket {
 	async fn cancel(
 		&self,
 		_txn: Option<Uuid>,
-		_session_id: Option<Uuid>,
+		_session_id: Uuid,
 		params: Array,
 	) -> Result<DbResult, surrealdb_types::Error> {
 		// Extract the transaction ID from params

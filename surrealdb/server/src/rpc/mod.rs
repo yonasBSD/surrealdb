@@ -30,7 +30,7 @@ type WebSocket = Arc<Websocket>;
 /// Mapping of WebSocket ID to WebSocket
 type WebSockets = RwLock<HashMap<Uuid, WebSocket>>;
 /// Mapping of LIVE Query ID to WebSocket ID + Session ID
-type LiveQueries = RwLock<HashMap<Uuid, (Uuid, Option<Uuid>)>>;
+type LiveQueries = RwLock<HashMap<Uuid, (Uuid, Uuid)>>;
 
 pub struct RpcState {
 	/// Stores the currently connected WebSockets
@@ -44,14 +44,11 @@ pub struct RpcState {
 }
 
 impl RpcState {
-	pub fn new(
-		datastore: Arc<surrealdb_core::kvs::Datastore>,
-		session: surrealdb_core::dbs::Session,
-	) -> Self {
+	pub fn new(datastore: Arc<surrealdb_core::kvs::Datastore>) -> Self {
 		Self {
 			web_sockets: RwLock::new(HashMap::new()),
 			live_queries: RwLock::new(HashMap::new()),
-			http: Arc::new(crate::rpc::http::Http::new(datastore, session)),
+			http: Arc::new(crate::rpc::http::Http::new(datastore)),
 			#[cfg(feature = "graphql")]
 			notification_router: Arc::new(NotificationRouter::new(
 				*GQL_SUBSCRIPTION_CHANNEL_CAPACITY,
@@ -98,37 +95,43 @@ pub async fn notifications(
 				if state.notification_router.has_subscribers() {
 					state.notification_router.dispatch(&notification);
 				}
-				// Get the id for this notification
-				let id = notification.id.as_ref();
-				// Get the WebSocket for this notification
-				let websocket = {
-					state.live_queries.read().await.get(id).copied()
-				};
-				// Ensure the specified WebSocket exists
-				if let Some((id, session_id)) = websocket.as_ref() {
-					// Get the WebSocket for this notification
-					let websocket = {
-						state.web_sockets.read().await.get(id).cloned()
-					};
-					// Ensure the specified WebSocket exists
-					if let Some(rpc) = websocket {
-						// Serialize the message to send
-						let message = DbResponse::success(None, session_id.map(Into::into), DbResult::Live(notification));
-						// Add telemetry metrics
+				// Copy the lookup result out and drop the `live_queries`
+				// read guard BEFORE acquiring `web_sockets`. An `if let` /
+				// `&& let` chain would extend the first guard's lifetime
+				// across the second `.read().await`, blocking concurrent
+				// `live_queries.write()` callers (handle_live, handle_kill,
+				// cleanup_lqs, cleanup_all_lqs) on this hot notification
+				// path.
+				let live_query = state
+					.live_queries
+					.read()
+					.await
+					.get(&notification.id)
+					.copied();
+				if let Some((ws_id, session_id)) = live_query
+					&& let Some(rpc) = state.web_sockets.read().await.get(&ws_id).cloned() {
+						let live_id = notification.id.to_string();
+						// Hide the connection's implicit session UUID from the
+						// client: when a LIVE query was registered without an
+						// explicit session_id it resolves to `rpc.id`, which
+						// is an internal connection identifier the client
+						// never supplied. Emit `null` in that case to match
+						// the historical wire protocol.
+						let wire_session_id =
+							(session_id != rpc.id).then_some(session_id);
+						let message = DbResponse::success(
+							None,
+							wire_session_id,
+							DbResult::Live(notification),
+						);
 						let cx = TelemetryContext::new();
-						let not_ctx = NotificationContext::default()
-							.with_live_id(id.to_string());
+						let not_ctx =
+							NotificationContext::default().with_live_id(live_id);
 						let cx = Arc::new(cx.with_value(not_ctx));
-						// Get the WebSocket output format
 						let format = rpc.format;
-						// Get the WebSocket sending channel
 						let sender = rpc.channel.clone();
-						// Send the notification to the client
-						// let future = message.send(cx, format, sender);
 						let future = crate::rpc::response::send(message, cx, format, sender);
-						// Pus the future to the pipeline
 						futures.push(future);
-					}
 				}
 			},
 		}
