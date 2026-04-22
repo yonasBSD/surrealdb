@@ -101,6 +101,30 @@ impl Document {
 		// Carry on
 		Ok(())
 	}
+	/// Runs the pre-write permission gate for any path that mutates an
+	/// existing record (UPDATE, UPSERT-update, INSERT ON DUPLICATE KEY
+	/// UPDATE, RELATE-update).
+	///
+	/// SECURITY: `check_permissions_table` MUST run before any
+	/// user-supplied expression is evaluated against the live record.
+	/// `check_data_fields` fully computes SET/MERGE/CONTENT/REPLACE/PATCH
+	/// expressions against `self.current`, and `check_where_condition`
+	/// evaluates the WHERE clause against the same document. If either
+	/// ran first, a THROW (or any side-effecting expression) embedded in
+	/// the data or WHERE clause could exfiltrate field values before the
+	/// table-level permission check rejects the operation.
+	pub(super) async fn check_pre_update(
+		&mut self,
+		stk: &mut Stk,
+		ctx: &FrozenContext,
+		opt: &Options,
+		stm: &Statement<'_>,
+	) -> Result<(), IgnoreError> {
+		self.check_permissions_table(stk, ctx, opt, stm).await?;
+		self.check_data_fields(stk, ctx, opt, stm).await?;
+		self.check_where_condition(stk, ctx, opt, stm).await?;
+		Ok(())
+	}
 	/// Checks that the fields of a document are
 	/// correct. If an `id` field is specified then
 	/// it will check that the `id` field does not
@@ -110,6 +134,12 @@ impl Document {
 	/// match the in and out values specified in the
 	/// statement, or present in any record which
 	/// is being updated.
+	///
+	/// SECURITY: On update-variant paths (where `self.current` contains a
+	/// pre-existing record), this method must only be called *after*
+	/// `check_permissions_table` to prevent data exfiltration via
+	/// side-effecting expressions in the data clause. Use
+	/// `check_pre_update` to enforce the correct ordering.
 	#[cfg_attr(
 		feature = "trace-doc-ops",
 		instrument(level = "trace", name = "Document::check_data_fields", skip_all)
