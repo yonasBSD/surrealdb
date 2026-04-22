@@ -20,7 +20,7 @@ impl Enum {
 	}
 
 	fn strategy_for_variant(variant: &EnumVariant, attrs: &EnumAttributes) -> Strategy {
-		Strategy::for_enum(&variant.ident, attrs)
+		Strategy::for_enum(&variant.ident, attrs, variant.fields.rename())
 			.with_variant_skip_content(variant.fields.skip_content().cloned())
 	}
 

@@ -3,7 +3,7 @@ use quote::quote;
 use syn::{Ident, Type};
 
 use crate::attr::FieldDefault;
-use crate::{CratePath, unraw};
+use crate::{Casing, CratePath, unraw};
 
 #[derive(Debug)]
 pub struct NamedField {
@@ -21,11 +21,25 @@ pub struct NamedField {
 #[derive(Debug)]
 pub struct NamedFields {
 	pub fields: Vec<NamedField>,
+	pub rename: Option<String>,
+	pub rename_all: Option<Casing>,
 	pub default: bool,
 	pub skip_content: Option<crate::SkipContent>,
 }
 
 impl NamedFields {
+	fn object_key_for(&self, field: &NamedField) -> String {
+		if let Some(rename) = &field.rename {
+			return rename.clone();
+		}
+
+		let field_name = unraw(&field.ident);
+		match self.rename_all {
+			Some(casing) => casing.apply(&field_name),
+			None => field_name,
+		}
+	}
+
 	pub fn map_assignments(&self, crate_path: &CratePath) -> Vec<TokenStream2> {
 		self.fields
 			.iter()
@@ -39,8 +53,7 @@ impl NamedFields {
 				} else {
 					quote! {#field_name}
 				};
-				let field_name_str = unraw(&field.ident);
-				let obj_key = field.rename.as_ref().unwrap_or(&field_name_str);
+				let obj_key = self.object_key_for(field);
 
 				if field.flatten {
 					quote! {
@@ -68,7 +81,7 @@ impl NamedFields {
 				.map(|field| {
 					let field_name = &field.ident;
 					let field_name_str = unraw(&field.ident);
-					let obj_key = field.rename.as_ref().unwrap_or(&field_name_str);
+					let obj_key = self.object_key_for(field);
 					let ty = &field.ty;
 					let (potentially_wrapped_ty, val_access) = if field.wrap {
 						let crate_path = crate_path.wrapper();
@@ -110,7 +123,7 @@ impl NamedFields {
 			for field in &self.fields {
 				let field_name = &field.ident;
 				let field_name_str = unraw(&field.ident);
-				let obj_key = field.rename.as_ref().unwrap_or(&field_name_str);
+				let obj_key = self.object_key_for(field);
 				let ty = &field.ty;
 				let (potentially_wrapped_ty, val_access) = if field.wrap {
 					let crate_path = crate_path.wrapper();
@@ -185,8 +198,7 @@ impl NamedFields {
 			.iter()
 			.filter(|field| !field.flatten) // Flatten fields don't have a specific key to check
 			.map(|field| {
-				let struct_name = unraw(&field.ident);
-				let obj_key = field.rename.as_ref().unwrap_or(&struct_name);
+				let obj_key = self.object_key_for(field);
 				let ty = &field.ty;
 				let potentially_wrapped_ty = if field.wrap {
 					let crate_path = crate_path.wrapper();
@@ -230,8 +242,7 @@ impl NamedFields {
 			.filter(|field| !field.flatten) // Flatten fields don't have a specific key
 			.map(|field| {
 				let ty = &field.ty;
-				let struct_name = unraw(&field.ident);
-				let obj_key = field.rename.as_ref().unwrap_or(&struct_name);
+				let obj_key = self.object_key_for(field);
 
 				if crate::type_contains_ident(ty, type_name) {
 					return quote! {
@@ -254,6 +265,6 @@ impl NamedFields {
 	}
 
 	pub fn contains_key(&self, key: &str) -> bool {
-		self.fields.iter().any(|field| field.rename.as_ref().unwrap_or(&unraw(&field.ident)) == key)
+		self.fields.iter().any(|field| self.object_key_for(field) == key)
 	}
 }
