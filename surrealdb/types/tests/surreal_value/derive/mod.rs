@@ -5,6 +5,7 @@ mod enum_tagged_tag_content;
 mod enum_tagged_variant;
 mod enum_unit_value;
 mod enum_untagged;
+mod rename;
 mod struct_flatten;
 mod wrap;
 

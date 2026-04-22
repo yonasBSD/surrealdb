@@ -44,6 +44,8 @@ impl Fields {
 
 				Fields::Named(NamedFields {
 					fields,
+					rename: container_attrs.rename,
+					rename_all: container_attrs.rename_all,
 					default: container_attrs.default,
 					skip_content: container_attrs.skip_content,
 				})
@@ -76,6 +78,7 @@ impl Fields {
 					wrap,
 					unnamed_field_attrs.tuple,
 					unnamed_field_attrs.skip_content,
+					unnamed_field_attrs.rename,
 				))
 			}
 			syn::Fields::Unit => Fields::Unit(UnitAttributes::parse(attrs)),
@@ -97,6 +100,14 @@ impl Fields {
 			Fields::Unnamed(f) => f.skip_content.as_ref(),
 			Fields::Unit(a) if a.skip_content => Some(&SkipContent::Always),
 			Fields::Unit(_) => None,
+		}
+	}
+
+	pub fn rename(&self) -> Option<&str> {
+		match self {
+			Fields::Named(f) => f.rename.as_deref(),
+			Fields::Unnamed(f) => f.rename.as_deref(),
+			Fields::Unit(a) => a.rename.as_deref(),
 		}
 	}
 
