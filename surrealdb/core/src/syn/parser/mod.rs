@@ -125,8 +125,10 @@ pub struct ParserSettings {
 	/// `foo:0bar`. This would be rejected by normal identifier rules as most
 	/// identifiers can't start with a number.
 	pub flexible_record_id: bool,
-	/// Disallow a query to have objects deeper that limit.
+	/// Disallow a query to have objects deeper than the limit.
 	/// Arrays also count towards objects. So `[{foo: [] }]` would be 3 deep.
+	/// Type annotation nesting depth (e.g. `array<option<array<int>>>` in
+	/// `DEFINE FIELD TYPE`, cast expressions, etc.) also counts against this limit.
 	pub object_recursion_limit: usize,
 	/// Disallow a query from being deeper than the give limit.
 	/// A query recurses when a statement contains another statement within

@@ -58,7 +58,7 @@ macro_rules! expected_whitespace {
 macro_rules! enter_object_recursion {
 	($name:ident = $this:expr_2021 => { $($t:tt)* }) => {{
 		if $this.settings.object_recursion_limit == 0 {
-			return Err($crate::syn::parser::SyntaxError::new("Exceeded query recursion depth limit")
+			return Err($crate::syn::parser::SyntaxError::new("Exceeded object recursion depth limit")
 				.with_span($this.last_span(), $crate::syn::error::MessageKind::Error))
 		}
 		struct Dropper<'a, 'b>(&'a mut $crate::syn::parser::Parser<'b>);
