@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use background_flusher::BackgroundFlusher;
 use chrono::{DateTime, Utc};
+pub use cnf::SurrealKvConfig;
 use commit_coordinator::CommitCoordinator;
 use surrealkv::{
 	Durability, HistoryOptions, LSMIterator, Mode, Transaction as Tx, Tree, TreeBuilder,
@@ -18,7 +19,7 @@ use surrealkv::{
 use tokio::sync::RwLock;
 
 use super::api::ScanLimit;
-use super::config::{SurrealKvConfig, SyncMode};
+use super::config::SyncMode;
 use super::err::{Error, Result};
 use super::{Direction, ESTIMATED_BYTES_PER_KEY, ESTIMATED_BYTES_PER_KV};
 use crate::key::debug::Sprintable;
@@ -63,36 +64,36 @@ impl Datastore {
 		// Determine if vlog should be enabled
 		// - Required when versioning is enabled
 		// - Can be explicitly enabled via env var even without versioning
-		let enable_vlog = *cnf::SURREALKV_ENABLE_VLOG || config.versioned;
-		info!(target: TARGET, "Enabling value log separation: {}", enable_vlog);
-		let builder = builder.with_enable_vlog(enable_vlog);
+		info!(target: TARGET, "Enabling value log separation: {}", config.enable_vlog);
+		let builder = builder.with_enable_vlog(config.enable_vlog);
 
 		// Configure the maximum value log file size
-		info!(target: TARGET, "Setting value log max file size: {}", *cnf::SURREALKV_VLOG_MAX_FILE_SIZE);
-		let builder = builder.with_vlog_max_file_size(*cnf::SURREALKV_VLOG_MAX_FILE_SIZE);
+		info!(target: TARGET, "Setting value log max file size: {}", config.vlog_max_file_size);
+		let builder = builder.with_vlog_max_file_size(config.vlog_max_file_size);
 
 		// Configure value log threshold
-		info!(target: TARGET, "Setting value log threshold: {}", *cnf::SURREALKV_VLOG_THRESHOLD);
-		let builder = builder.with_vlog_value_threshold(*cnf::SURREALKV_VLOG_THRESHOLD);
+		info!(target: TARGET, "Setting value log threshold: {}", config.vlog_threshold);
+		let builder = builder.with_vlog_value_threshold(config.vlog_threshold);
 
 		// Configure versioned queries with retention period
-		info!(target: TARGET, "Versioning enabled: {} with retention period: {}ns", config.versioned, config.retention_ns);
-		let builder = builder.with_versioning(config.versioned, config.retention_ns);
+		let retention_ns = config.retention.as_nanos().try_into().unwrap_or(u64::MAX);
+		info!(target: TARGET, "Versioning enabled: {} with retention period: {}ns", config.versioned, retention_ns);
+		let builder = builder.with_versioning(config.versioned, retention_ns);
 
 		// Configure optional bplustree index for versioned queries
-		let versioned_index = config.versioned && *cnf::SURREALKV_VERSIONED_INDEX;
+		let versioned_index = config.versioned && config.versioned_index;
 		info!(target: TARGET, "Versioning with versioned_index: {}", versioned_index);
 		let builder = builder.with_versioned_index(versioned_index);
 
 		// Configure the maximum memtable size
-		info!(target: TARGET, "Setting max memtable size: {}", *cnf::SURREALKV_MAX_MEMTABLE_SIZE);
-		let builder = builder.with_max_memtable_size(*cnf::SURREALKV_MAX_MEMTABLE_SIZE);
+		info!(target: TARGET, "Setting max memtable size: {}", config.max_memtable_size);
+		let builder = builder.with_max_memtable_size(config.max_memtable_size);
 		// Enable the block cache capacity
-		info!(target: TARGET, "Setting block cache capacity: {}", *cnf::SURREALKV_BLOCK_CACHE_CAPACITY);
-		let builder = builder.with_block_cache_capacity(*cnf::SURREALKV_BLOCK_CACHE_CAPACITY);
+		info!(target: TARGET, "Setting block cache capacity: {}", config.block_cache_capacity);
+		let builder = builder.with_block_cache_capacity(config.block_cache_capacity);
 		// Set the block size
-		info!(target: TARGET, "Setting block size: {}", *cnf::SURREALKV_BLOCK_SIZE);
-		let builder = builder.with_block_size(*cnf::SURREALKV_BLOCK_SIZE);
+		info!(target: TARGET, "Setting block size: {}", config.block_size);
+		let builder = builder.with_block_size(config.block_size);
 		// Set the data storage directory
 		let builder = builder.with_path(path.to_string().into());
 		// Build the database
@@ -102,7 +103,7 @@ impl Datastore {
 		let (commit_coordinator, background_flusher) = match config.sync_mode {
 			SyncMode::Every => {
 				info!(target: TARGET, "Sync mode: every transaction commit");
-				let coordinator = Arc::new(CommitCoordinator::new(db.clone())?);
+				let coordinator = Arc::new(CommitCoordinator::new(db.clone(), &config)?);
 				(Some(coordinator), None)
 			}
 			SyncMode::Interval(interval) => {

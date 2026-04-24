@@ -56,6 +56,7 @@ pub async fn fetch<'js>(
 				HttpClient::new_with_redirect_policy(
 					cap.allow_net.clone(),
 					cap.allow_net.clone(),
+					&query_ctx.config,
 					|attempt| attempt.error("unexpected redirect"),
 				)
 				.map_err(|e| {
@@ -72,6 +73,7 @@ pub async fn fetch<'js>(
 				HttpClient::new_with_redirect_policy(
 					cap.allow_net.clone(),
 					cap.allow_net.clone(),
+					&query_ctx.config,
 					|attempt| attempt.stop(),
 				)
 				.map_err(|e| {

@@ -8,6 +8,7 @@ use rand::Rng;
 use surrealdb::opt::capabilities::Capabilities as SdkCapabilities;
 use surrealdb_core::buc::BucketStoreProvider;
 use surrealdb_core::channel::Receiver;
+use surrealdb_core::cnf::ConfigMap;
 use surrealdb_core::kvs::{Datastore, TransactionBuilderFactory};
 use surrealdb_types::Notification;
 use tokio::time::{Instant, sleep, timeout};
@@ -786,8 +787,10 @@ pub async fn init<C: TransactionBuilderFactory + BucketStoreProvider>(
 
 	let (send, recv) = surrealdb_core::channel::bounded(15_000);
 
+	let config = ConfigMap::from_env();
 	// Parse and setup the desired kv datastore
 	let builder = Datastore::builder()
+		.with_config(config)
 		.with_query_timeout(query_timeout)
 		.with_transaction_timeout(transaction_timeout)
 		.with_auth(!unauthenticated)
@@ -1333,6 +1336,7 @@ mod tests {
 	fn test_dbs_capabilities_target_all() {
 		let caps = DbsCapabilities {
 			allow_all: false,
+			#[cfg(feature = "scripting")]
 			allow_scripting: false,
 			allow_guests: false,
 			allow_funcs: None,
@@ -1342,6 +1346,7 @@ mod tests {
 			allow_rpc: None,
 			allow_http: None,
 			deny_all: false,
+			#[cfg(feature = "scripting")]
 			deny_scripting: false,
 			deny_guests: false,
 			deny_funcs: None,

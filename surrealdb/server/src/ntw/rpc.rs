@@ -162,6 +162,8 @@ async fn post_handler(
 		warn!("Capabilities denied HTTP route request attempt, target: '{}'", &RouteTarget::Rpc);
 		return Err(NetError::ForbiddenRoute(RouteTarget::Rpc.to_string()).into());
 	}
+
+	let rec_limit = db.config().max_object_parsing_depth as usize;
 	// Get the input format from the Content-Type header
 	let fmt: Format = (&content_type).into();
 	// Check that the input format is a valid format
@@ -187,7 +189,7 @@ async fn post_handler(
 		return Err(NetError::ServerOverloaded.into());
 	}
 	// Parse the HTTP request body
-	let result = match fmt.req_http(body) {
+	let result = match fmt.req_http(body, rec_limit) {
 		Ok(req) => {
 			// Preserve the raw client-provided session_id for methods that
 			// require an explicit ID (attach/detach).

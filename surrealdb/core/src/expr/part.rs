@@ -4,7 +4,6 @@ use anyhow::Result;
 use reblessive::tree::Stk;
 use surrealdb_types::{SqlFormat, ToSql};
 
-use crate::cnf::IDIOM_RECURSION_LIMIT;
 use crate::ctx::FrozenContext;
 use crate::dbs::Options;
 use crate::doc::CursorDoc;
@@ -256,7 +255,7 @@ impl<'a> RecursionPlan {
 							self.compute_inner(stk, ctx, opt, doc, rec)
 						})
 					});
-					try_join_all_buffered(futs)
+					try_join_all_buffered(futs, ctx.config.max_concurrent_tasks)
 				})
 				.await
 				.map(Into::into),
@@ -462,34 +461,6 @@ impl ToSql for DestructurePart {
 pub enum Recurse {
 	Fixed(u32),
 	Range(Option<u32>, Option<u32>),
-}
-
-impl TryInto<(u32, Option<u32>)> for Recurse {
-	type Error = anyhow::Error;
-
-	fn try_into(self) -> Result<(u32, Option<u32>)> {
-		let v = match self {
-			Recurse::Fixed(v) => (v, Some(v)),
-			Recurse::Range(min, max) => {
-				let min = min.unwrap_or(1);
-				(min, max)
-			}
-		};
-
-		match v {
-			(min, _) if min < 1 => Err(anyhow::Error::new(Error::InvalidBound {
-				found: min.to_string(),
-				expected: "at least 1".into(),
-			})),
-			(_, Some(max)) if max > (*IDIOM_RECURSION_LIMIT as u32) => {
-				Err(anyhow::Error::new(Error::InvalidBound {
-					found: max.to_string(),
-					expected: format!("{} at most", *IDIOM_RECURSION_LIMIT),
-				}))
-			}
-			v => Ok(v),
-		}
-	}
 }
 
 impl ToSql for Recurse {

@@ -10,7 +10,6 @@ use crate::catalog::providers::{
 	UserProvider,
 };
 use crate::catalog::{DatabaseId, NamespaceId, Record, TableDefinition};
-use crate::cnf::EXPORT_BATCH_SIZE;
 use crate::err::Error;
 use crate::expr::paths::{IN, OUT};
 use crate::expr::statements::define::{DefineAccessStatement, DefineUserStatement};
@@ -165,6 +164,7 @@ impl Transaction {
 		ns: &str,
 		db: &str,
 		cfg: Config,
+		batch_size: u32,
 		chn: Sender<Vec<u8>>,
 	) -> Result<()> {
 		let db = self.get_db_by_name(ns, db, None).await?.ok_or_else(|| {
@@ -176,7 +176,7 @@ impl Transaction {
 		// Output USERS, ACCESSES, PARAMS, FUNCTIONS, ANALYZERS
 		self.export_metadata(&cfg, &chn, db.namespace_id, db.database_id).await?;
 		// Output TABLES
-		self.export_tables(&cfg, &chn, db.namespace_id, db.database_id).await?;
+		self.export_tables(&cfg, &chn, db.namespace_id, db.database_id, batch_size).await?;
 		Ok(())
 	}
 
@@ -302,6 +302,7 @@ impl Transaction {
 		chn: &Sender<Vec<u8>>,
 		ns: NamespaceId,
 		db: DatabaseId,
+		batch_size: u32,
 	) -> Result<()> {
 		// Check if tables are included in the export config
 		if !cfg.tables.is_any() {
@@ -328,7 +329,7 @@ impl Transaction {
 			self.export_table_structure(ns, db, table, chn).await?;
 			// Then export the table data if its desired
 			if cfg.records {
-				self.export_table_data(ns, db, table, chn).await?;
+				self.export_table_data(ns, db, table, chn, batch_size).await?;
 			}
 		}
 
@@ -380,6 +381,7 @@ impl Transaction {
 		db: DatabaseId,
 		table: &TableDefinition,
 		chn: &Sender<Vec<u8>>,
+		batch_size: u32,
 	) -> Result<()> {
 		chn.send(bytes!("-- ------------------------------")).await?;
 		chn.send(bytes!(format!("-- TABLE DATA: {}", InlineCommentDisplay(&table.name)))).await?;
@@ -391,7 +393,7 @@ impl Transaction {
 		let mut next = Some(beg..end);
 
 		while let Some(rng) = next {
-			let batch = self.batch_keys_vals(rng, *EXPORT_BATCH_SIZE, None).await?;
+			let batch = self.batch_keys_vals(rng, batch_size, None).await?;
 			next = batch.next;
 			// If there are no values, return early.
 			if batch.result.is_empty() {

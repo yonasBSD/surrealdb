@@ -174,6 +174,7 @@ mod tests {
 	use std::sync::Arc;
 
 	use super::Analyzer;
+	use crate::cnf::CommonConfig;
 	use crate::cnf::dynamic::DynamicConfiguration;
 	use crate::ctx::Context;
 	use crate::dbs::Options;
@@ -202,7 +203,7 @@ mod tests {
 
 		let mut stack = reblessive::TreeStack::new();
 
-		let opts = Options::new(ds.id(), DynamicConfiguration::default());
+		let opts = Options::new(ds.id(), DynamicConfiguration::default(), &CommonConfig::default());
 		stack
 			.enter(|stk| async move {
 				let a = Analyzer::new(

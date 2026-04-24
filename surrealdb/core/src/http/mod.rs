@@ -5,6 +5,7 @@ use reqwest::redirect::{Action, Attempt};
 use reqwest::{Client, RequestBuilder};
 use url::Url;
 
+use crate::cnf::CommonConfig;
 use crate::dbs::capabilities::{NetTarget, Targets};
 
 #[cfg(not(target_family = "wasm"))]
@@ -22,14 +23,19 @@ struct NetFilter {
 
 impl HttpClient {
 	#[cfg(not(target_family = "wasm"))]
-	pub fn new(allow: Targets<NetTarget>, deny: Targets<NetTarget>) -> Result<Self> {
-		Self::new_with_redirect_policy(allow, deny, |policy| policy.follow())
+	pub fn new(
+		allow: Targets<NetTarget>,
+		deny: Targets<NetTarget>,
+		config: &CommonConfig,
+	) -> Result<Self> {
+		Self::new_with_redirect_policy(allow, deny, config, |policy| policy.follow())
 	}
 
 	#[cfg(not(target_family = "wasm"))]
 	pub fn new_with_redirect_policy<F>(
 		allow: Targets<NetTarget>,
 		deny: Targets<NetTarget>,
+		config: &CommonConfig,
 		policy: F,
 	) -> Result<Self>
 	where
@@ -45,7 +51,6 @@ impl HttpClient {
 		use reqwest::redirect::{Attempt, Policy};
 		use resolve::FilteringResolver;
 
-		use crate::cnf::SURREALDB_USER_AGENT;
 		use crate::dbs::capabilities::NetTarget;
 
 		let filter = Arc::new(NetFilter {
@@ -54,7 +59,7 @@ impl HttpClient {
 		});
 
 		let filter_clone = filter.clone();
-		let max_redirects = *crate::cnf::MAX_HTTP_REDIRECTS;
+		let max_redirects = config.max_http_redirects;
 		let redirect_function = move |attempt: Attempt| {
 			if attempt.previous().len() >= max_redirects {
 				return attempt.stop();
@@ -77,16 +82,16 @@ impl HttpClient {
 			policy(attempt)
 		};
 
-		let value =
-			HeaderValue::from_str(&SURREALDB_USER_AGENT).context("Invalid user agent string")?;
+		let value = HeaderValue::from_str(&config.surrealdb_user_agent)
+			.context("Invalid user agent string")?;
 
 		let mut headers = HeaderMap::new();
 		headers.insert(USER_AGENT, value);
 
 		let client = Client::builder()
-			.pool_idle_timeout(Duration::from_secs(*crate::cnf::HTTP_IDLE_TIMEOUT_SECS))
-			.pool_max_idle_per_host(*crate::cnf::MAX_HTTP_IDLE_CONNECTIONS_PER_HOST)
-			.connect_timeout(Duration::from_secs(*crate::cnf::HTTP_CONNECT_TIMEOUT_SECS))
+			.pool_idle_timeout(Duration::from_secs(config.http_idle_timeout_secs))
+			.pool_max_idle_per_host(config.max_http_idle_connections_per_host)
+			.connect_timeout(Duration::from_secs(config.http_connect_timeout_secs))
 			.tcp_keepalive(Some(Duration::from_secs(60)))
 			.http2_keep_alive_interval(Some(Duration::from_secs(30)))
 			.http2_keep_alive_timeout(Duration::from_secs(10))
@@ -101,7 +106,11 @@ impl HttpClient {
 	}
 
 	#[cfg(target_family = "wasm")]
-	pub fn new(allow: Targets<NetTarget>, deny: Targets<NetTarget>) -> Result<Self> {
+	pub fn new(
+		allow: Targets<NetTarget>,
+		deny: Targets<NetTarget>,
+		config: &CommonConfig,
+	) -> Result<Self> {
 		let _ = allow;
 		let _ = deny;
 		let client = Client::builder().build()?;

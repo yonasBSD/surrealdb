@@ -142,31 +142,36 @@ impl InnerQueryExecutor {
 			let index_reference = io.index_reference();
 			match &index_reference.index {
 				Index::FullText(p) => {
-					let fulltext_entry: Option<FullTextEntry> = match ir_map
-						.entry(index_reference.clone())
-					{
-						Entry::Occupied(e) => {
-							if let PerIndexReferenceIndex::FullText(fti) = e.get() {
-								FullTextEntry::new(stk, ctx, opt, fti, io).await?
-							} else {
-								None
+					let fulltext_entry: Option<FullTextEntry> =
+						match ir_map.entry(index_reference.clone()) {
+							Entry::Occupied(e) => {
+								if let PerIndexReferenceIndex::FullText(fti) = e.get() {
+									FullTextEntry::new(stk, ctx, opt, fti, io).await?
+								} else {
+									None
+								}
 							}
-						}
-						Entry::Vacant(e) => {
-							let ix: &IndexDefinition = e.key();
-							let ikb = IndexKeyBase::new(
-								doc_ctx.ns.namespace_id,
-								doc_ctx.db.database_id,
-								ix.table_name.clone(),
-								ix.index_id,
-							);
-							let ft = FullTextIndex::new(ctx.get_index_stores(), &ctx.tx(), ikb, p)
+							Entry::Vacant(e) => {
+								let ix: &IndexDefinition = e.key();
+								let ikb = IndexKeyBase::new(
+									doc_ctx.ns.namespace_id,
+									doc_ctx.db.database_id,
+									ix.table_name.clone(),
+									ix.index_id,
+								);
+								let ft = FullTextIndex::new(
+									ctx.get_index_stores(),
+									&ctx.tx(),
+									ikb,
+									p,
+									&ctx.config.file_allowlist,
+								)
 								.await?;
-							let fte = FullTextEntry::new(stk, ctx, opt, &ft, io).await?;
-							e.insert(PerIndexReferenceIndex::FullText(ft));
-							fte
-						}
-					};
+								let fte = FullTextEntry::new(stk, ctx, opt, &ft, io).await?;
+								e.insert(PerIndexReferenceIndex::FullText(ft));
+								fte
+							}
+						};
 					if let Some(e) = fulltext_entry {
 						if let Matches(
 							_,

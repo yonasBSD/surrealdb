@@ -13,6 +13,8 @@
 //! - Numeric predicates need a single probe/range in the index; per-variant fan-out is no longer
 //!   required.
 
+use std::path::PathBuf;
+
 use anyhow::{Result, bail};
 use reblessive::tree::Stk;
 use surrealdb_types::ToSql;
@@ -260,8 +262,9 @@ impl<'a> IndexOperation<'a> {
 		ikb: &IndexKeyBase,
 		tx: &Transaction,
 		p: &FullTextParams,
+		allow_list: &[PathBuf],
 	) -> Result<()> {
-		let ft = FullTextIndex::new(ixs, tx, ikb.clone(), p).await?;
+		let ft = FullTextIndex::new(ixs, tx, ikb.clone(), p, allow_list).await?;
 		ft.compaction(tx).await?;
 		Ok(())
 	}
@@ -309,9 +312,14 @@ impl<'a> IndexOperation<'a> {
 	) -> Result<()> {
 		let mut rc = false;
 		// Build a FullText instance
-		let fti =
-			FullTextIndex::new(self.ctx.get_index_stores(), &self.ctx.tx(), self.ikb.clone(), p)
-				.await?;
+		let fti = FullTextIndex::new(
+			self.ctx.get_index_stores(),
+			&self.ctx.tx(),
+			self.ikb.clone(),
+			p,
+			&self.ctx.config.file_allowlist,
+		)
+		.await?;
 		// Delete the old index data
 		let doc_id = if let Some(o) = self.o.take() {
 			fti.remove_content(stk, self.ctx, self.opt, self.rid, o, &mut rc).await?

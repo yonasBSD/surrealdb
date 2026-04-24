@@ -154,6 +154,7 @@ impl ExecOperator for ReferenceScan {
 			self.input.execute(ctx)?,
 			self.input.access_mode(),
 			self.input.cardinality_hint(),
+			ctx.root().ctx.config.operator_buffer_size,
 		);
 		let referencing_table = self.referencing_table.clone();
 		let referencing_field = self.referencing_field.clone();

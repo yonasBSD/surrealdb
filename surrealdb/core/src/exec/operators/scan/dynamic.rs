@@ -464,7 +464,7 @@ impl ExecOperator for DynamicScan {
 					storage_limit: effective_storage_limit,
 					pre_skip,
 					has_pushed_limit: effective_storage_limit.is_some(),
-					limit_hint: limit_val.map(|l| l + start_val),
+					limit_hint: limit_val.map(|l| (l + start_val).min(u32::MAX as usize) as u32),
 					knn_context: knn_context.clone(),
 					},
 				).await?
@@ -525,7 +525,7 @@ struct TableScanConfig {
 	has_pushed_limit: bool,
 	/// Hint for the scanner's initial batch size, typically `limit + start`.
 	/// Caps the first fetch to avoid over-reading for small-limit queries.
-	limit_hint: Option<usize>,
+	limit_hint: Option<u32>,
 	/// KNN distance context for vector::distance::knn() support.
 	knn_context: Option<Arc<crate::exec::function::KnnContext>>,
 }

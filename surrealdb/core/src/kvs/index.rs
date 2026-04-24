@@ -22,7 +22,6 @@ use crate::catalog::providers::TableProvider;
 use crate::catalog::{
 	DatabaseDefinition, DatabaseId, IndexDefinition, IndexId, NamespaceId, Record, TableId,
 };
-use crate::cnf::INDEXING_BATCH_SIZE;
 use crate::ctx::{Context, FrozenContext};
 use crate::dbs::Options;
 use crate::doc::{CursorDoc, Document};
@@ -33,7 +32,9 @@ use crate::key::index::ig::IndexAppending;
 use crate::key::record;
 use crate::kvs::LockType::Optimistic;
 use crate::kvs::ds::TransactionFactory;
-use crate::kvs::{KVValue, Key, Transaction, TransactionType, Val, impl_kv_value_revisioned};
+use crate::kvs::{
+	INDEXING_BATCH_SIZE, KVValue, Key, Transaction, TransactionType, Val, impl_kv_value_revisioned,
+};
 use crate::mem::ALLOC;
 use crate::val::{Object, RecordId, RecordIdKey, TableName, Value};
 
@@ -629,7 +630,7 @@ impl Building {
 					self.check_prepare_remove_with_tx(&mut last_prepare_remove_check, &tx).await
 				);
 				// Get the next batch of records.
-				let res = catch!(tx, tx.batch_keys_vals(rng, *INDEXING_BATCH_SIZE, None).await);
+				let res = catch!(tx, tx.batch_keys_vals(rng, INDEXING_BATCH_SIZE, None).await);
 				tx.cancel().await?;
 				res
 			};
@@ -689,8 +690,7 @@ impl Building {
 				queue.clean_batch_ids(clean_queue);
 				let keys = {
 					let tx = self.new_read_tx().await?;
-					let keys =
-						catch!(tx, tx.keys(rng.clone(), *INDEXING_BATCH_SIZE, 0, None).await);
+					let keys = catch!(tx, tx.keys(rng.clone(), INDEXING_BATCH_SIZE, 0, None).await);
 					tx.cancel().await?;
 					keys
 				};

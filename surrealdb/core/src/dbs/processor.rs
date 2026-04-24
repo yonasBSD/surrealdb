@@ -9,7 +9,6 @@ use reblessive::tree::Stk;
 
 use crate::catalog::providers::TableProvider;
 use crate::catalog::{DatabaseId, NamespaceId, Record};
-use crate::cnf::NORMAL_FETCH_SIZE;
 use crate::ctx::{Context, FrozenContext};
 use crate::dbs::distinct::SyncDistinct;
 use crate::dbs::{Iterable, Iterator, Operable, Options, Processable, Statement};
@@ -21,7 +20,7 @@ use crate::expr::statements::relate::RelateThrough;
 use crate::idx::planner::iterators::{IndexItemRecord, IteratorRef, RecordIterator};
 use crate::idx::planner::{IterationStage, RecordStrategy, ScanDirection};
 use crate::key::{graph, record, r#ref};
-use crate::kvs::{KVKey, KVValue, Key, Transaction, Val};
+use crate::kvs::{KVKey, KVValue, Key, NORMAL_BATCH_SIZE, Transaction, Val};
 use crate::val::{RecordId, RecordIdKey, RecordIdKeyRange, TableName, Value};
 
 impl Iterable {
@@ -609,7 +608,7 @@ pub(super) trait Collector {
 		if let Some(l) = self.iterator().start_limit() {
 			*l
 		} else {
-			*NORMAL_FETCH_SIZE
+			NORMAL_BATCH_SIZE
 		}
 	}
 

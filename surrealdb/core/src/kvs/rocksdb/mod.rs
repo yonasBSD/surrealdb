@@ -7,13 +7,17 @@ mod comparator;
 mod disk_space_manager;
 mod garbage_collector;
 mod memory_manager;
+#[cfg(test)]
+mod tests;
 
 use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::time::Duration;
 
 use background_flusher::BackgroundFlusher;
+pub use cnf::RocksDbConfig;
 use commit_coordinator::CommitCoordinator;
 use disk_space_manager::{DiskSpaceManager, DiskSpaceState, TransactionState};
 use garbage_collector::GarbageCollector;
@@ -26,7 +30,7 @@ use rocksdb::{
 use tokio::sync::{Mutex, MutexGuard};
 
 use super::api::ScanLimit;
-use super::config::{RocksDbConfig, SyncMode};
+use super::config::SyncMode;
 use super::err::{Error, Result};
 use super::{Direction, ESTIMATED_BYTES_PER_KEY, ESTIMATED_BYTES_PER_KV};
 use crate::key::debug::Sprintable;
@@ -52,7 +56,10 @@ pub struct Datastore {
 	background_flusher: Option<Arc<BackgroundFlusher>>,
 	/// Garbage collector for advancing the version GC watermark
 	garbage_collector: Option<Arc<GarbageCollector>>,
+	/// threshold of estimeded size above which we run a scan in seperate thread.
+	inline_scan_threshold: u32,
 }
+
 pub struct Transaction {
 	/// Is the transaction complete?
 	done: AtomicBool,
@@ -74,6 +81,8 @@ pub struct Transaction {
 	/// need to ensure the memory is kept alive. This pointer must be declared
 	/// last, so that it is dropped last.
 	db: Pin<Arc<OptimisticTransactionDB>>,
+	/// threshold of estimeded size above which we run a scan in seperate thread.
+	inline_scan_threshold: u32,
 }
 
 /// The rocksdb transaction and its pre-captured snapshot, bundled together so
@@ -118,78 +127,73 @@ impl Datastore {
 		// Set incremental asynchronous bytes per sync to 2MiB
 		opts.set_wal_bytes_per_sync(2 * 1024 * 1024);
 		// Increase the background thread count
-		let threads = cnf::ROCKSDB_THREAD_COUNT.min(i32::MAX as usize) as i32;
+		let threads = config.thread_count.min(i32::MAX as usize) as i32;
 		info!(target: TARGET, "Background thread count: {threads}");
 		opts.increase_parallelism(threads);
 		// Specify the max concurrent background jobs
-		let background_jobs = cnf::ROCKSDB_JOBS_COUNT.min(i32::MAX as usize) as i32;
+		let background_jobs = config.jobs_count.min(i32::MAX as usize) as i32;
 		info!(target: TARGET, "Maximum background jobs count: {background_jobs}");
 		opts.set_max_background_jobs(background_jobs);
 		// Set the maximum number of open files that can be used by the database
-		let max_open_files = cnf::ROCKSDB_MAX_OPEN_FILES.min(i32::MAX as usize) as i32;
+		let max_open_files = config.max_open_files.min(i32::MAX as usize) as i32;
 		info!(target: TARGET, "Maximum number of open files: {max_open_files}");
 		opts.set_max_open_files(max_open_files);
 		// Set the number of log files to keep
-		info!(target: TARGET, "Number of log files to keep: {}", *cnf::ROCKSDB_KEEP_LOG_FILE_NUM);
-		opts.set_keep_log_file_num(*cnf::ROCKSDB_KEEP_LOG_FILE_NUM);
+		info!(target: TARGET, "Number of log files to keep: {}", config.keep_log_file_num);
+		opts.set_keep_log_file_num(config.keep_log_file_num);
 		// Set the target file size for compaction
-		info!(target: TARGET, "Target file size for compaction: {}", *cnf::ROCKSDB_TARGET_FILE_SIZE_BASE);
-		opts.set_target_file_size_base(*cnf::ROCKSDB_TARGET_FILE_SIZE_BASE);
+		info!(target: TARGET, "Target file size for compaction: {}", config.target_file_size_base);
+		opts.set_target_file_size_base(config.target_file_size_base);
 		// Set the levelled target file size multipler
-		let size_multiplier =
-			cnf::ROCKSDB_TARGET_FILE_SIZE_MULTIPLIER.min(i32::MAX as usize) as i32;
+		let size_multiplier = config.target_file_size_multiplier.min(i32::MAX as usize) as i32;
 		info!(target: TARGET, "Target file size compaction multiplier: {size_multiplier}");
 		opts.set_target_file_size_multiplier(size_multiplier);
 		// Delay compaction until the minimum number of files accumulate
-		let compaction_trigger = cnf::ROCKSDB_FILE_COMPACTION_TRIGGER.min(i32::MAX as usize) as i32;
+		let compaction_trigger = config.file_compaction_trigger.min(i32::MAX as usize) as i32;
 		info!(target: TARGET, "Number of files to trigger compaction: {compaction_trigger}");
 		opts.set_level_zero_file_num_compaction_trigger(compaction_trigger);
 		// Set the compaction readahead size
-		info!(target: TARGET, "Compaction readahead size: {}", *cnf::ROCKSDB_COMPACTION_READAHEAD_SIZE);
-		opts.set_compaction_readahead_size(*cnf::ROCKSDB_COMPACTION_READAHEAD_SIZE);
+		info!(target: TARGET, "Compaction readahead size: {}", config.compaction_readahead_size);
+		opts.set_compaction_readahead_size(config.compaction_readahead_size);
 		// Set the max number of subcompactions
-		info!(target: TARGET, "Maximum concurrent subcompactions: {}", *cnf::ROCKSDB_MAX_CONCURRENT_SUBCOMPACTIONS);
-		opts.set_max_subcompactions(*cnf::ROCKSDB_MAX_CONCURRENT_SUBCOMPACTIONS);
+		info!(target: TARGET, "Maximum concurrent subcompactions: {}", config.max_concurrent_subcompactions);
+		opts.set_max_subcompactions(config.max_concurrent_subcompactions);
 		// Use separate write thread queues
-		info!(target: TARGET, "Use separate thread queues: {}", *cnf::ROCKSDB_ENABLE_PIPELINED_WRITES);
-		opts.set_enable_pipelined_write(*cnf::ROCKSDB_ENABLE_PIPELINED_WRITES);
+		info!(target: TARGET, "Use separate thread queues: {}", config.enable_pipelined_writes);
+		opts.set_enable_pipelined_write(config.enable_pipelined_writes);
 		// Enable separation of keys and values
-		info!(target: TARGET, "Enable separation of keys and values: {}", *cnf::ROCKSDB_ENABLE_BLOB_FILES);
-		opts.set_enable_blob_files(*cnf::ROCKSDB_ENABLE_BLOB_FILES);
+		info!(target: TARGET, "Enable separation of keys and values: {}", config.enable_blob_files);
+		opts.set_enable_blob_files(config.enable_blob_files);
 		// Store large values separate from keys
-		info!(target: TARGET, "Minimum blob value size: {}", *cnf::ROCKSDB_MIN_BLOB_SIZE);
-		opts.set_min_blob_size(*cnf::ROCKSDB_MIN_BLOB_SIZE);
+		info!(target: TARGET, "Minimum blob value size: {}", config.min_blob_size);
+		opts.set_min_blob_size(config.min_blob_size);
 		// Additional blob file options
-		info!(target: TARGET, "Target blob file size: {}", *cnf::ROCKSDB_BLOB_FILE_SIZE);
-		opts.set_blob_file_size(*cnf::ROCKSDB_BLOB_FILE_SIZE);
+		info!(target: TARGET, "Target blob file size: {}", config.blob_file_size);
+		opts.set_blob_file_size(config.blob_file_size);
 		// Set the blob compression type
-		if let Some(c) = cnf::ROCKSDB_BLOB_COMPRESSION_TYPE.as_ref() {
-			info!(target: TARGET, "Blob compression type: {c}");
-			opts.set_blob_compression_type(match c.to_ascii_lowercase().as_str() {
-				"none" => DBCompressionType::None,
-				"snappy" => DBCompressionType::Snappy,
-				"lz4" => DBCompressionType::Lz4,
-				"zstd" => DBCompressionType::Zstd,
-				c => {
-					return Err(Error::Datastore(format!("Invalid compression type: {c}")));
-				}
-			});
-		}
+		let (db_compression, name) = match config.blob_compression_type {
+			cnf::BlobCompression::Snappy => (DBCompressionType::Snappy, "snappy"),
+			cnf::BlobCompression::Lz4 => (DBCompressionType::Lz4, "lz4"),
+			cnf::BlobCompression::Zstd => (DBCompressionType::Zstd, "zstd"),
+			cnf::BlobCompression::None => (DBCompressionType::None, "none"),
+		};
+		info!(target: TARGET, "Blob compression type: {name}");
+		opts.set_blob_compression_type(db_compression);
 		// Whether to enable blob garbage collection
-		info!(target: TARGET, "Enable blob garbage collection: {}", *cnf::ROCKSDB_ENABLE_BLOB_GC);
-		opts.set_enable_blob_gc(*cnf::ROCKSDB_ENABLE_BLOB_GC);
+		info!(target: TARGET, "Enable blob garbage collection: {}", config.enable_blob_gc);
+		opts.set_enable_blob_gc(config.enable_blob_gc);
 		// Set the blob garbage collection age cutoff
-		info!(target: TARGET, "Blob GC age cutoff: {}", *cnf::ROCKSDB_BLOB_GC_AGE_CUTOFF);
-		opts.set_blob_gc_age_cutoff(*cnf::ROCKSDB_BLOB_GC_AGE_CUTOFF);
+		info!(target: TARGET, "Blob GC age cutoff: {}", config.blob_gc_age_cutoff);
+		opts.set_blob_gc_age_cutoff(config.blob_gc_age_cutoff);
 		// Set the blob garbage collection force threshold
-		info!(target: TARGET, "Blob GC force threshold: {}", *cnf::ROCKSDB_BLOB_GC_FORCE_THRESHOLD);
-		opts.set_blob_gc_force_threshold(*cnf::ROCKSDB_BLOB_GC_FORCE_THRESHOLD);
+		info!(target: TARGET, "Blob GC force threshold: {}", config.blob_gc_force_threshold);
+		opts.set_blob_gc_force_threshold(config.blob_gc_force_threshold);
 		// Set the blob compaction readahead size
-		info!(target: TARGET, "Blob compaction readahead size: {}", *cnf::ROCKSDB_BLOB_COMPACTION_READAHEAD_SIZE);
-		opts.set_blob_compaction_readahead_size(*cnf::ROCKSDB_BLOB_COMPACTION_READAHEAD_SIZE);
+		info!(target: TARGET, "Blob compaction readahead size: {}", config.blob_compaction_readahead_size);
+		opts.set_blob_compaction_readahead_size(config.blob_compaction_readahead_size);
 		// Set the write-ahead-log size limit in MB
-		info!(target: TARGET, "Write-ahead-log file size limit: {}MB", *cnf::ROCKSDB_WAL_SIZE_LIMIT);
-		opts.set_wal_size_limit_mb(*cnf::ROCKSDB_WAL_SIZE_LIMIT);
+		info!(target: TARGET, "Write-ahead-log file size limit: {}MB", config.wal_size_limit);
+		opts.set_wal_size_limit_mb(config.wal_size_limit);
 		// Allow multiple writers to update memtables in parallel
 		info!(target: TARGET, "Allow concurrent memtable writes: true");
 		opts.set_allow_concurrent_memtable_write(true);
@@ -201,23 +205,21 @@ impl Datastore {
 		opts.set_enable_write_thread_adaptive_yield(true);
 		// Set the delete compaction factory
 		info!(target: TARGET, "Setting delete compaction factory: {} / {} ({})",
-			*cnf::ROCKSDB_DELETION_FACTORY_WINDOW_SIZE,
-			*cnf::ROCKSDB_DELETION_FACTORY_DELETE_COUNT,
-			*cnf::ROCKSDB_DELETION_FACTORY_RATIO,
+			config.deletion_factory_window_size,
+			config.deletion_factory_delete_count,
+			config.deletion_factory_ratio,
 		);
 		opts.add_compact_on_deletion_collector_factory(
-			*cnf::ROCKSDB_DELETION_FACTORY_WINDOW_SIZE,
-			*cnf::ROCKSDB_DELETION_FACTORY_DELETE_COUNT,
-			*cnf::ROCKSDB_DELETION_FACTORY_RATIO,
+			config.deletion_factory_window_size,
+			config.deletion_factory_delete_count,
+			config.deletion_factory_ratio,
 		);
 		// Set the datastore compaction style
-		info!(target: TARGET, "Setting compaction style: {}", *cnf::ROCKSDB_COMPACTION_STYLE);
-		opts.set_compaction_style(
-			match cnf::ROCKSDB_COMPACTION_STYLE.to_ascii_lowercase().as_str() {
-				"universal" => DBCompactionStyle::Universal,
-				_ => DBCompactionStyle::Level,
-			},
-		);
+		info!(target: TARGET, "Setting compaction style: {}", config.compaction_style);
+		opts.set_compaction_style(match config.compaction_style.to_ascii_lowercase().as_str() {
+			"universal" => DBCompactionStyle::Universal,
+			_ => DBCompactionStyle::Level,
+		});
 		// Set specific compression levels
 		info!(target: TARGET, "Setting compression level");
 		opts.set_compression_per_level(&[
@@ -228,8 +230,8 @@ impl Datastore {
 			DBCompressionType::Lz4,
 		]);
 		// Set specific storage log level
-		info!(target: TARGET, "Setting storage engine log level: {}", *cnf::ROCKSDB_STORAGE_LOG_LEVEL);
-		opts.set_log_level(match cnf::ROCKSDB_STORAGE_LOG_LEVEL.to_ascii_lowercase().as_str() {
+		info!(target: TARGET, "Setting storage engine log level: {}", config.storage_log_level);
+		opts.set_log_level(match config.storage_log_level.to_ascii_lowercase().as_str() {
 			"debug" => LogLevel::Debug,
 			"info" => LogLevel::Info,
 			"warn" => LogLevel::Warn,
@@ -257,9 +259,9 @@ impl Datastore {
 			None
 		};
 		// Configure and create the memory manager
-		let memory_manager = Arc::new(MemoryManager::configure(&mut opts)?);
+		let memory_manager = Arc::new(MemoryManager::configure(&mut opts, &config)?);
 		// Pre-configure the disk space manager
-		let should_create_disk_space_manager = DiskSpaceManager::configure(&mut opts)?;
+		let should_create_disk_space_manager = DiskSpaceManager::configure(&mut opts, &config)?;
 		// Pre-configure WAL options based on the resolved sync mode
 		match config.sync_mode {
 			// Pre-configure the background flusher
@@ -271,7 +273,7 @@ impl Datastore {
 		};
 		// Create the disk space manager if enabled
 		let disk_space_manager = if should_create_disk_space_manager {
-			Some(Arc::new(DiskSpaceManager::new(&mut opts)?))
+			Some(Arc::new(DiskSpaceManager::new(&mut opts, &config)?))
 		} else {
 			None
 		};
@@ -289,7 +291,7 @@ impl Datastore {
 		};
 		// Create the commit coordinator if enabled
 		let commit_coordinator = if let SyncMode::Every = config.sync_mode {
-			Some(Arc::new(CommitCoordinator::new(db.clone())?))
+			Some(Arc::new(CommitCoordinator::new(db.clone(), &config)?))
 		} else {
 			None
 		};
@@ -300,8 +302,8 @@ impl Datastore {
 			None
 		};
 		// Create the garbage collector if versioning with a finite retention period
-		let garbage_collector = if config.versioned && config.retention_ns > 0 {
-			Some(Arc::new(GarbageCollector::new(db.clone(), config.retention_ns)?))
+		let garbage_collector = if config.versioned && config.retention != Duration::ZERO {
+			Some(Arc::new(GarbageCollector::new(db.clone(), config.retention)?))
 		} else {
 			None
 		};
@@ -325,6 +327,7 @@ impl Datastore {
 			background_flusher,
 			commit_coordinator,
 			garbage_collector,
+			inline_scan_threshold: config.inline_scan_threshold,
 		})
 	}
 
@@ -510,6 +513,7 @@ impl Datastore {
 			disk_space_manager: self.disk_space_manager.clone(),
 			commit_coordinator: self.commit_coordinator.clone(),
 			db: self.db.clone(),
+			inline_scan_threshold: self.inline_scan_threshold,
 		}))
 	}
 }
@@ -654,9 +658,7 @@ impl Transaction {
 	/// entry-by-entry before any result is collected. A large skip combined
 	/// with a small limit would otherwise be classified as inline and block
 	/// the async executor for the entire skip traversal.
-	fn should_offload(limit: ScanLimit, skip: u32, bytes_per_entry: u32) -> bool {
-		// Get the allowed inline scan threshold
-		let threshold = *cnf::ROCKSDB_INLINE_SCAN_THRESHOLD;
+	fn should_offload(threshold: u32, limit: ScanLimit, skip: u32, bytes_per_entry: u32) -> bool {
 		// Estimate the byte cost of the skip prefix that the iterator
 		// must traverse before returning any result.
 		let skip_bytes = skip.saturating_mul(bytes_per_entry);
@@ -1211,7 +1213,7 @@ impl Transactable for Transaction {
 			return Err(Error::TransactionFinished);
 		}
 		// Dispatch inline for small bounded scans, offload for large bounded
-		if Self::should_offload(limit, skip, ESTIMATED_BYTES_PER_KEY) {
+		if Self::should_offload(self.inline_scan_threshold, limit, skip, ESTIMATED_BYTES_PER_KEY) {
 			affinitypool::spawn_local(move || {
 				let guard = self.inner.blocking_lock();
 				self.keys_blocking(rng, limit, skip, version, Direction::Forward, guard)
@@ -1241,7 +1243,7 @@ impl Transactable for Transaction {
 			return Err(Error::TransactionFinished);
 		}
 		// Dispatch inline for small bounded scans, offload for large bounded
-		if Self::should_offload(limit, skip, ESTIMATED_BYTES_PER_KEY) {
+		if Self::should_offload(self.inline_scan_threshold, limit, skip, ESTIMATED_BYTES_PER_KEY) {
 			affinitypool::spawn_local(move || {
 				let guard = self.inner.blocking_lock();
 				self.keys_blocking(rng, limit, skip, version, Direction::Backward, guard)
@@ -1271,7 +1273,7 @@ impl Transactable for Transaction {
 			return Err(Error::TransactionFinished);
 		}
 		// Dispatch inline for small bounded scans, offload for large bounded
-		if Self::should_offload(limit, skip, ESTIMATED_BYTES_PER_KV) {
+		if Self::should_offload(self.inline_scan_threshold, limit, skip, ESTIMATED_BYTES_PER_KV) {
 			affinitypool::spawn_local(move || {
 				let guard = self.inner.blocking_lock();
 				self.scan_blocking(rng, limit, skip, version, Direction::Forward, guard)
@@ -1301,7 +1303,7 @@ impl Transactable for Transaction {
 			return Err(Error::TransactionFinished);
 		}
 		// Dispatch inline for small bounded scans, offload for large bounded
-		if Self::should_offload(limit, skip, ESTIMATED_BYTES_PER_KV) {
+		if Self::should_offload(self.inline_scan_threshold, limit, skip, ESTIMATED_BYTES_PER_KV) {
 			affinitypool::spawn_local(move || {
 				let guard = self.inner.blocking_lock();
 				self.scan_blocking(rng, limit, skip, version, Direction::Backward, guard)

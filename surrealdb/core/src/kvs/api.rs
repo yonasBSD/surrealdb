@@ -7,12 +7,12 @@ use anyhow::bail;
 
 use super::err::{Error, Result};
 use super::util;
-use crate::cnf::{COUNT_BATCH_SIZE, NORMAL_FETCH_SIZE};
 use crate::key::debug::Sprintable;
 use crate::kvs::batch::Batch;
 use crate::kvs::timestamp::IncTimeStamp;
 use crate::kvs::{
-	BoxTimeStamp, BoxTimeStampImpl, HlcTimeStamp, HlcTimeStampImpl, IncTimeStampImpl, Key, Val,
+	BoxTimeStamp, BoxTimeStampImpl, COUNT_BATCH_SIZE, HlcTimeStamp, HlcTimeStampImpl,
+	IncTimeStampImpl, Key, NORMAL_BATCH_SIZE, Val,
 };
 
 /// Specifies the limit for scan operations
@@ -244,7 +244,7 @@ pub trait Transactable: requirements::TransactionRequirements {
 		let mut out = vec![];
 		let mut next = Some(rng);
 		while let Some(rng) = next {
-			let res = self.batch_keys_vals(rng, *NORMAL_FETCH_SIZE, version).await?;
+			let res = self.batch_keys_vals(rng, NORMAL_BATCH_SIZE, version).await?;
 			next = res.next;
 			for v in res.result {
 				out.push(v);
@@ -289,7 +289,7 @@ pub trait Transactable: requirements::TransactionRequirements {
 		// Continue with function logic
 		let mut next = Some(rng);
 		while let Some(rng) = next {
-			let res = self.batch_keys(rng, *NORMAL_FETCH_SIZE, None).await?;
+			let res = self.batch_keys(rng, NORMAL_BATCH_SIZE, None).await?;
 			next = res.next;
 			for k in res.result {
 				self.del(k).await?;
@@ -334,7 +334,7 @@ pub trait Transactable: requirements::TransactionRequirements {
 		// Continue with function logic
 		let mut next = Some(rng);
 		while let Some(rng) = next {
-			let res = self.batch_keys(rng, *NORMAL_FETCH_SIZE, None).await?;
+			let res = self.batch_keys(rng, NORMAL_BATCH_SIZE, None).await?;
 			next = res.next;
 			for k in res.result {
 				self.clr(k).await?;
@@ -357,7 +357,7 @@ pub trait Transactable: requirements::TransactionRequirements {
 		let mut len = 0;
 		let mut next = Some(rng);
 		while let Some(rng) = next {
-			let res = self.batch_keys(rng, *COUNT_BATCH_SIZE, version).await?;
+			let res = self.batch_keys(rng, COUNT_BATCH_SIZE, version).await?;
 			next = res.next;
 			len += res.result.len();
 		}

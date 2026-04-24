@@ -17,10 +17,6 @@ BENCH_SAMPLE_SIZE = { value = "10", condition = { env_not_set = [
 BENCH_FEATURES = { value = "protocol-ws,kv-mem,kv-rocksdb,kv-surrealkv", condition = { env_not_set = [
     "BENCH_FEATURES",
 ] } }
-# Used to speed up the scripting timeout test, otherwise the test takes 5 seconds.
-SURREAL_SCRIPTING_MAX_TIME_LIMIT = { value = "500", condition = { env_not_set = [
-    "SURREAL_SCRIPTING_MAX_TIME_LIMIT",
-] } }
 # Configure LLVM profiling output to go to target directory instead of repo root
 LLVM_PROFILE_FILE = { value = "target/llvm-cov-target/%p-%m.profraw", condition = { env_not_set = [
     "LLVM_PROFILE_FILE",
@@ -499,7 +495,7 @@ run_task = { name = [
 [tasks.ci-kvs-rocksdb]
 category = "CI - INTEGRATION TESTS"
 description = "Run KVS integration tests with the RocksDB engine"
-env = { _TEST_API_ENGINE = "file", _TEST_FEATURES = "kv-rocksdb", SURREAL_ROCKSDB_SST_MAX_ALLOWED_SPACE_USAGE = 10485760, SURREAL_ROCKSDB_WRITE_BUFFER_SIZE = 10240, SURREAL_ROCKSDB_WAL_SIZE_LIMIT = 1 }
+env = { _TEST_API_ENGINE = "file", _TEST_FEATURES = "kv-rocksdb" }
 run_task = { name = [
     "test-kvs",
 ], fork = true, parallel = true }
@@ -597,7 +593,7 @@ run_task = { name = [
 category = "CI - WORKSPACE TESTS"
 description = "Run workspace library tests"
 command = "cargo"
-env = { CARGO_BUILD_JOBS = "8", SURREAL_ROCKSDB_SST_MAX_ALLOWED_SPACE_USAGE = 10485760, SURREAL_ROCKSDB_WRITE_BUFFER_SIZE = 10240, SURREAL_ROCKSDB_WAL_SIZE_LIMIT = 1 }
+env = { CARGO_BUILD_JOBS = "8" }
 args = [
     "nextest",
     "run",
@@ -690,19 +686,19 @@ description = "Run language tests with code coverage for core crates"
 script = """
     #!/bin/bash -ex
     cd language-tests
-    
+
     # Set up LLVM coverage instrumentation environment
     eval "$(cargo llvm-cov show-env --export-prefix)"
-    
+
     # Clean previous coverage artifacts
     cargo llvm-cov clean --workspace
-    
+
     # Build language-tests with instrumentation
     cargo build
-    
+
     # Run the language tests (this exercises surrealdb-core)
     ./target/debug/surrealql-test --color always run --no-wip --jobs 3 --backend memory
-    
+
     # Generate coverage report, excluding the harness code
     cargo llvm-cov report \
         --lcov \

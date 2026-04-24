@@ -11,7 +11,8 @@ pub fn encode(v: Value) -> anyhow::Result<Vec<u8>> {
 	Ok(res)
 }
 
-pub fn decode(bytes: &[u8]) -> anyhow::Result<Value> {
-	let encoding = ciborium::from_reader(bytes).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+pub fn decode(bytes: &[u8], recursion_limit: usize) -> anyhow::Result<Value> {
+	let encoding = ciborium::de::from_reader_with_recursion_limit(bytes, recursion_limit)
+		.map_err(|e| anyhow::anyhow!(e.to_string()))?;
 	convert::to_value(encoding).map_err(|e| anyhow::anyhow!(e))
 }

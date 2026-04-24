@@ -238,9 +238,14 @@ impl MatchContext {
 				);
 
 				// Open the full-text index
-				let fti =
-					FullTextIndex::new(frozen.get_index_stores(), tx.as_ref(), ikb, ft_params)
-						.await?;
+				let fti = FullTextIndex::new(
+					frozen.get_index_stores(),
+					tx.as_ref(),
+					ikb,
+					ft_params,
+					&frozen.config.file_allowlist,
+				)
+				.await?;
 
 				// Extract query terms
 				let query_terms = {

@@ -16,6 +16,7 @@ use crate::CommunityComposer;
 use crate::buc::BucketStoreProvider;
 use crate::buc::manager::BucketsManager;
 use crate::cnf::dynamic::DynamicConfiguration;
+use crate::cnf::{CommonConfig, ConfigMap};
 use crate::dbs::Capabilities;
 #[cfg(feature = "http")]
 use crate::http::HttpClient;
@@ -42,6 +43,7 @@ pub struct Builder {
 	query_timeout: Option<Duration>,
 	temporary_directory: Option<Arc<PathBuf>>,
 	authenticate: bool,
+	config: ConfigMap,
 	#[cfg(feature = "surrealism")]
 	lazy_surrealism: bool,
 }
@@ -64,9 +66,16 @@ impl Builder {
 			query_timeout: None,
 			temporary_directory: None,
 			authenticate: false,
+			config: ConfigMap::empty(),
 			#[cfg(feature = "surrealism")]
 			lazy_surrealism: false,
 		}
+	}
+
+	/// Sets config values for the builder.
+	pub fn with_config(mut self, config: ConfigMap) -> Self {
+		self.config = config;
+		self
 	}
 
 	/// Sets the capabilities for the datastore.
@@ -148,8 +157,10 @@ impl Builder {
 	where
 		F: TransactionBuilderFactory + BucketStoreProvider + 'static,
 	{
-		let tx_builder = composer.new_transaction_builder(path, self.shutdown.clone()).await?;
-		let buckets = BucketsManager::new(Arc::new(composer));
+		let tx_builder = composer
+			.new_transaction_builder(path, self.shutdown.clone(), self.config.clone())
+			.await?;
+		let buckets = BucketsManager::new(Box::new(composer), self.config.load());
 
 		self.build_with_tx_builder_buckets(tx_builder, buckets).await
 	}
@@ -160,14 +171,15 @@ impl Builder {
 		buckets: BucketsManager,
 	) -> Result<Datastore> {
 		let async_event_trigger = Arc::new(Notify::new());
-		let tf = TransactionFactory::new(async_event_trigger.clone(), builder);
+		let config = Arc::new(self.config.load::<CommonConfig>());
+		let tf = TransactionFactory::new(async_event_trigger.clone(), builder, config.clone());
 		let id = self.id.unwrap_or_else(Uuid::new_v4);
 		let capabilities = Arc::new(self.capabilities);
 		let dynamic_configuration = DynamicConfiguration::default();
 		dynamic_configuration.set_query_timeout(self.query_timeout);
 		#[cfg(feature = "http")]
 		let http_client = Arc::new(
-			HttpClient::new(capabilities.allow_net.clone(), capabilities.deny_net.clone())
+			HttpClient::new(capabilities.allow_net.clone(), capabilities.deny_net.clone(), &config)
 				.context("Could not create http client")?,
 		);
 
@@ -180,22 +192,23 @@ impl Builder {
 			transaction_timeout: self.transaction_timeout,
 			notification_channel: self.notify_channel,
 			capabilities,
-			index_stores: IndexStores::default(),
+			index_stores: IndexStores::new(config.hnsw_cache_size),
 			index_builder: IndexBuilder::new(tf.clone()),
 			#[cfg(feature = "jwks")]
 			jwks_cache: Arc::new(RwLock::new(JwksCache::new())),
 			#[cfg(storage)]
 			temporary_directory: self.temporary_directory,
-			cache: Arc::new(DatastoreCache::new()),
+			cache: Arc::new(DatastoreCache::new(config.datastore_cache_size)),
 			buckets,
 			sequences: Sequences::new(tf, id),
-			#[cfg(feature = "surrealism")]
-			surrealism_cache: Arc::new(SurrealismCache::new()),
 			async_event_trigger,
+			#[cfg(feature = "surrealism")]
+			surrealism_cache: Arc::new(SurrealismCache::new(config.surrealism_cache_size)),
 			#[cfg(feature = "surrealism")]
 			lazy_surrealism: self.lazy_surrealism,
 			#[cfg(feature = "http")]
 			http_client,
+			config,
 		})
 	}
 }

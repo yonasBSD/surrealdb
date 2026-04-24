@@ -8,6 +8,7 @@ use futures_util::{SinkExt, TryStreamExt};
 use http::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use surrealdb_core::cnf::CommonConfig;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::oneshot;
@@ -150,7 +151,8 @@ impl Socket {
 				// First of all we convert the JSON type to a string.
 				let json = message.to_string();
 				// Then we parse the JSON in to SurrealQL.
-				let surrealql = surrealdb_core::syn::value_legacy_strand(&json)?;
+				let surrealql =
+					surrealdb_core::syn::value_legacy_strand(&json, &CommonConfig::default())?;
 				// Then we convert the SurrealQL in to CBOR.
 				let cbor = surrealdb_core::rpc::format::cbor::encode(surrealql)?;
 				// THen output the message.
@@ -180,7 +182,7 @@ impl Socket {
 						// a serde_json::Value so that test assertions work.
 						// First of all we deserialize the CBOR data.
 						// Then we convert it to a SurrealQL Value.
-						let msg = surrealdb_core::rpc::format::cbor::decode(msg.as_ref())?;
+						let msg = surrealdb_core::rpc::format::cbor::decode(msg.as_ref(), 100)?;
 						// Then we convert the SurrealQL to JSON.
 						let msg = msg.into_json_value();
 						// Then output the response.

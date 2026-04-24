@@ -19,11 +19,10 @@ use super::api::ScanLimit;
 use super::err::{Error, Result};
 use super::timestamp::MAX_TIMESTAMP_BYTES;
 use super::{ESTIMATED_BYTES_PER_KEY, ESTIMATED_BYTES_PER_KV, util};
-use crate::cnf::COUNT_BATCH_SIZE;
 use crate::key::debug::Sprintable;
 use crate::kvs::api::Transactable;
 use crate::kvs::timestamp::{BoxTimeStamp, BoxTimeStampImpl};
-use crate::kvs::{Key, TimeStamp, TimeStampImpl, Val};
+use crate::kvs::{COUNT_BATCH_SIZE, Key, TimeStamp, TimeStampImpl, Val};
 
 const TARGET: &str = "surrealdb::core::kvs::tikv";
 
@@ -477,7 +476,7 @@ impl Transactable for Transaction {
 		// Loop until we have exhausted the range
 		loop {
 			// Scan keys in key-only mode (no values fetched)
-			let iter = inner.tx.scan_keys(start..end.clone(), *COUNT_BATCH_SIZE).await?;
+			let iter = inner.tx.scan_keys(start..end.clone(), COUNT_BATCH_SIZE).await?;
 			// Count the items, tracking the last key seen
 			let mut key: Option<tikv::Key> = None;
 			// Count the items in this batch
@@ -490,7 +489,7 @@ impl Transactable for Transaction {
 			// Increment the total count
 			total += count as usize;
 			// If we got fewer than batch_size, we've exhausted the range
-			if count < *COUNT_BATCH_SIZE {
+			if count < COUNT_BATCH_SIZE {
 				break;
 			}
 			// Advance past the last key for the next batch

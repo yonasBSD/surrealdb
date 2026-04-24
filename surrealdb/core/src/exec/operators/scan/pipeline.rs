@@ -221,7 +221,7 @@ pub(crate) fn kv_scan_stream(
 	direction: ScanDirection,
 	pre_skip: usize,
 	prefetch: bool,
-	limit_hint: Option<usize>,
+	limit_hint: Option<u32>,
 ) -> ValueBatchStream {
 	let skip = pre_skip.min(u32::MAX as usize) as u32;
 	let stream = async_stream::try_stream! {

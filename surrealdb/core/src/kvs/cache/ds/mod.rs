@@ -20,12 +20,8 @@ pub struct DatastoreCache {
 
 impl DatastoreCache {
 	/// Creates a new datastore cache
-	pub(in crate::kvs) fn new() -> Self {
-		let cache = Cache::with_weighter(
-			*crate::cnf::DATASTORE_CACHE_SIZE,
-			*crate::cnf::DATASTORE_CACHE_SIZE as u64,
-			weight::Weight,
-		);
+	pub(in crate::kvs) fn new(size: usize) -> Self {
+		let cache = Cache::with_weighter(size, size as u64, weight::Weight);
 		Self {
 			cache,
 		}

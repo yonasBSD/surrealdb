@@ -11,9 +11,9 @@ use crate::kvs::LockType::*;
 use crate::kvs::TransactionType::*;
 
 pub async fn mock() -> (FrozenContext, Options) {
-	let opt = Options::new(Uuid::new_v4(), DynamicConfiguration::default())
-		.with_auth(Arc::new(Auth::for_root(Role::Owner)));
 	let kvs = Datastore::new("memory").await.unwrap();
+	let opt = Options::new(Uuid::new_v4(), DynamicConfiguration::default(), &kvs.config())
+		.with_auth(Arc::new(Auth::for_root(Role::Owner)));
 	let txn = kvs.transaction(Write, Optimistic).await.unwrap().enclose();
 	let mut ctx = Context::new_test();
 	ctx.set_transaction(txn);

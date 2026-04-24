@@ -79,6 +79,7 @@ impl Websocket {
 		trace!("WebSocket {id} connected");
 		// Create a channel for sending messages
 		let (sender, receiver) = channel(*WEBSOCKET_RESPONSE_CHANNEL_SIZE);
+		let rec_limit = datastore.config().max_object_parsing_depth as usize;
 		// Create and store the RPC connection
 		let rpc = Arc::new(Websocket {
 			id,
@@ -91,6 +92,7 @@ impl Websocket {
 			channel: sender.clone(),
 			datastore,
 		});
+
 		// Store the default session keyed by connection id
 		let session = session.with_rt(true);
 		rpc.set_session(id, Arc::new(RwLock::new(session)));
@@ -109,7 +111,7 @@ impl Websocket {
 				let (ws_sender, ws_receiver) = buffer.split();
 				// Spawn async tasks for the WebSocket
 				tasks.spawn(Self::ping(rpc.clone(), sender.clone()));
-				tasks.spawn(Self::read(rpc.clone(), ws_receiver, sender.clone()));
+				tasks.spawn(Self::read(rpc.clone(), ws_receiver, sender.clone(), rec_limit));
 				tasks.spawn(Self::write(rpc.clone(), ws_sender, receiver));
 			}
 			false => {
@@ -117,7 +119,7 @@ impl Websocket {
 				let (ws_sender, ws_receiver) = ws.split();
 				// Spawn async tasks for the WebSocket
 				tasks.spawn(Self::ping(rpc.clone(), sender.clone()));
-				tasks.spawn(Self::read(rpc.clone(), ws_receiver, sender.clone()));
+				tasks.spawn(Self::read(rpc.clone(), ws_receiver, sender.clone(), rec_limit));
 				tasks.spawn(Self::write(rpc.clone(), ws_sender, receiver));
 			}
 		}
@@ -237,6 +239,7 @@ impl Websocket {
 		rpc: Arc<Websocket>,
 		mut socket: impl StreamExt<Item = Result<Message, axum::Error>> + Unpin,
 		internal_sender: Sender<Message>,
+		rec_limit: usize,
 	) {
 		// Clone the WebSocket shutdown token
 		let shutdown = rpc.shutdown.clone();
@@ -270,7 +273,7 @@ impl Websocket {
 								break;
 							}
 							// Otherwise spawn and handle the message
-							tasks.push(Self::handle_message(&rpc, msg, chn));
+							tasks.push(Self::handle_message(&rpc, msg, chn, rec_limit));
 						}
 						Message::Close(_) => {
 							// Respond with a close message
@@ -321,7 +324,12 @@ impl Websocket {
 	}
 
 	/// Handle an individual WebSocket message
-	async fn handle_message(rpc: &Arc<Websocket>, msg: Message, chn: Sender<Message>) {
+	async fn handle_message(
+		rpc: &Arc<Websocket>,
+		msg: Message,
+		chn: Sender<Message>,
+		rec_limit: usize,
+	) {
 		// Clone the WebSocket cancellation token
 		let shutdown = rpc.shutdown.clone();
 		// Clone the WebSocket cancellation token
@@ -340,7 +348,7 @@ impl Websocket {
 			let req_cx = RequestContext::default();
 			let otel_cx = Arc::new(TelemetryContext::new().with_value(req_cx.clone()));
 			// Parse the RPC request structure
-			match rpc.format.req_ws(msg) {
+			match rpc.format.req_ws(msg,rec_limit) {
 				Ok(req) => {
 					// Now that we know the method, we can update the span and create otel context
 					span.record("rpc.method", req.method.to_str());

@@ -22,6 +22,7 @@ use crate::catalog::{
 	self, ApiDefinition, ConfigDefinition, DatabaseDefinition, DatabaseId, DefaultConfig, IndexId,
 	NamespaceDefinition, NamespaceId, Record, TableDefinition, TableId,
 };
+use crate::cnf::CommonConfig;
 use crate::ctx::Context;
 use crate::dbs::node::Node;
 use crate::doc::CursorRecord;
@@ -86,11 +87,12 @@ impl Transaction {
 		sequences: Sequences,
 		async_event_trigger: Arc<Notify>,
 		tr: Transactor,
+		config: &CommonConfig,
 	) -> Transaction {
 		Transaction {
 			local,
 			tr,
-			cache: TransactionCache::new(),
+			cache: TransactionCache::new(config.transaction_cache_size),
 			sequences,
 			cf: crate::cf::Writer::new(),
 			async_event_trigger,
@@ -708,7 +710,7 @@ impl Transaction {
 		skip: u32,
 		dir: ScanDirection,
 		prefetch: bool,
-		limit_hint: Option<usize>,
+		limit_hint: Option<u32>,
 	) -> impl Stream<Item = Result<Vec<(Key, Val)>>> + '_ {
 		self.tr
 			.stream_keys_vals(

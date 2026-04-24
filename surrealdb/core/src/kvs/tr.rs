@@ -8,6 +8,7 @@ use super::api::{ScanLimit, Transactable};
 use super::batch::Batch;
 use super::scanner::{Direction, Scanner};
 use super::{IntoBytes, Key, Result, Val};
+use crate::kvs::NORMAL_BATCH_SIZE;
 use crate::kvs::timestamp::{BoxTimeStamp, BoxTimeStampImpl};
 
 /// Specifies whether the transaction is read-only or writeable.
@@ -519,7 +520,7 @@ impl Transactor {
 		skip: u32,
 		dir: Direction,
 		prefetch: bool,
-		limit_hint: Option<usize>,
+		limit_hint: Option<u32>,
 	) -> impl Stream<Item = Result<Vec<(Key, Val)>>> + '_
 	where
 		K: IntoBytes + Debug,
@@ -541,16 +542,12 @@ impl Transactor {
 		// When a limit_hint is present, cap the initial batch size so that
 		// small-limit queries (e.g. LIMIT 10) don't fetch 500+ records from
 		// storage only to discard most of them.
-		let default_size = *crate::cnf::NORMAL_FETCH_SIZE;
+		// TODO: Set to right value
 		if prefetch {
-			let batch = default_size * 2;
-			let batch = match limit_hint {
-				Some(hint) => batch.min(hint as u32),
-				None => batch,
-			};
-			scanner = scanner.prefetch(true).initial_batch_size(ScanLimit::Count(batch));
+			let size = limit_hint.unwrap_or(NORMAL_BATCH_SIZE * 2).min(NORMAL_BATCH_SIZE * 2);
+			scanner = scanner.prefetch(true).initial_batch_size(ScanLimit::Count(size));
 		} else if let Some(hint) = limit_hint {
-			scanner = scanner.initial_batch_size(ScanLimit::Count(default_size.min(hint as u32)));
+			scanner = scanner.initial_batch_size(ScanLimit::Count(hint.min(NORMAL_BATCH_SIZE)));
 		}
 		// Return the stream
 		scanner

@@ -177,7 +177,12 @@ impl ExecOperator for UnionIndexScan {
 			let sub_stream = if self.merge_by_id.is_some() {
 				stream
 			} else {
-				buffer_stream(stream, input.access_mode(), input.cardinality_hint())
+				buffer_stream(
+					stream,
+					input.access_mode(),
+					input.cardinality_hint(),
+					ctx.root().ctx.config.operator_buffer_size,
+				)
 			};
 			sub_streams.push(sub_stream);
 		}

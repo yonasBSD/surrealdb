@@ -25,7 +25,7 @@ use crate::buc::store::ObjectKey;
 use crate::buc::store::ObjectStore;
 use crate::catalog::providers::{CatalogProvider, DatabaseProvider, NamespaceProvider};
 use crate::catalog::{DatabaseDefinition, DatabaseId, NamespaceId};
-use crate::cnf::PROTECTED_PARAM_NAMES;
+use crate::cnf::{CommonConfig, PROTECTED_PARAM_NAMES};
 use crate::ctx::canceller::Canceller;
 use crate::ctx::reason::Reason;
 #[cfg(feature = "surrealism")]
@@ -51,8 +51,6 @@ use crate::mem::ALLOC;
 use crate::sql::expression::convert_public_value_to_internal;
 #[cfg(feature = "surrealism")]
 use crate::surrealism::cache::{SurrealismCache, SurrealismCacheLookup, SurrealismCachedModule};
-#[cfg(feature = "surrealism")]
-use crate::surrealism::host::module_allow_net_targets;
 use crate::types::{PublicNotification, PublicVariables};
 use crate::val::Value;
 
@@ -114,6 +112,8 @@ pub struct Context {
 	/// Client for making http requests.
 	#[cfg(feature = "http")]
 	http_client: Arc<HttpClient>,
+	// Executor config
+	pub config: Arc<CommonConfig>,
 }
 
 impl Debug for Context {
@@ -141,7 +141,7 @@ impl Context {
 			query_executor: None,
 			iteration_stage: None,
 			capabilities: parent.capabilities.clone(),
-			index_stores: IndexStores::default(),
+			index_stores: IndexStores::new(parent.config.hnsw_cache_size),
 			cache: None,
 			index_builder: None,
 			sequences: None,
@@ -157,6 +157,7 @@ impl Context {
 			redact_volatile_explain_attrs: false,
 			matches_context: None,
 			knn_context: None,
+			config: parent.config.clone(),
 			#[cfg(feature = "http")]
 			http_client: parent.http_client.clone(),
 		}
@@ -207,6 +208,7 @@ impl Context {
 			redact_volatile_explain_attrs: parent.redact_volatile_explain_attrs,
 			matches_context: parent.matches_context.clone(),
 			knn_context: parent.knn_context.clone(),
+			config: parent.config.clone(),
 			#[cfg(feature = "http")]
 			http_client,
 		}
@@ -243,6 +245,7 @@ impl Context {
 			redact_volatile_explain_attrs: parent.redact_volatile_explain_attrs,
 			matches_context: parent.matches_context.clone(),
 			knn_context: parent.knn_context.clone(),
+			config: parent.config.clone(),
 			#[cfg(feature = "http")]
 			http_client: parent.http_client.clone(),
 		}
@@ -286,6 +289,7 @@ impl Context {
 			redact_volatile_explain_attrs: from.redact_volatile_explain_attrs,
 			matches_context: from.matches_context.clone(),
 			knn_context: from.knn_context.clone(),
+			config: from.config.clone(),
 			#[cfg(feature = "http")]
 			http_client: from.http_client.clone(),
 		}
@@ -322,6 +326,7 @@ impl Context {
 			redact_volatile_explain_attrs: from.redact_volatile_explain_attrs,
 			matches_context: from.matches_context.clone(),
 			knn_context: from.knn_context.clone(),
+			config: from.config.clone(),
 			#[cfg(feature = "http")]
 			http_client: from.http_client.clone(),
 		}
@@ -340,6 +345,7 @@ impl Context {
 		#[cfg(feature = "http")] http_client: Arc<HttpClient>,
 		#[cfg(storage)] temporary_directory: Option<Arc<PathBuf>>,
 		buckets: BucketsManager,
+		config: Arc<CommonConfig>,
 		#[cfg(feature = "surrealism")] surrealism_cache: Arc<SurrealismCache>,
 	) -> Result<Context> {
 		let planner_strategy = capabilities.planner_strategy().clone();
@@ -370,6 +376,7 @@ impl Context {
 			redact_volatile_explain_attrs: false,
 			matches_context: None,
 			knn_context: None,
+			config,
 			#[cfg(feature = "http")]
 			http_client,
 		};
@@ -393,7 +400,7 @@ impl Context {
 			query_executor: None,
 			iteration_stage: None,
 			capabilities: Arc::new(Capabilities::default()),
-			index_stores: IndexStores::default(),
+			index_stores: IndexStores::new(256 * 1024 * 1024),
 			cache: None,
 			index_builder: None,
 			sequences: None,
@@ -409,11 +416,13 @@ impl Context {
 			redact_volatile_explain_attrs: false,
 			matches_context: None,
 			knn_context: None,
+			config: Default::default(),
 			#[cfg(feature = "http")]
 			http_client: Arc::new(
 				HttpClient::new(
 					crate::dbs::capabilities::Targets::All,
 					crate::dbs::capabilities::Targets::None,
+					&Default::default(),
 				)
 				.expect("http client to be created"),
 			),
@@ -1021,6 +1030,13 @@ impl Context {
 		let Some(cache) = self.get_surrealism_cache() else {
 			bail!("Surrealism cache is not available");
 		};
+		let max_pool_size = self.config.surrealism_max_pool_size;
+		let max_memory = self.config.surrealism_max_memory;
+		let max_execution_time =
+			self.config.surrealism_max_execution_time.map(Duration::from_millis);
+		let max_kv_entries = self.config.surrealism_max_kv_entries;
+		let max_kv_value_bytes = self.config.surrealism_max_kv_value_bytes;
+		let config = self.config.clone();
 
 		cache
 			.get_or_insert_with(&lookup, async || {
@@ -1047,7 +1063,7 @@ impl Context {
 					#[cfg(not(storage))]
 					temp_base: None,
 					temp_prefix: &temp_prefix,
-					max_fs_bytes: *crate::cnf::SURREALISM_MAX_FS_BYTES,
+					max_fs_bytes: self.config.surrealism_max_fs_bytes,
 				};
 				let package =
 					SurrealismPackage::from_reader(std::io::Cursor::new(surli), &unpack_opts)?;
@@ -1058,24 +1074,18 @@ impl Context {
 				let org = package.config.meta.organisation.clone();
 				let name = package.config.meta.name.clone();
 
-				let server_pool_size = *crate::cnf::SURREALISM_MAX_POOL_SIZE;
-				let server_max_memory = *crate::cnf::SURREALISM_MAX_MEMORY;
-				let server_max_execution_time =
-					crate::cnf::SURREALISM_MAX_EXECUTION_TIME.map(std::time::Duration::from_millis);
-				let server_max_kv_entries = *crate::cnf::SURREALISM_MAX_KV_ENTRIES;
-				let server_max_kv_value_bytes = *crate::cnf::SURREALISM_MAX_KV_VALUE_BYTES;
-
 				#[cfg(feature = "http")]
-				let module_net_targets = module_allow_net_targets(&package.config.capabilities);
+				let module_net_targets =
+					crate::surrealism::host::module_allow_net_targets(&package.config.capabilities);
 
 				let runtime = tokio::task::spawn_blocking(move || {
 					Runtime::new(
 						package,
-						server_pool_size,
-						server_max_memory,
-						server_max_execution_time,
-						server_max_kv_entries,
-						server_max_kv_value_bytes,
+						max_pool_size,
+						max_memory,
+						max_execution_time,
+						max_kv_entries,
+						max_kv_value_bytes,
 					)
 				})
 				.await
@@ -1087,7 +1097,7 @@ impl Context {
 				#[cfg(feature = "http")]
 				let client = if module_net_targets.is_empty() {
 					Arc::new(
-						HttpClient::new(Targets::None, Targets::All)
+						HttpClient::new(Targets::None, Targets::All, &config)
 							.context("Failed to create http client for WASM module")?,
 					)
 				} else {
@@ -1096,6 +1106,7 @@ impl Context {
 						HttpClient::new(
 							allow,
 							self.capabilities.denied_network_targets_ref().clone(),
+							&config,
 						)
 						.context("Failed to create http client for WASM module")?,
 					)

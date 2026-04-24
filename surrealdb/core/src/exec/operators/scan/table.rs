@@ -244,7 +244,7 @@ impl ExecOperator for TableScan {
 			let beg = record::prefix(ns.namespace_id, db.database_id, &table_name)?;
 			let end = record::suffix(ns.namespace_id, db.database_id, &table_name)?;
 			let prefetch = effective_storage_limit.is_none();
-			let limit_hint = limit_val.map(|l| l + start_val);
+			let limit_hint = limit_val.map(|l| (l + start_val).try_into().unwrap_or(u32::MAX));
 			let mut source = kv_scan_stream(
 				Arc::clone(&txn), beg, end, version,
 				effective_storage_limit, direction, pre_skip, prefetch, limit_hint,

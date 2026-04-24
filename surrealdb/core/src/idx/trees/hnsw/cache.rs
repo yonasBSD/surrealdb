@@ -7,7 +7,6 @@ use quick_cache::{DefaultHashBuilder, Lifecycle, Weighter};
 use roaring::RoaringTreemap;
 
 use crate::catalog::{DatabaseId, IndexId, NamespaceId, TableId};
-use crate::cnf;
 use crate::idx::trees::hnsw::ElementId;
 use crate::idx::trees::vector::SharedVector;
 
@@ -143,14 +142,9 @@ struct Inner {
 	indexes: ElementsPerIndex,
 }
 
-impl Default for VectorCache {
-	fn default() -> Self {
-		Self::new(*cnf::HNSW_CACHE_SIZE)
-	}
-}
 impl VectorCache {
 	/// Creates a new vector cache with the given weight capacity (in bytes).
-	fn new(cache_size: u64) -> Self {
+	pub(crate) fn new(cache_size: u64) -> Self {
 		// Create the shared indexes structure
 		let indexes = ElementsPerIndex::default();
 

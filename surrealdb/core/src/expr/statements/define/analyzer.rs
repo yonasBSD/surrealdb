@@ -107,7 +107,7 @@ impl DefineAnalyzerStatement {
 		}
 		// Process the statement
 		let key = crate::key::database::az::new(ns, db, &definition.name);
-		ctx.get_index_stores().mappers().load(&definition).await?;
+		ctx.get_index_stores().mappers().load(&definition, &ctx.config.file_allowlist).await?;
 		txn.set(&key, &definition).await?;
 		// Clear the cache
 		txn.clear_cache();

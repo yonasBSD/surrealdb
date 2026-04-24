@@ -26,14 +26,13 @@ fn limit(name: &str, n: usize) -> Result<()> {
 /// similarity/distance functions. These functions have O(n*m) complexity, so
 /// unbounded input could cause denial of service.
 fn check_similarity_input_length(name: &str, a: &str, b: &str) -> Result<()> {
-	let max = *STRING_SIMILARITY_LIMIT;
 	ensure!(
-		a.len() <= max && b.len() <= max,
+		a.len() <= *STRING_SIMILARITY_LIMIT && b.len() <= *STRING_SIMILARITY_LIMIT,
 		Error::InvalidFunctionArguments {
 			name: name.to_owned(),
 			message: format!(
 				"Input strings must not exceed {} bytes (got {} and {}).",
-				max,
+				*STRING_SIMILARITY_LIMIT,
 				a.len(),
 				b.len()
 			),
@@ -866,8 +865,6 @@ mod tests {
 
 	#[test]
 	fn similarity_distance_length_limit() {
-		use crate::cnf::STRING_SIMILARITY_LIMIT;
-
 		// Normal strings under limit should work
 		let a = "hello".to_string();
 		let b = "world".to_string();
@@ -877,7 +874,7 @@ mod tests {
 		assert!(super::similarity::fuzzy((a, b)).is_ok());
 
 		// Strings exceeding limit should error
-		let limit = *STRING_SIMILARITY_LIMIT;
+		let limit = 16384;
 		let long_a = "a".repeat(limit + 1);
 		let long_b = "b".repeat(limit + 1);
 		let short = "x".to_string();

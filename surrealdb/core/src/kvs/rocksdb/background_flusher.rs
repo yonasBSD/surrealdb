@@ -8,8 +8,9 @@ use parking_lot::{Condvar, Mutex};
 use rocksdb::{OptimisticTransactionDB, Options};
 
 use super::TARGET;
-use crate::kvs::config::{RocksDbConfig, SyncMode};
+use crate::kvs::config::SyncMode;
 use crate::kvs::err::{Error, Result};
+use crate::kvs::rocksdb::RocksDbConfig;
 
 /// Background flusher for periodically syncing the Write-Ahead Log (WAL) to disk.
 ///

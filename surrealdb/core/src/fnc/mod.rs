@@ -1756,6 +1756,7 @@ fn idiom_name_to_normal(kind: &str, name: &str) -> String {
 mod tests {
 	use regex::Regex;
 
+	use crate::cnf::CommonConfig;
 	use crate::dbs::Capabilities;
 	use crate::sql::{Expr, Function};
 
@@ -1790,8 +1791,11 @@ mod tests {
 			let (quote, _) = line.split_once("=>").unwrap();
 			let name = quote.trim().trim_matches('"');
 
-			let res =
-				crate::syn::expr_with_capabilities(&format!("{}()", name), &Capabilities::all());
+			let res = crate::syn::expr_with_capabilities(
+				&format!("{}()", name),
+				&Capabilities::all(),
+				&CommonConfig::default(),
+			);
 
 			if let Ok(Expr::FunctionCall(call)) = res {
 				match call.receiver {

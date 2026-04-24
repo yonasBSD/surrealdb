@@ -123,7 +123,7 @@ impl Value {
 								let futs = v
 									.iter_mut()
 									.map(|v| scope.run(|stk| v.del(stk, ctx, opt, path)));
-								try_join_all_buffered(futs)
+								try_join_all_buffered(futs, ctx.config.max_concurrent_tasks)
 							})
 							.await?;
 							Ok(())
@@ -249,7 +249,7 @@ impl Value {
 						stk.scope(|scope| {
 							let futs =
 								v.iter_mut().map(|v| scope.run(|stk| v.del(stk, ctx, opt, path)));
-							try_join_all_buffered(futs)
+							try_join_all_buffered(futs, ctx.config.max_concurrent_tasks)
 						})
 						.await?;
 						Ok(())

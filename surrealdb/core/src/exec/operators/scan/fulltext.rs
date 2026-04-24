@@ -238,6 +238,7 @@ impl ExecOperator for FullTextScan {
 				txn.as_ref(),
 				ikb,
 				ft_params,
+				&frozen_ctx.config.file_allowlist
 			)
 			.await
 			.context("Failed to open full-text index")?;

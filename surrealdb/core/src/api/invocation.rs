@@ -282,18 +282,21 @@ fn create_middleware_closure(
 				};
 
 			// Parse function name - use ctx parameter directly
-			let function: crate::expr::Function =
-				match function_with_capabilities(&def.name, ctx.get_capabilities().as_ref()) {
-					Ok(f) => f.into(),
-					Err(_e) => {
-						return Box::pin(std::future::ready(Err(
-							ApiError::MiddlewareFunctionNotFound {
-								function: def.name.clone(),
-							}
-							.into(),
-						)));
-					}
-				};
+			let function: crate::expr::Function = match function_with_capabilities(
+				&def.name,
+				ctx.get_capabilities().as_ref(),
+				&ctx.config,
+			) {
+				Ok(f) => f.into(),
+				Err(_e) => {
+					return Box::pin(std::future::ready(Err(
+						ApiError::MiddlewareFunctionNotFound {
+							function: def.name.clone(),
+						}
+						.into(),
+					)));
+				}
+			};
 
 			// Enforce request ID in request headers & object (prevent user modification)
 			req.request_id.clone_from(&request_id);

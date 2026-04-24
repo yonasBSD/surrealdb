@@ -10,7 +10,7 @@ use url::Url;
 use web_time::SystemTime;
 
 use super::{ListOptions, ObjectKey, ObjectMeta, ObjectStore};
-use crate::cnf::BUCKET_FOLDER_ALLOWLIST;
+use crate::buc::Config;
 use crate::err::Error;
 
 /// Options for configuring the FileStore
@@ -24,18 +24,23 @@ pub struct FileStoreOptions {
 #[derive(Clone, Debug)]
 pub struct FileStore {
 	options: FileStoreOptions,
+	config: Config,
 }
 
 impl FileStore {
 	/// Create a new FileStore with the given options
-	pub fn new(options: FileStoreOptions) -> Self {
+	pub fn new(options: FileStoreOptions, config: Config) -> Self {
 		FileStore {
 			options,
+			config,
 		}
 	}
 
 	/// Parse a URL into FileStoreOption
-	pub async fn parse_url(url_str: &str) -> Result<Option<FileStoreOptions>, Error> {
+	pub async fn parse_url(
+		url_str: &str,
+		config: &Config,
+	) -> Result<Option<FileStoreOptions>, Error> {
 		let Ok(url) = Url::parse(url_str) else {
 			return Ok(None);
 		};
@@ -95,7 +100,7 @@ impl FileStore {
 		}
 
 		// Check if the path is allowed
-		if !is_path_allowed(&path_buf, lowercase_paths) {
+		if !is_path_allowed(&path_buf, lowercase_paths, &config.bucket_list) {
 			return Err(Error::FileAccessDenied(path_from_url.clone()));
 		}
 
@@ -173,7 +178,7 @@ impl FileStore {
 		let full_path = canonical_root.join(&relative_path).clean();
 
 		// Verify the path is within the allowlist
-		if !is_path_allowed(&full_path, self.options.lowercase_paths) {
+		if !is_path_allowed(&full_path, self.options.lowercase_paths, &self.config.bucket_list) {
 			return Err(format!(
 				"Path is not inside the allowed bucket directories: {}",
 				full_path.display()
@@ -195,14 +200,17 @@ impl FileStore {
 }
 
 /// Check if a path is allowed according to the allowlist
-fn is_path_allowed(path_to_check: &std::path::Path, lowercase_paths: bool) -> bool {
-	// If the allowlist is empty, nothing is allowed
-	if BUCKET_FOLDER_ALLOWLIST.is_empty() {
-		return false;
-	}
-
+fn is_path_allowed(
+	path_to_check: &std::path::Path,
+	lowercase_paths: bool,
+	allowed: &[PathBuf],
+) -> bool {
+	// FIXME: This function is incorrect for non-utf8 paths, to_string_lossy will convert any
+	// non-utf8 character to `\u{FFFD}` and therefore, two strings which are not the same will be
+	// allowed if they only differ by a non-utf8 characters.
+	//
 	// Check if the path is within any of the allowed paths
-	BUCKET_FOLDER_ALLOWLIST.iter().any(|allowed_path| {
+	allowed.iter().any(|allowed_path| {
 		if lowercase_paths {
 			// Windows canonical paths often have "\\?\" prefix that needs special handling
 			// Convert to lowercase and normalize path separators for consistent comparison

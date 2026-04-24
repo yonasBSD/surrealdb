@@ -46,8 +46,8 @@ use crate::catalog::providers::{
 	UserProvider,
 };
 use crate::catalog::{ApiDefinition, Index, NodeLiveQuery, SubscriptionDefinition};
-use crate::cnf::NORMAL_FETCH_SIZE;
 use crate::cnf::dynamic::DynamicConfiguration;
+use crate::cnf::{CommonConfig, ConfigMap};
 use crate::ctx::Context;
 #[cfg(feature = "jwks")]
 use crate::dbs::capabilities::NetTarget;
@@ -81,7 +81,7 @@ use crate::kvs::index::IndexBuilder;
 use crate::kvs::sequences::Sequences;
 use crate::kvs::slowlog::SlowLog;
 use crate::kvs::tasklease::{LeaseHandler, TaskLeaseType};
-use crate::kvs::{KVValue, LockType, TransactionType};
+use crate::kvs::{KVValue, LockType, NORMAL_BATCH_SIZE, TransactionType};
 use crate::sql::Ast;
 #[cfg(feature = "surrealism")]
 use crate::surrealism::cache::SurrealismCache;
@@ -142,6 +142,8 @@ pub struct Datastore {
 	lazy_surrealism: bool,
 	// Async event processing trigger
 	async_event_trigger: Arc<Notify>,
+	/// Config
+	config: Arc<CommonConfig>,
 	// Http client used to make requests.
 	#[cfg(feature = "http")]
 	http_client: Arc<HttpClient>,
@@ -171,16 +173,19 @@ pub(crate) struct TransactionFactory {
 	builder: Arc<Box<dyn TransactionBuilder>>,
 	// Async event processing trigger
 	async_event_trigger: Arc<Notify>,
+	config: Arc<CommonConfig>,
 }
 
 impl TransactionFactory {
 	pub(super) fn new(
 		async_event_trigger: Arc<Notify>,
 		builder: Box<dyn TransactionBuilder>,
+		config: Arc<CommonConfig>,
 	) -> Self {
 		Self {
 			builder: Arc::new(builder),
 			async_event_trigger,
+			config,
 		}
 	}
 
@@ -215,6 +220,7 @@ impl TransactionFactory {
 			Transactor {
 				inner,
 			},
+			&self.config,
 		))
 	}
 
@@ -291,6 +297,7 @@ pub trait TransactionBuilderFactory: TransactionBuilderFactoryRequirements {
 		&self,
 		path: &str,
 		canceller: CancellationToken,
+		config: ConfigMap,
 	) -> Result<Box<dyn TransactionBuilder>>;
 
 	/// Validate a datastore path string.
@@ -336,15 +343,21 @@ impl TransactionBuilderFactory for CommunityComposer {
 		&self,
 		path: &str,
 		_canceller: CancellationToken,
+		config: ConfigMap,
 	) -> Result<Box<dyn TransactionBuilder>> {
 		// Extract query parameters from the path before scheme extraction
-		let (raw_path, query_string) = match path.split_once('?') {
+		let (raw_path, config_string) = match path.split_once('?') {
 			Some((p, q)) => (p, Some(q)),
 			None => (path, None),
 		};
 
-		// Parse any query parameters into a map
-		let params = query_string.map(super::config::parse_query_params).unwrap_or_default();
+		let config = if let Some(config_string) = config_string {
+			config.join(
+				ConfigMap::from_config_string(config_string).map_keys(|x| format!("datastore_{x}")),
+			)
+		} else {
+			config
+		};
 
 		// Extract the scheme and path components
 		let (flavour, path) = match raw_path.split_once("://").or_else(|| raw_path.split_once(':'))
@@ -378,9 +391,10 @@ impl TransactionBuilderFactory for CommunityComposer {
 				{
 					// Create a new blocking threadpool
 					super::threadpool::initialise();
+
+					let config = config.with_key_value("datastore_persist", path);
 					// Parse SurrealMX configuration from URL path and query parameters
-					let config = super::config::MemoryConfig::from_path_and_params(&path, &params)
-						.map_err(Error::Kvs)?;
+					let config = config.load();
 					// Initialise the storage engine
 					let v = super::mem::Datastore::new(config).await.map(DatastoreFlavor::Mem)?;
 					info!(target: TARGET, "Started kvs store in {flavour}");
@@ -396,8 +410,7 @@ impl TransactionBuilderFactory for CommunityComposer {
 					// Create a new blocking threadpool
 					super::threadpool::initialise();
 					// Parse RocksDB-specific configuration from query parameters
-					let config =
-						super::config::RocksDbConfig::from_params(&params).map_err(Error::Kvs)?;
+					let config = config.load();
 					// Initialise the storage engine
 					let v = super::rocksdb::Datastore::new(&path, config)
 						.await
@@ -415,8 +428,7 @@ impl TransactionBuilderFactory for CommunityComposer {
 					// Create a new blocking threadpool
 					super::threadpool::initialise();
 					// Parse SurrealKV-specific configuration from query parameters
-					let config =
-						super::config::SurrealKvConfig::from_params(&params).map_err(Error::Kvs)?;
+					let config = config.load();
 					// Initialise the storage engine
 					let v = super::surrealkv::Datastore::new(&path, config)
 						.await
@@ -661,23 +673,24 @@ impl Datastore {
 			transaction_timeout: self.transaction_timeout,
 			capabilities: self.capabilities.clone(),
 			notification_channel: self.notification_channel,
-			index_stores: Default::default(),
+			index_stores: IndexStores::new(self.config.hnsw_cache_size),
 			index_builder: IndexBuilder::new(self.transaction_factory.clone()),
 			#[cfg(feature = "jwks")]
 			jwks_cache: Arc::new(Default::default()),
 			#[cfg(storage)]
 			temporary_directory: self.temporary_directory,
-			cache: Arc::new(DatastoreCache::new()),
+			cache: Arc::new(DatastoreCache::new(self.config.datastore_cache_size)),
 			buckets: self.buckets,
 			sequences: Sequences::new(self.transaction_factory.clone(), self.id),
 			transaction_factory: self.transaction_factory,
+			async_event_trigger: self.async_event_trigger,
 			#[cfg(feature = "surrealism")]
-			surrealism_cache: Arc::new(SurrealismCache::new()),
+			surrealism_cache: Arc::new(SurrealismCache::new(self.config.surrealism_cache_size)),
 			#[cfg(feature = "surrealism")]
 			lazy_surrealism: self.lazy_surrealism,
-			async_event_trigger: self.async_event_trigger,
 			#[cfg(feature = "http")]
 			http_client: self.http_client,
+			config: self.config,
 		}
 	}
 
@@ -871,8 +884,9 @@ impl Datastore {
 				pass,
 				INITIAL_USER_ROLE.to_owned(),
 			);
-			let opt = Options::new(self.id, self.dynamic_configuration.clone())
-				.with_auth(Arc::new(Auth::for_root(Role::Owner)));
+			let opt =
+				Options::new(self.id, self.dynamic_configuration.clone(), &CommonConfig::default())
+					.with_auth(Arc::new(Auth::for_root(Role::Owner)));
 			let mut ctx = self.setup_ctx()?;
 			ctx.set_transaction(txn.clone());
 			let ctx = ctx.freeze();
@@ -1351,7 +1365,7 @@ impl Datastore {
 				// Scan the live queries for this node
 				while let Some(rng) = next {
 					// Fetch the next batch of keys and values
-					let res = catch!(txn, txn.batch_keys_vals(rng, *NORMAL_FETCH_SIZE, None).await);
+					let res = catch!(txn, txn.batch_keys_vals(rng, NORMAL_BATCH_SIZE, None).await);
 					next = res.next;
 					for (k, v) in res.result.iter() {
 						// Decode the data for this live query
@@ -1451,7 +1465,7 @@ impl Datastore {
 					let txn = self.transaction(Write, Optimistic).await?;
 					while let Some(rng) = next {
 						// Fetch the next batch of keys and values
-						let max = *NORMAL_FETCH_SIZE;
+						let max = NORMAL_BATCH_SIZE;
 						let res = catch!(txn, txn.batch_keys_vals(rng, max, None).await);
 						next = res.next;
 						for (k, v) in res.result.iter() {
@@ -1761,8 +1775,14 @@ impl Datastore {
 		match txn.get_tb_index_by_id(ikb.ns(), ikb.db(), ikb.table(), ikb.index(), None).await? {
 			Some(ix) if !ix.prepare_remove => match &ix.index {
 				Index::FullText(p) => {
-					IndexOperation::index_fulltext_compaction(&self.index_stores, ikb, &txn, p)
-						.await?;
+					IndexOperation::index_fulltext_compaction(
+						&self.index_stores,
+						ikb,
+						&txn,
+						p,
+						&self.config.file_allowlist,
+					)
+					.await?;
 				}
 				Index::Count(_) => {
 					IndexOperation::index_count_compaction(ikb, &txn).await?;
@@ -1895,7 +1915,7 @@ impl Datastore {
 		vars: Option<PublicVariables>,
 	) -> std::result::Result<Vec<QueryResult>, TypesError> {
 		// Parse the SQL query text
-		let ast = syn::parse_with_capabilities(txt, &self.capabilities)
+		let ast = syn::parse_with_capabilities(txt, &self.capabilities, &self.config)
 			.map_err(|e| TypesError::validation(e.to_string(), None))?;
 		// Process the AST
 		self.process(ast, sess, vars).await
@@ -1911,7 +1931,7 @@ impl Datastore {
 		tx: Arc<Transaction>,
 	) -> std::result::Result<Vec<QueryResult>, TypesError> {
 		// Parse the SQL query text
-		let ast = syn::parse_with_capabilities(txt, &self.capabilities)
+		let ast = syn::parse_with_capabilities(txt, &self.capabilities, &self.config)
 			.map_err(|e| TypesError::validation(e.to_string(), None))?;
 		// Process the AST with the transaction
 		self.process_with_transaction(ast, sess, vars, tx).await
@@ -2246,17 +2266,18 @@ impl Datastore {
 		sess: &Session,
 		chn: Sender<Vec<u8>>,
 		cfg: export::Config,
-	) -> Result<impl Future<Output = Result<()>> + use<>> {
+	) -> Result<impl Future<Output = Result<()>> + 'static> {
 		// Check if the session has expired
 		ensure!(!sess.expired(), Error::ExpiredSession);
 		// Retrieve the provided NS and DB
 		let (ns, db) = crate::iam::check::check_ns_db(sess)?;
 		// Create a new readonly transaction
 		let txn = self.transaction(Read, Optimistic).await?;
+		let batch_size = self.config.export_batch_size;
 		// Return an async export job
 		Ok(async move {
 			// Process the export
-			let res = txn.export(&ns, &db, cfg, chn).await;
+			let res = txn.export(&ns, &db, cfg, batch_size, chn).await;
 			txn.cancel().await?;
 			res
 		})
@@ -2277,7 +2298,7 @@ impl Datastore {
 	}
 
 	pub fn setup_options(&self, sess: &Session) -> Options {
-		Options::new(self.id, self.dynamic_configuration.clone())
+		Options::new(self.id, self.dynamic_configuration.clone(), &self.config)
 			.with_ns(sess.ns())
 			.with_db(sess.db())
 			.with_live(sess.live())
@@ -2299,6 +2320,7 @@ impl Datastore {
 			#[cfg(storage)]
 			self.temporary_directory.clone(),
 			self.buckets.clone(),
+			self.config.clone(),
 			#[cfg(feature = "surrealism")]
 			self.surrealism_cache.clone(),
 		)?;
@@ -2501,6 +2523,15 @@ impl Datastore {
 
 		Ok(())
 	}
+
+	pub fn config(&self) -> Arc<CommonConfig> {
+		self.config.clone()
+	}
+
+	#[cfg(feature = "http")]
+	pub fn http_client(&self) -> Arc<HttpClient> {
+		self.http_client.clone()
+	}
 }
 
 #[cfg(test)]
@@ -2584,7 +2615,7 @@ mod test {
 			.await
 			.unwrap();
 
-		let opt = Options::new(dbs.id(), DynamicConfiguration::default())
+		let opt = Options::new(dbs.id(), DynamicConfiguration::default(), &dbs.config())
 			.with_ns(Some("test".into()))
 			.with_db(Some("test".into()))
 			.with_live(false)

@@ -53,6 +53,7 @@ impl Host {
 			doc: doc.cloned(),
 			kv,
 			module_name,
+			#[cfg(feature = "http")]
 			http_client,
 		}
 	}
@@ -151,7 +152,9 @@ impl InvocationContext for Host {
 		}
 		let ctx = ctx.freeze();
 
-		let expr: Expr = syn::expr(&query)?.into();
+		let expr: Expr =
+			syn::expr_with_capabilities(&query, &self.ctx.get_capabilities(), &self.ctx.config)?
+				.into();
 		let res = self
 			.stk
 			.enter(|stk| expr.compute(stk, &ctx, &self.opt, self.doc.as_ref()))
@@ -213,7 +216,11 @@ impl InvocationContext for Host {
 				})
 			}
 			_ => {
-				let f: crate::sql::function::Function = syn::function(&fnc)?;
+				let f: crate::sql::function::Function = syn::function_with_capabilities(
+					&fnc,
+					&self.ctx.get_capabilities(),
+					&self.ctx.config,
+				)?;
 				f.into()
 			}
 		};
@@ -242,7 +249,7 @@ impl InvocationContext for Host {
 		let ns = self.opt.ns().unwrap_or("?");
 		let db = self.opt.db().unwrap_or("?");
 		let module = &self.module_name;
-		match crate::cnf::SURREALISM_LOG_LEVEL.as_str() {
+		match self.ctx.config.surrealism_log_level.as_str() {
 			"trace" => tracing::trace!(target: "surrealism::module", module, ns, db, "{output}"),
 			"info" => tracing::info!(target: "surrealism::module", module, ns, db, "{output}"),
 			"warn" => tracing::warn!(target: "surrealism::module", module, ns, db, "{output}"),
@@ -264,7 +271,7 @@ impl InvocationContext for Host {
 		let module = self.module_name.clone();
 		let ns = self.opt.ns().unwrap_or("?").to_string();
 		let db = self.opt.db().unwrap_or("?").to_string();
-		let level = crate::cnf::SURREALISM_LOG_LEVEL.clone();
+		let level = self.ctx.config.surrealism_log_level.clone();
 		Arc::new(move |output| match level.as_str() {
 			"trace" => {
 				tracing::trace!(target: "surrealism::module", module = %module, ns = %ns, db = %db, "{output}")

@@ -43,15 +43,17 @@ async fn post_handler(
 	content_type: TypedHeader<ContentType>,
 	body: Bytes,
 ) -> Result<impl IntoResponse, ResponseError> {
+	let rec_limit = state.datastore.config().max_object_parsing_depth;
 	let fmt = content_type.deref();
 	let fmt: Format = fmt.into();
 	let val = match fmt {
-		Format::Json => surrealdb_core::rpc::format::json::decode(&body)
+		Format::Json => surrealdb_core::rpc::format::json::decode(&body, rec_limit as usize)
 			.map_err(anyhow::Error::msg)
 			.map_err(ResponseError)?,
-		Format::Cbor => surrealdb_core::rpc::format::cbor::decode(&body)
+		Format::Cbor => surrealdb_core::rpc::format::cbor::decode(&body, rec_limit as usize)
 			.map_err(anyhow::Error::msg)
 			.map_err(ResponseError)?,
+		// FIXME: Add flatbuffer recursion limit.
 		Format::Flatbuffers => surrealdb_core::rpc::format::flatbuffers::decode(&body)
 			.map_err(anyhow::Error::msg)
 			.map_err(ResponseError)?,

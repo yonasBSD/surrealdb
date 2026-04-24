@@ -69,7 +69,6 @@ use std::sync::Arc;
 
 // Re-exports for external callers
 use self::util::literal_to_value;
-use crate::cnf::MAX_COMPUTATION_DEPTH;
 use crate::ctx::FrozenContext;
 use crate::dbs::NewPlannerStrategy;
 use crate::err::Error;
@@ -616,7 +615,7 @@ impl<'ctx> Planner<'ctx> {
 			} = cur
 			{
 				d += 1;
-				if d > *MAX_COMPUTATION_DEPTH {
+				if d > self.ctx.config.max_computation_depth {
 					return Err(Error::ComputationDepthExceeded);
 				}
 				cur = inner;

@@ -7,7 +7,6 @@ use radix_trie::Trie;
 use surrealdb_types::ToSql;
 
 use crate::catalog::{DatabaseId, IndexDefinition, IndexId, NamespaceId, Record};
-use crate::cnf::COUNT_BATCH_SIZE;
 use crate::ctx::FrozenContext;
 use crate::err::Error;
 use crate::expr::BinaryOperator;
@@ -18,7 +17,7 @@ use crate::idx::planner::tree::IndexReference;
 use crate::idx::seqdocids::DocId;
 use crate::key::index::Index;
 use crate::key::index::iu::IndexCountKey;
-use crate::kvs::{KVKey, Key, Transaction, Val};
+use crate::kvs::{COUNT_BATCH_SIZE, KVKey, Key, Transaction, Val};
 use crate::val::{Array, RecordId, TableName, Value};
 
 pub(crate) type IteratorRef = usize;
@@ -1870,7 +1869,7 @@ impl IndexCountThingIterator {
 			let mut loops = 0;
 			let mut current_range = Some(range);
 			while let Some(range) = current_range {
-				let batch = txn.batch_keys(range, *COUNT_BATCH_SIZE, None).await?;
+				let batch = txn.batch_keys(range, COUNT_BATCH_SIZE, None).await?;
 				for key in batch.result.iter() {
 					loops += 1;
 					ctx.is_done(Some(loops)).await?;
@@ -1902,7 +1901,7 @@ impl IndexCountThingIterator {
 		let mut loops = 0;
 		let mut current_range = Some(range.clone());
 		while let Some(r) = current_range {
-			let batch = txn.batch_keys(r, *COUNT_BATCH_SIZE, None).await?;
+			let batch = txn.batch_keys(r, COUNT_BATCH_SIZE, None).await?;
 			for key in batch.result.iter() {
 				loops += 1;
 				if loops % 1000 == 0 {

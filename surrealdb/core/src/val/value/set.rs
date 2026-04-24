@@ -64,7 +64,7 @@ impl Value {
 								let futs = arr.iter_mut().map(|v| {
 									scope.run(|stk| v.set(stk, ctx, opt, prev, val.clone()))
 								});
-								try_join_all_buffered(futs)
+								try_join_all_buffered(futs, ctx.config.max_concurrent_tasks)
 							})
 							.await?;
 							return Ok(());
@@ -89,7 +89,7 @@ impl Value {
 								let futs = arr.iter_mut().map(|v| {
 									scope.run(|stk| v.set(stk, ctx, opt, prev, val.clone()))
 								});
-								try_join_all_buffered(futs)
+								try_join_all_buffered(futs, ctx.config.max_concurrent_tasks)
 							})
 							.await?;
 							return Ok(());
@@ -126,7 +126,7 @@ impl Value {
 										let futs = v.iter_mut().map(|v| {
 											scope.run(|stk| v.set(stk, ctx, opt, path, val.clone()))
 										});
-										try_join_all_buffered(futs)
+										try_join_all_buffered(futs, ctx.config.max_concurrent_tasks)
 									})
 									.await?;
 									return Ok(());
@@ -172,7 +172,7 @@ impl Value {
 								let futs = v.iter_mut().map(|v| {
 									scope.run(|stk| v.set(stk, ctx, opt, path, val.clone()))
 								});
-								try_join_all_buffered(futs)
+								try_join_all_buffered(futs, ctx.config.max_concurrent_tasks)
 							})
 							.await?;
 						}
@@ -181,7 +181,7 @@ impl Value {
 								let futs = v.iter_mut().map(|(_, v)| {
 									scope.run(|stk| v.set(stk, ctx, opt, path, val.clone()))
 								});
-								try_join_all_buffered(futs)
+								try_join_all_buffered(futs, ctx.config.max_concurrent_tasks)
 							})
 							.await?;
 						}

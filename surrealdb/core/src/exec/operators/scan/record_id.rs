@@ -240,6 +240,8 @@ pub(crate) async fn execute_record_lookup(
 	needed_fields: Option<&std::collections::HashSet<String>>,
 	ctx: &ExecutionContext,
 	predicate: Option<&Arc<dyn PhysicalExpr>>,
+	// FIXME: We should be consistent on which integer type we use for limit.
+	// Our backend only support u32 so we should use u32 everywhere for limits.
 	limit: Option<usize>,
 	start: usize,
 	resolved: Option<&ResolvedTableContext>,
@@ -318,7 +320,7 @@ pub(crate) async fn execute_record_lookup(
 				None
 			};
 			let prefetch = effective_storage_limit.is_none();
-			let limit_hint = limit.map(|l| l + start);
+			let limit_hint = limit.map(|l| (l + start).try_into().unwrap_or(u32::MAX));
 
 			let mut source = kv_scan_stream(
 				Arc::clone(&txn),

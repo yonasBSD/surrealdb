@@ -11,6 +11,7 @@ use surrealdb::engine::any::{self, connect};
 use surrealdb::method::WithStats;
 use surrealdb::opt::Config;
 use surrealdb::{IndexedResults, Notification, Stats};
+use surrealdb_core::cnf::CommonConfig;
 use surrealdb_core::dbs::Capabilities as CoreCapabilities;
 use surrealdb_types::{SurrealValue, ToSql, Value, object};
 
@@ -199,7 +200,11 @@ pub async fn init(
 			continue;
 		}
 		// Complete the request
-		match surrealdb_core::syn::parse_with_capabilities(&line, &capabilities) {
+		match surrealdb_core::syn::parse_with_capabilities(
+			&line,
+			&capabilities,
+			&CommonConfig::default(),
+		) {
 			Ok(mut query) => {
 				let init_length = query.num_statements();
 				let vars = query.get_let_statements();
@@ -435,7 +440,11 @@ impl Validator for InputValidator<'_> {
 		} else if input.is_empty() {
 			Valid(None) // Ignore empty lines
 		} else {
-			match surrealdb_core::syn::parse_with_capabilities(input, self.capabilities) {
+			match surrealdb_core::syn::parse_with_capabilities(
+				input,
+				self.capabilities,
+				&Default::default(),
+			) {
 				Err(e) => Invalid(Some(format!(" --< {e}"))),
 				_ => Valid(None),
 			}
