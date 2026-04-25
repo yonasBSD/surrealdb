@@ -8,6 +8,8 @@
 //! - Automatically recovers to normal mode when space drops below the limit after deletions and
 //!   compaction
 
+use rand::rngs::StdRng;
+use rand::{RngCore, SeedableRng};
 use temp_dir::TempDir;
 
 use crate::CommunityComposer;
@@ -67,13 +69,20 @@ pub async fn read_and_deletion_only() {
 
 	// Phase 2: Write data until space limit is reached and mode transitions to
 	// read-and-deletion-only Write ~20MB of data (200 transactions × 100 keys × 1KB each)
-	// Some transactions will succeed before the limit, then failures will occur after transition
+	// Some transactions will succeed before the limit, then failures will occur after transition.
+	//
+	// Values are filled from a deterministic PRNG so they are effectively
+	// incompressible: otherwise any per-level compression (e.g. Lz4/Zstd) would
+	// shrink a zero-filled payload far below the configured SST limit and the
+	// read-and-deletion-only transition would never fire.
+	let mut rng = StdRng::seed_from_u64(0xA5A5_A5A5_A5A5_A5A5);
 	let mut count_err = 0;
 	for j in 0..200 {
 		let tx = ds.transaction(Write, Optimistic).await.unwrap();
 		for i in 0..100 {
 			let key = format!("unlimited_key_{}_{}", i, j);
-			let value = vec![0u8; 1024]; // 1KB per value
+			let mut value = vec![0u8; 1024]; // 1KB per value
+			rng.fill_bytes(&mut value);
 			if let Err(e) = tx.set(&key, &value).await {
 				assert!(
 					e.to_string().contains("read-and-deletion-only mode"),

@@ -132,6 +132,42 @@ pub struct RocksDbConfig {
 	/// Larger batches improve throughput but increase memory usage and commit latency.
 	pub grouped_commit_max_batch_size: usize,
 
+	/// The initial readahead size used by RocksDB's implicit (auto) iterator
+	/// prefetcher. Once an iterator performs `file_reads_for_auto_readahead`
+	/// sequential file reads, RocksDB starts prefetching at this size and then
+	/// doubles it on each subsequent read up to `max_auto_readahead_size`
+	/// (default: 8 KiB)
+	pub initial_auto_readahead_size: usize,
+	/// The upper bound on RocksDB's implicit (auto) iterator readahead size.
+	/// Raising this cap (from the RocksDB default of 256 KiB) can significantly
+	/// improve throughput on long range scans at the cost of additional I/O
+	/// and memory per iterator (default: 4 MiB)
+	pub max_auto_readahead_size: usize,
+	/// The number of sequential file reads an iterator must perform on a
+	/// single SST before RocksDB begins its implicit (auto) readahead. Set to
+	/// 0 to start prefetching from the very first read (default: 2)
+	pub file_reads_for_auto_readahead: u64,
+
+	/// Whether to enable the custom SurrealDB prefix extractor on the
+	/// RocksDB column family. When enabled, SST bloom filters are built on
+	/// table+category prefixes (records, indexes, graph edges, refs,
+	/// per-table metadata) which allows scans to skip entire SSTs that do
+	/// not contain the scanning table. See `prefix_extractor.rs` for the
+	/// extractor semantics (default: true)
+	pub prefix_extractor_enabled: bool,
+	/// When the prefix extractor is enabled, controls whether whole keys
+	/// are also added to the SST bloom filter (in addition to the prefix).
+	/// * true (default): bloom filter carries both whole keys and prefixes. Point lookups benefit
+	///   from the whole-key filter, at the cost of a larger bloom filter footprint.
+	/// * false: bloom filter carries only prefixes. Smaller bloom filter, but point lookups fall
+	///   back to prefix filter + block index search. Useful when the workload is scan-heavy.
+	pub whole_key_filtering: bool,
+	/// When the prefix extractor is enabled, configures the per-memtable
+	/// prefix bloom filter size as a ratio of the write buffer size (capped
+	/// at 0.25 by RocksDB). Set to 0 to disable the memtable prefix bloom
+	/// (default: 0.1).
+	pub memtable_prefix_bloom_ratio: f64,
+
 	/// Scans whose estimated byte size is at or below this threshold execute
 	/// inline on the async executor thread; above this threshold they are offloaded
 	/// to the blocking threadpool so they do not stall other async tasks. This
@@ -185,6 +221,12 @@ impl Default for RocksDbConfig {
 			grouped_commit_timeout: Duration::from_millis(5).as_nanos() as u64,
 			grouped_commit_wait_threshold: 12,
 			grouped_commit_max_batch_size: 4096,
+			initial_auto_readahead_size: 8 * 1024,
+			max_auto_readahead_size: 4 * 1024 * 1024,
+			file_reads_for_auto_readahead: 2,
+			prefix_extractor_enabled: true,
+			whole_key_filtering: true,
+			memtable_prefix_bloom_ratio: 0.1,
 			inline_scan_threshold: 4 * 1024 * 1024,
 		}
 	}
@@ -247,6 +289,18 @@ impl Config for RocksDbConfig {
 			.parse_key(
 				"rocksdb_grouped_commit_max_batch_size",
 				&mut self.grouped_commit_max_batch_size,
+			)
+			.parse_key("rocksdb_initial_auto_readahead_size", &mut self.initial_auto_readahead_size)
+			.parse_key("rocksdb_max_auto_readahead_size", &mut self.max_auto_readahead_size)
+			.parse_key(
+				"rocksdb_file_reads_for_auto_readahead",
+				&mut self.file_reads_for_auto_readahead,
+			)
+			.parse_key_bool("rocksdb_prefix_extractor_enabled", &mut self.prefix_extractor_enabled)
+			.parse_key_bool("rocksdb_whole_key_filtering", &mut self.whole_key_filtering)
+			.parse_key(
+				"rocksdb_memtable_prefix_bloom_ratio",
+				&mut self.memtable_prefix_bloom_ratio,
 			);
 
 		if map.has_key("datastore_sync") {

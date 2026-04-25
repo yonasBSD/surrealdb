@@ -7,6 +7,7 @@ mod comparator;
 mod disk_space_manager;
 mod garbage_collector;
 mod memory_manager;
+mod prefix_extractor;
 #[cfg(test)]
 mod tests;
 
@@ -56,6 +57,10 @@ pub struct Datastore {
 	background_flusher: Option<Arc<BackgroundFlusher>>,
 	/// Garbage collector for advancing the version GC watermark
 	garbage_collector: Option<Arc<GarbageCollector>>,
+	/// Whether the custom SurrealDB prefix extractor is enabled on the
+	/// column family. Propagated to each transaction so range scans can
+	/// pick the correct prefix-seek mode without consulting global state.
+	prefix_extractor_enabled: bool,
 	/// threshold of estimeded size above which we run a scan in seperate thread.
 	inline_scan_threshold: u32,
 }
@@ -81,6 +86,10 @@ pub struct Transaction {
 	/// need to ensure the memory is kept alive. This pointer must be declared
 	/// last, so that it is dropped last.
 	db: Pin<Arc<OptimisticTransactionDB>>,
+	/// Whether the custom SurrealDB prefix extractor is enabled on the
+	/// column family. Controls whether `apply_prefix_mode` sets
+	/// `prefix_same_as_start` / `total_order_seek` on scan `ReadOptions`.
+	prefix_extractor_enabled: bool,
 	/// threshold of estimeded size above which we run a scan in seperate thread.
 	inline_scan_threshold: u32,
 }
@@ -223,12 +232,21 @@ impl Datastore {
 		// Set specific compression levels
 		info!(target: TARGET, "Setting compression level");
 		opts.set_compression_per_level(&[
-			DBCompressionType::None,
-			DBCompressionType::None,
-			DBCompressionType::Lz4,
-			DBCompressionType::Lz4,
-			DBCompressionType::Lz4,
+			DBCompressionType::None, // L0
+			DBCompressionType::Lz4,  // L1
+			DBCompressionType::Lz4,  // L2
+			DBCompressionType::Lz4,  // L3
+			DBCompressionType::Lz4,  // L4
+			DBCompressionType::Zstd, // L5
+			DBCompressionType::Zstd, // L6
+			DBCompressionType::Zstd, // L7
 		]);
+		// Set the bottommost compression type
+		info!(target: TARGET, "Setting bottommost compression type: Zstd");
+		opts.set_bottommost_compression_type(DBCompressionType::Zstd);
+		// Use Zstd typed dictionary training
+		info!(target: TARGET, "Using Zstd typed dictionary training");
+		opts.set_bottommost_zstd_max_train_bytes(0, true);
 		// Set specific storage log level
 		info!(target: TARGET, "Setting storage engine log level: {}", config.storage_log_level);
 		opts.set_log_level(match config.storage_log_level.to_ascii_lowercase().as_str() {
@@ -243,6 +261,21 @@ impl Datastore {
 				)));
 			}
 		});
+		// Configure the custom table-level prefix extractor. This is a
+		// column-family option, so when versioning is enabled (and the
+		// default CF carries its own `cf_opts`) we also need to set it on
+		// `cf_opts` below. See `prefix_extractor.rs` for the semantics.
+		if config.prefix_extractor_enabled {
+			info!(target: TARGET, "Prefix extractor: enabled ({})", prefix_extractor::NAME);
+			opts.set_prefix_extractor(prefix_extractor::build());
+			let ratio = config.memtable_prefix_bloom_ratio;
+			if ratio > 0.0 {
+				info!(target: TARGET, "Memtable prefix bloom ratio: {ratio}");
+				opts.set_memtable_prefix_bloom_ratio(ratio);
+			}
+		} else {
+			info!(target: TARGET, "Prefix extractor: disabled");
+		}
 		// Configure the timestamp-aware comparator for user-defined timestamps
 		let cf_opts = if config.versioned {
 			info!(target: TARGET, "Enabling user-defined timestamps (versioning)");
@@ -254,6 +287,19 @@ impl Datastore {
 				Box::new(comparator::compare_ts),
 				Box::new(comparator::compare_without_ts),
 			);
+			// The default CF uses this dedicated `cf_opts` object (set
+			// via the column family descriptor below), so the prefix
+			// extractor configured on `opts` would not take effect. Mirror
+			// it here (and the matching memtable prefix bloom ratio) so
+			// versioned datastores get the same bloom-filter and scan
+			// optimisations as non-versioned ones.
+			if config.prefix_extractor_enabled {
+				cf_opts.set_prefix_extractor(prefix_extractor::build());
+				let ratio = config.memtable_prefix_bloom_ratio;
+				if ratio > 0.0 {
+					cf_opts.set_memtable_prefix_bloom_ratio(ratio);
+				}
+			}
 			Some(cf_opts)
 		} else {
 			None
@@ -327,6 +373,7 @@ impl Datastore {
 			background_flusher,
 			commit_coordinator,
 			garbage_collector,
+			prefix_extractor_enabled: config.prefix_extractor_enabled,
 			inline_scan_threshold: config.inline_scan_threshold,
 		})
 	}
@@ -513,6 +560,7 @@ impl Datastore {
 			disk_space_manager: self.disk_space_manager.clone(),
 			commit_coordinator: self.commit_coordinator.clone(),
 			db: self.db.clone(),
+			prefix_extractor_enabled: self.prefix_extractor_enabled,
 			inline_scan_threshold: self.inline_scan_threshold,
 		}))
 	}
@@ -586,6 +634,48 @@ impl Transaction {
 		ro
 	}
 
+	/// Apply the appropriate prefix-seek setting to the read options used
+	/// by a range scan.
+	///
+	/// With a prefix extractor configured on the column family, iterators
+	/// have two safe modes:
+	///
+	/// * `prefix_same_as_start(true)` — the iterator stays within the extracted prefix of the seek
+	///   key. This is what lets RocksDB skip SSTs via the per-SST prefix bloom filter and terminate
+	///   `FindNextUserEntry` early at prefix boundaries. We enable it only when *both* range
+	///   endpoints are in-domain AND resolve to the same extracted prefix (all common record /
+	///   index / graph / ref scans satisfy this).
+	/// * `total_order_seek(true)` — the iterator does a total-order seek and ignores the prefix
+	///   extractor. This is required for catalog scans whose bounds live outside the prefix
+	///   extractor's domain (e.g. listing tables, indexes, users, etc.); without it RocksDB
+	///   documents the returned keys as "undefined" when the upper bound has a different prefix
+	///   than the seek key.
+	///
+	/// When the prefix extractor is disabled at the datastore level,
+	/// neither option is set (default behaviour).
+	fn apply_prefix_mode(&self, ro: &mut ReadOptions, rng: &Range<Key>) {
+		// Check if the prefix extractor is enabled
+		if !self.prefix_extractor_enabled {
+			return;
+		}
+		// Check if the bounds are in-domain and share the same extracted prefix
+		match (prefix_extractor::extract(&rng.start), prefix_extractor::extract(&rng.end)) {
+			// Both bounds are in-domain and share the same extracted prefix:
+			// safe to enable prefix-scan optimisations. This is the hot path
+			// for record and index scans.
+			(Some(sp), Some(ep)) if sp == ep => {
+				ro.set_prefix_same_as_start(true);
+			}
+			// Any other case: either one or both bounds are out-of-domain,
+			// or they sit in different prefixes. Fall back to total-order
+			// seek so we keep correctness at the cost of prefix bloom
+			// filter optimisations.
+			_ => {
+				ro.set_total_order_seek(true);
+			}
+		}
+	}
+
 	/// Build a fresh `ReadOptions` for a scan over the given key range.
 	/// Sets the iterate bounds, the captured snapshot, async-io, caching
 	/// flags, and (when applicable) the version timestamp.
@@ -599,8 +689,10 @@ impl Transaction {
 		ro.set_snapshot(&inner.snapshot);
 		ro.set_iterate_lower_bound(rng.start.clone());
 		ro.set_iterate_upper_bound(rng.end.clone());
+		ro.set_auto_readahead_size(true);
 		ro.set_async_io(true);
 		ro.fill_cache(true);
+		self.apply_prefix_mode(&mut ro, rng);
 		if self.versioned {
 			let ts = version.unwrap_or(u64::MAX);
 			ro.set_timestamp(ts.to_le_bytes().to_vec());
@@ -621,8 +713,10 @@ impl Transaction {
 		ro.set_snapshot(&inner.snapshot);
 		ro.set_iterate_lower_bound(rng.start.clone());
 		ro.set_iterate_upper_bound(rng.end.clone());
+		ro.set_auto_readahead_size(true);
 		ro.set_async_io(true);
 		ro.fill_cache(false);
+		self.apply_prefix_mode(&mut ro, rng);
 		if self.versioned {
 			let ts = version.unwrap_or(u64::MAX);
 			ro.set_timestamp(ts.to_le_bytes().to_vec());
@@ -1339,12 +1433,27 @@ impl Transactable for Transaction {
 	}
 
 	async fn compact(&self, range: Option<Range<Key>>) -> anyhow::Result<()> {
-		let (start, end) = match range {
-			Some(r) => (Some(r.start), Some(r.end)),
-			None => (None, None),
-		};
-		self.db.compact_range(start, end);
-		Ok(())
+		// Create new flush options
+		let mut opts = FlushOptions::default();
+		// Wait for the sync to finish
+		opts.set_wait(true);
+		// Spawn a new task to compact the range
+		affinitypool::spawn_local(move || {
+			// Flush the WAL to storage
+			self.db.flush_wal(true)?;
+			// Flush the memtables to SST
+			self.db.flush_opt(&opts)?;
+			// Get the compaction range
+			let (start, end) = match range {
+				Some(r) => (Some(r.start), Some(r.end)),
+				None => (None, None),
+			};
+			// Compact the specified range
+			self.db.compact_range(start, end);
+			// All ok
+			Ok(())
+		})
+		.await
 	}
 }
 
