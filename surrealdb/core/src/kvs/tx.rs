@@ -2,8 +2,8 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::ops::{Deref, Range};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
 use futures::TryStreamExt;
@@ -22,6 +22,7 @@ use crate::catalog::{
 	self, ApiDefinition, ConfigDefinition, DatabaseDefinition, DatabaseId, DefaultConfig, IndexId,
 	NamespaceDefinition, NamespaceId, Record, TableDefinition, TableId,
 };
+use crate::cf::Changefeed;
 use crate::cnf::CommonConfig;
 use crate::ctx::Context;
 use crate::dbs::node::Node;
@@ -61,14 +62,13 @@ pub struct Transaction {
 	cache: TransactionCache,
 	/// The sequences for this store
 	sequences: Sequences,
-	/// The changefeed buffer
-	cf: crate::cf::Writer,
+	/// The changefeed buffer.
+	changefeed: OnceLock<Changefeed>,
 	/// Async event trigger
 	async_event_trigger: Arc<Notify>,
 	/// Do we have to trigger async events after the commit?
 	trigger_async_event: AtomicBool,
-	/// Per index, track the pending append batch for cleanup after rollback (cancel or failed
-	/// commit).
+	/// Per index, track the pending append batch for cleanup after rollback
 	pending_index_batches: Mutex<HashMap<SharedIndexKey, (BatchId, BatchIdsCleanQueue)>>,
 }
 
@@ -94,7 +94,7 @@ impl Transaction {
 			tr,
 			cache: TransactionCache::new(config.transaction_cache_size),
 			sequences,
-			cf: crate::cf::Writer::new(),
+			changefeed: OnceLock::new(),
 			async_event_trigger,
 			trigger_async_event: AtomicBool::new(false),
 			pending_index_batches: Mutex::new(HashMap::new()),
@@ -133,9 +133,10 @@ impl Transaction {
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip_all)]
 	pub async fn cancel(&self) -> Result<()> {
 		// Clear any buffered changefeed entries
-		self.cf.clear();
-		// Enqueue pending index batches for deferred cleanup after rollback (cancel or failed
-		// commit).
+		if let Some(changefeed) = self.changefeed.get() {
+			changefeed.clear();
+		}
+		// Enqueue pending index batches for deferred cleanup
 		self.cleanup_index_batches().await;
 		// Cancel the transaction
 		Ok(self.tr.cancel().await.map_err(Error::from)?)
@@ -774,7 +775,7 @@ impl Transaction {
 		tb: &TableName,
 		dt: &TableDefinition,
 	) {
-		self.cf.changefeed_buffer_table_change(ns, db, tb, dt)
+		self.changefeed.get_or_init(Changefeed::new).buffer_table_change(ns, db, tb, dt)
 	}
 
 	// change will record the change in the changefeed if enabled.
@@ -792,7 +793,7 @@ impl Transaction {
 		current: CursorRecord,
 		store_difference: bool,
 	) {
-		self.cf.changefeed_buffer_record_change(
+		self.changefeed.get_or_init(Changefeed::new).buffer_record_change(
 			ns,
 			db,
 			tb,
@@ -818,8 +819,12 @@ impl Transaction {
 	// This function should be called immediately before calling the commit function
 	// to ensure the timestamp reflects the actual commit time.
 	pub(crate) async fn store_changes(&self) -> Result<()> {
+		// If no changefeed writer, there are no changes
+		let Some(changefeed) = self.changefeed.get() else {
+			return Ok(());
+		};
 		// Get the changes from the changefeed
-		let changes = self.cf.changes()?;
+		let changes = changefeed.changes()?;
 		// For zero-length changes, return early
 		if changes.is_empty() {
 			return Ok(());

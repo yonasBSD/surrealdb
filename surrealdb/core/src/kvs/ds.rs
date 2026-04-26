@@ -58,6 +58,7 @@ use crate::dbs::node::{Node, Timestamp};
 use crate::dbs::{Capabilities, Executor, Options, QueryResult, QueryResultBuilder, Session};
 use crate::doc::AsyncEventRecord;
 use crate::err::Error;
+use crate::exec::function::FunctionRegistry;
 use crate::expr::model::get_model_path;
 use crate::expr::statements::{DefineModelStatement, DefineStatement, DefineUserStatement};
 use crate::expr::{Base, Expr, FlowResultExt as _, Literal, LogicalPlan, TopLevelExpr};
@@ -121,6 +122,12 @@ pub struct Datastore {
 	index_stores: IndexStores,
 	// The cross transaction cache
 	cache: Arc<DatastoreCache>,
+	/// Registry of built-in scalar, aggregate, projection and index
+	/// functions, along with the method-dispatch table. Built once when the
+	/// datastore is constructed and shared across all transactions via the
+	/// `Arc`. Every `Context` clones this `Arc` rather than rebuilding the
+	/// registry, which is otherwise the single biggest per-query cost.
+	function_registry: Arc<FunctionRegistry>,
 	// The index asynchronous builder
 	index_builder: IndexBuilder,
 	#[cfg(feature = "jwks")]
@@ -680,6 +687,7 @@ impl Datastore {
 			#[cfg(storage)]
 			temporary_directory: self.temporary_directory,
 			cache: Arc::new(DatastoreCache::new(self.config.datastore_cache_size)),
+			function_registry: Arc::new(FunctionRegistry::with_builtins()),
 			buckets: self.buckets,
 			sequences: Sequences::new(self.transaction_factory.clone(), self.id),
 			transaction_factory: self.transaction_factory,
@@ -2315,6 +2323,7 @@ impl Datastore {
 			self.index_builder.clone(),
 			self.sequences.clone(),
 			self.cache.clone(),
+			self.function_registry.clone(),
 			#[cfg(feature = "http")]
 			self.http_client.clone(),
 			#[cfg(storage)]

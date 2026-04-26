@@ -152,7 +152,7 @@ impl Context {
 			buckets: None,
 			#[cfg(feature = "surrealism")]
 			surrealism_cache: None,
-			function_registry: Arc::new(FunctionRegistry::with_builtins()),
+			function_registry: parent.function_registry.clone(),
 			new_planner_strategy: NewPlannerStrategy::default(),
 			redact_volatile_explain_attrs: false,
 			matches_context: None,
@@ -342,6 +342,7 @@ impl Context {
 		index_builder: IndexBuilder,
 		sequences: Sequences,
 		cache: Arc<DatastoreCache>,
+		function_registry: Arc<FunctionRegistry>,
 		#[cfg(feature = "http")] http_client: Arc<HttpClient>,
 		#[cfg(storage)] temporary_directory: Option<Arc<PathBuf>>,
 		buckets: BucketsManager,
@@ -371,7 +372,7 @@ impl Context {
 			buckets: Some(buckets),
 			#[cfg(feature = "surrealism")]
 			surrealism_cache: Some(surrealism_cache),
-			function_registry: Arc::new(FunctionRegistry::with_builtins()),
+			function_registry,
 			new_planner_strategy: planner_strategy,
 			redact_volatile_explain_attrs: false,
 			matches_context: None,

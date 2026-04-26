@@ -18,6 +18,7 @@ use crate::buc::manager::BucketsManager;
 use crate::cnf::dynamic::DynamicConfiguration;
 use crate::cnf::{CommonConfig, ConfigMap};
 use crate::dbs::Capabilities;
+use crate::exec::function::FunctionRegistry;
 #[cfg(feature = "http")]
 use crate::http::HttpClient;
 #[cfg(feature = "jwks")]
@@ -199,6 +200,7 @@ impl Builder {
 			#[cfg(storage)]
 			temporary_directory: self.temporary_directory,
 			cache: Arc::new(DatastoreCache::new(config.datastore_cache_size)),
+			function_registry: Arc::new(FunctionRegistry::with_builtins()),
 			buckets,
 			sequences: Sequences::new(tf, id),
 			async_event_trigger,

@@ -189,7 +189,7 @@ pub struct CommonConfig {
 	/// (default: 1000)
 	pub regex_cache_size: usize,
 	/// Specifies the number of items which can be cached within a single
-	/// transaction (default: 10,000)
+	/// transaction (default: 512)
 	pub transaction_cache_size: usize,
 	/// Specifies the number of definitions which can be cached across transactions
 	/// (default: 1,000)
@@ -292,7 +292,7 @@ impl Default for CommonConfig {
 			idiom_recursion_limit: 256,
 			regex_size_limit: 10 * 1024 * 1024,
 			regex_cache_size: 1_000,
-			transaction_cache_size: 10_000,
+			transaction_cache_size: 512,
 			datastore_cache_size: 1_000,
 			export_batch_size: 1000,
 			operator_buffer_size: 2,
