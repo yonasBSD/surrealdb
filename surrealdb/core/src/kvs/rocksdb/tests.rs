@@ -148,3 +148,61 @@ pub async fn read_and_deletion_only() {
 		tx.commit().await.unwrap();
 	}
 }
+
+/// Verifies that the memory manager clamps `min_write_buffer_number_to_merge`
+/// against `max_write_buffer_number`. Without the clamp, setting
+/// `min_write_buffer_number_to_merge > max_write_buffer_number` (for example
+/// when an operator lowers `max_write_buffer_number=1` alongside the default
+/// merge-of-2) causes RocksDB to wait indefinitely for a memtable merge that
+/// can never happen, stalling every writer.
+///
+/// With the clamp in place the datastore must open cleanly and a write +
+/// commit must succeed within a short budget; if the clamp regresses the
+/// commit here will hang until the test timeout fires.
+#[tokio::test(flavor = "multi_thread")]
+async fn memtable_merge_count_clamp_non_versioned() {
+	memtable_merge_count_clamp_inner(false).await;
+}
+
+/// Same invariant as `memtable_merge_count_clamp_non_versioned`, but with
+/// versioning enabled so the default column family is opened through an
+/// explicit `ColumnFamilyDescriptor`. Exercises the versioned open path
+/// (`apply_cf_level_options` + `MemoryManager::apply_to_cf_options` on the
+/// CF descriptor's `Options`) to confirm it runs cleanly end-to-end with a
+/// misconfigured memtable setup.
+#[tokio::test(flavor = "multi_thread")]
+async fn memtable_merge_count_clamp_versioned() {
+	memtable_merge_count_clamp_inner(true).await;
+}
+
+async fn memtable_merge_count_clamp_inner(versioned: bool) {
+	// Configure a deliberately misconfigured memtable setup: the merge
+	// target (2) exceeds the maximum number of memtables (1). Without
+	// the clamp this would stall writers indefinitely.
+	let mut config = ConfigMap::empty()
+		.with_key_value("rocksdb_max_write_buffer_number", "1")
+		.with_key_value("rocksdb_min_write_buffer_number_to_merge", "2");
+	if versioned {
+		config = config.with_key_value("datastore_versioned", "true");
+	}
+
+	let path = TempDir::new().unwrap().path().to_string_lossy().to_string();
+	let path = format!("rocksdb:{path}");
+
+	let ds = Datastore::builder()
+		.with_config(config)
+		.build_with_factory_path(&path, CommunityComposer())
+		.await
+		.unwrap();
+
+	// A successful write + commit within the timeout proves the clamp
+	// ran and was applied to whichever CF RocksDB ended up using (the
+	// implicit default for the non-versioned case, or the explicit
+	// `ColumnFamilyDescriptor` for the versioned case).
+	let tx = ds.transaction(Write, Optimistic).await.unwrap();
+	tx.set(&"clamp_key", &"clamp_value".as_bytes().to_vec()).await.unwrap();
+	tokio::time::timeout(std::time::Duration::from_secs(10), tx.commit())
+		.await
+		.expect("commit stalled: min_write_buffer_number_to_merge clamp regressed")
+		.unwrap();
+}

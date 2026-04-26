@@ -52,7 +52,6 @@ const KIB: u64 = 1024;
 const MIB: u64 = 1024 * KIB;
 const GIB: u64 = 1024 * MIB;
 
-/// TODO: Check if these values are up-to-date with main before merging
 fn default_log_file_size() -> u64 {
 	let mem = *TOTAL_SYSTEM_MEMORY;
 	if mem < 4 * GIB {

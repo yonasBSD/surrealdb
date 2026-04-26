@@ -3,6 +3,237 @@ use std::time::Duration;
 
 use crate::cnf::Config;
 use crate::kvs::config::{SyncMode, parse_duration};
+use crate::sys::TOTAL_SYSTEM_MEMORY;
+
+const KIB: u64 = 1024;
+const MIB: u64 = 1024 * KIB;
+const GIB: u64 = 1024 * MIB;
+
+/// Scale the compaction readahead buffer with system memory.
+/// < 4 GiB: 4 MiB, < 16 GiB: 8 MiB, otherwise 16 MiB.
+fn default_compaction_readahead_size() -> usize {
+	let mem = *TOTAL_SYSTEM_MEMORY;
+	if mem < 4 * GIB {
+		(4 * MIB) as usize
+	} else if mem < 16 * GIB {
+		(8 * MIB) as usize
+	} else {
+		(16 * MIB) as usize
+	}
+}
+
+/// Size the LRU block cache from available memory:
+/// `max(total_memory / 2 - 1 GiB, 16 MiB)`.
+fn default_block_cache_size() -> usize {
+	let mem = *TOTAL_SYSTEM_MEMORY;
+	mem.saturating_div(2).saturating_sub(GIB).max(16 * MIB) as usize
+}
+
+/// Scale each write buffer with system memory.
+/// < 1 GiB: 32 MiB, < 16 GiB: 64 MiB, otherwise 128 MiB.
+fn default_write_buffer_size() -> usize {
+	let mem = *TOTAL_SYSTEM_MEMORY;
+	if mem < GIB {
+		(32 * MIB) as usize
+	} else if mem < 16 * GIB {
+		(64 * MIB) as usize
+	} else {
+		(128 * MIB) as usize
+	}
+}
+
+/// Scale the maximum number of write buffers with system memory.
+/// < 4 GiB: 2, < 16 GiB: 4, < 64 GiB: 8, otherwise 32.
+fn default_max_write_buffer_number() -> usize {
+	let mem = *TOTAL_SYSTEM_MEMORY;
+	if mem < 4 * GIB {
+		2
+	} else if mem < 16 * GIB {
+		4
+	} else if mem < 64 * GIB {
+		8
+	} else {
+		32
+	}
+}
+
+/// Scale the maximum number of subcompactions with the CPU count
+/// available to the process. `available_parallelism` respects cgroup
+/// CPU quotas on Linux, so a large host running inside a small
+/// cgroup is clipped to its quota. The result is clamped into the
+/// range `[1, 4]` so at least one subcompaction is permitted and so
+/// no more subcompactions are spawned than are useful for a single
+/// LSM level.
+fn default_max_concurrent_subcompactions() -> u32 {
+	let cpu_count = std::thread::available_parallelism().map(|x| x.get()).unwrap_or(1);
+	(cpu_count as u32).clamp(1, 4)
+}
+
+/// Cap the maximum number of background jobs (flush and compaction
+/// workers) against the process memory budget. Each background job
+/// carries a thread stack (~8 MiB on Linux) plus compaction
+/// readahead and scratch buffers, so memory tends to be the
+/// effective ceiling before CPU does on constrained deployments.
+/// Use `cpu_count * 2` as the upper bound (the previous default),
+/// capped at roughly one job per 128 MiB of system memory and
+/// never below 2.
+fn default_jobs_count() -> usize {
+	let cpu_count = std::thread::available_parallelism().map(|x| x.get()).unwrap_or(1);
+	let memory_limited_jobs = (*TOTAL_SYSTEM_MEMORY / (128 * MIB)).max(2) as usize;
+	(cpu_count * 2).min(memory_limited_jobs)
+}
+
+/// Scale the target file size for compaction with system memory.
+/// Smaller SSTs on small systems keep per-compaction work, readahead
+/// buffers and disk headroom in proportion. Note that with
+/// `target_file_size_multiplier` (default 2) and
+/// `file_compaction_trigger` (default 4), L0 can accumulate up to
+/// `4 * base` bytes before compaction triggers and each deeper level
+/// doubles in size, so the base also caps the on-disk pyramid.
+/// < 1 GiB: 8 MiB, < 4 GiB: 16 MiB, < 16 GiB: 32 MiB, otherwise 64 MiB.
+fn default_target_file_size_base() -> u64 {
+	let mem = *TOTAL_SYSTEM_MEMORY;
+	if mem < GIB {
+		8 * MIB
+	} else if mem < 4 * GIB {
+		16 * MIB
+	} else if mem < 16 * GIB {
+		32 * MIB
+	} else {
+		64 * MIB
+	}
+}
+
+/// Scale the grouped-commit batch cap with system memory. Each
+/// queued transaction holds its write set in memory until the
+/// coordinator flushes, so an unbounded cap can transiently inflate
+/// RSS under bursty write load. Larger systems retain the previous
+/// throughput-oriented cap of 4096.
+/// < 1 GiB: 256, < 4 GiB: 1024, otherwise 4096.
+fn default_grouped_commit_max_batch_size() -> usize {
+	let mem = *TOTAL_SYSTEM_MEMORY;
+	if mem < GIB {
+		256
+	} else if mem < 4 * GIB {
+		1024
+	} else {
+		4096
+	}
+}
+
+/// Scale the number of RocksDB info log files to keep on disk. Each
+/// rolled log file is bounded but retained; reducing the retention
+/// count saves disk on small deployments.
+/// < 1 GiB: 2, < 4 GiB: 5, otherwise 10.
+fn default_keep_log_file_num() -> usize {
+	let mem = *TOTAL_SYSTEM_MEMORY;
+	if mem < GIB {
+		2
+	} else if mem < 4 * GIB {
+		5
+	} else {
+		10
+	}
+}
+
+/// Scale the per-iterator auto-readahead cap with system memory. The
+/// implicit iterator prefetcher can grow up to this size per active
+/// iterator, so many concurrent range scans multiply the cost. On
+/// small systems the cap is reduced proportionally.
+/// < 1 GiB: 512 KiB, < 4 GiB: 1 MiB, otherwise 4 MiB.
+fn default_max_auto_readahead_size() -> usize {
+	let mem = *TOTAL_SYSTEM_MEMORY;
+	if mem < GIB {
+		(512 * KIB) as usize
+	} else if mem < 4 * GIB {
+		MIB as usize
+	} else {
+		(4 * MIB) as usize
+	}
+}
+
+/// Scale the inline scan threshold with system memory. Scans at or
+/// below this threshold run directly on the async executor thread;
+/// larger scans are offloaded to the blocking thread-pool. On
+/// constrained CPU budgets a smaller threshold prevents long scans
+/// from monopolising a tokio worker.
+/// < 1 GiB: 512 KiB, < 4 GiB: 1 MiB, otherwise 4 MiB.
+fn default_inline_scan_threshold() -> u32 {
+	let mem = *TOTAL_SYSTEM_MEMORY;
+	if mem < GIB {
+		(512 * KIB) as u32
+	} else if mem < 4 * GIB {
+		MIB as u32
+	} else {
+		(4 * MIB) as u32
+	}
+}
+
+/// Scale the maximum number of files RocksDB can keep open
+/// simultaneously with system memory. Each open SST pins table
+/// reader state (index, filter, prefix metadata) in memory, so on
+/// small deployments a tight cap keeps table-reader memory
+/// proportionate to the available budget. Larger systems retain the
+/// previous default of 1026 FDs.
+/// < 1 GiB: 256, < 4 GiB: 512, otherwise 1026.
+fn default_max_open_files() -> usize {
+	let mem = *TOTAL_SYSTEM_MEMORY;
+	if mem < GIB {
+		256
+	} else if mem < 4 * GIB {
+		512
+	} else {
+		1026
+	}
+}
+
+/// Disable blob file separation on very small systems. Blob files
+/// add a parallel file type with their own garbage collector, FDs and
+/// compaction readahead; on tight disks (typically paired with tight
+/// memory) the bookkeeping cost outweighs the benefit of keeping
+/// large values out of the LSM. Returns the RocksDB default of `true`
+/// for any system with >= 1 GiB of memory.
+fn default_enable_blob_files() -> bool {
+	*TOTAL_SYSTEM_MEMORY >= GIB
+}
+
+/// Scale the target blob file size with system memory. Blob files
+/// store large values (>= `min_blob_size`, default 4 KiB) separately
+/// from SSTs, so a single blob file can otherwise pin hundreds of MiB
+/// of disk on small deployments.
+/// < 1 GiB: 16 MiB, < 4 GiB: 64 MiB, < 16 GiB: 128 MiB, otherwise 256 MiB.
+fn default_blob_file_size() -> u64 {
+	let mem = *TOTAL_SYSTEM_MEMORY;
+	if mem < GIB {
+		16 * MIB
+	} else if mem < 4 * GIB {
+		64 * MIB
+	} else if mem < 16 * GIB {
+		128 * MIB
+	} else {
+		256 * MIB
+	}
+}
+
+/// Scale the WAL size limit (in MiB) with system memory. This governs
+/// how many MiB of *archived* (obsolete) WAL files RocksDB keeps
+/// around before deleting the oldest ones; it does not force flushes
+/// or affect the active WAL. Bounding it prevents archived WAL files
+/// from consuming otherwise scarce disk on small deployments, while
+/// larger systems retain the RocksDB default of unlimited retention.
+/// Returns the limit in MiB (as required by `set_wal_size_limit_mb`);
+/// 0 means unlimited.
+/// < 1 GiB: 32 MiB, < 16 GiB: 128 MiB, otherwise 0 (unlimited).
+fn default_wal_size_limit() -> u64 {
+	let mem = *TOTAL_SYSTEM_MEMORY;
+	if mem < GIB {
+		32
+	} else if mem < 16 * GIB {
+		128
+	} else {
+		0
+	}
+}
 
 // --------------------------------------------------
 // Basic options
@@ -47,17 +278,29 @@ pub struct RocksDbConfig {
 	/// The number of threads to start for flushing and compaction (default: number
 	/// of CPUs)
 	pub thread_count: usize,
-	/// The maximum number of threads to use for flushing and compaction (default:
-	/// number of CPUs * 2)
+	/// The maximum number of background jobs (flush and compaction
+	/// workers) that RocksDB may run concurrently. Defaults to
+	/// `cpu_count * 2`, capped at roughly one job per 128 MiB of
+	/// system memory and never below 2, so that a large host running
+	/// inside a small cgroup does not spawn more background threads
+	/// than the memory budget comfortably supports.
 	pub jobs_count: usize,
-	/// The maximum number of open files which can be opened by RocksDB (default:
-	/// 1024)
+	/// The maximum number of open files which can be opened by RocksDB
+	/// (default: dynamic from 256 to 1026 depending on system memory).
+	/// Each open SST pins table reader state (index, filter, prefix
+	/// metadata) in memory, so the cap is kept proportional to the
+	/// available memory budget.
 	pub max_open_files: usize,
 	/// The size of each uncompressed data block in bytes (default: 64 KiB)
 	pub block_size: usize,
-	/// The write-ahead-log size limit in MiB (default: 0)
+	/// The limit (in MiB) on archived write-ahead-log retention; once
+	/// obsolete WAL files exceed this budget RocksDB deletes the oldest
+	/// first. Does not affect the active WAL or force flushes. Set to
+	/// 0 for unlimited retention (default: dynamic from 32 MiB to
+	/// unlimited depending on system memory).
 	pub wal_size_limit: u64,
-	/// The target file size for compaction in bytes (default: 64 MiB)
+	/// The target file size for compaction in bytes
+	/// (default: dynamic from 8 MiB to 64 MiB depending on system memory)
 	pub target_file_size_base: u64,
 	/// The target file size multiplier for each compaction level (default: 2)
 	pub target_file_size_multiplier: usize,
@@ -66,11 +309,18 @@ pub struct RocksDbConfig {
 	/// The readahead buffer size used during compaction
 	/// (default: dynamic from 4 MiB to 16 MiB)
 	pub compaction_readahead_size: usize,
-	/// The maximum number threads which will perform compactions (default: 4)
+	/// The maximum number of threads which will perform subcompactions
+	/// (default: `min(cpu_count, 4)`). Clamped against the process's
+	/// available parallelism so a large host running inside a small
+	/// cgroup does not oversubscribe the CPU budget with subcompaction
+	/// workers.
 	pub max_concurrent_subcompactions: u32,
 	/// Use separate queues for WAL writes and memtable writes (default: true)
 	pub enable_pipelined_writes: bool,
-	/// The maximum number of information log files to keep (default: 10)
+	/// The maximum number of information log files to keep on disk
+	/// (default: dynamic from 2 to 10 depending on system memory).
+	/// Lower retention saves disk on small deployments; larger systems
+	/// retain the previous default for easier post-mortem debugging.
 	pub keep_log_file_num: usize,
 	/// The information log level of the RocksDB library (default: "warn")
 	pub storage_log_level: String,
@@ -82,12 +332,17 @@ pub struct RocksDbConfig {
 	pub deletion_factory_delete_count: usize,
 	/// The ratio of deletions to track in the window (default: 0.5)
 	pub deletion_factory_ratio: f64,
-	/// Whether to enable separate key and value file storage (default: true)
+	/// Whether to enable separate key and value file storage
+	/// (default: true on systems with >= 1 GiB of memory, false below).
+	/// The blob GC loop, extra file descriptors and additional
+	/// compaction readahead are not worth the complexity on very small
+	/// deployments.
 	pub enable_blob_files: bool,
 	/// The minimum size of a value for it to be stored in blob files (default: 4
 	/// KiB)
 	pub min_blob_size: u64,
-	/// The target blob file size (default: 256 MiB)
+	/// The target blob file size
+	/// (default: dynamic from 16 MiB to 256 MiB depending on system memory)
 	pub blob_file_size: u64,
 	/// Compression type used for blob files (default: "snappy")
 	/// Supported values: "none", "snappy", "lz4", "zstd"
@@ -127,9 +382,12 @@ pub struct RocksDbConfig {
 	/// ROCKSDB_GROUPED_COMMIT_TIMEOUT to collect more transactions. Smaller batches are flushed
 	/// immediately to preserve low latency.
 	pub grouped_commit_wait_threshold: usize,
-	/// The maximum number of transactions in a single grouped commit batch (default: 4096)
-	/// This prevents unbounded memory growth while still allowing large batches for efficiency.
-	/// Larger batches improve throughput but increase memory usage and commit latency.
+	/// The maximum number of transactions in a single grouped commit batch
+	/// (default: dynamic from 256 to 4096 depending on system memory).
+	/// Each queued transaction holds its write set in memory until the
+	/// coordinator flushes, so smaller systems use smaller batches to
+	/// cap transient RSS under bursty write load. Larger batches improve
+	/// throughput but increase memory usage and commit latency.
 	pub grouped_commit_max_batch_size: usize,
 
 	/// The initial readahead size used by RocksDB's implicit (auto) iterator
@@ -141,7 +399,10 @@ pub struct RocksDbConfig {
 	/// The upper bound on RocksDB's implicit (auto) iterator readahead size.
 	/// Raising this cap (from the RocksDB default of 256 KiB) can significantly
 	/// improve throughput on long range scans at the cost of additional I/O
-	/// and memory per iterator (default: 4 MiB)
+	/// and memory per iterator. Because each active iterator can grow its
+	/// readahead up to this cap, many concurrent scans multiply the memory
+	/// footprint, so the default scales down on small systems
+	/// (default: dynamic from 512 KiB to 4 MiB depending on system memory).
 	pub max_auto_readahead_size: usize,
 	/// The number of sequential file reads an iterator must perform on a
 	/// single SST before RocksDB begins its implicit (auto) readahead. Set to
@@ -175,7 +436,8 @@ pub struct RocksDbConfig {
 	/// directly, while `Count(c)` and `BytesOrCount(b, c)` convert the entry count
 	/// to an approximate byte size using the caller-supplied per-entry size. The
 	/// unbounded `count()` path is always offloaded via `affinitypool::spawn_local`
-	/// regardless of this value (default: 4 MiB)
+	/// regardless of this value
+	/// (default: dynamic from 512 KiB to 4 MiB depending on system memory)
 	pub inline_scan_threshold: u32,
 }
 
@@ -187,47 +449,45 @@ impl Default for RocksDbConfig {
 			retention: Duration::ZERO,
 			sync_mode: SyncMode::Every,
 			thread_count: cpu_count,
-			jobs_count: cpu_count * 2,
-			max_open_files: 1026,
+			jobs_count: default_jobs_count(),
+			max_open_files: default_max_open_files(),
 			block_size: 64 * 1024,
-			wal_size_limit: 0,
-			target_file_size_base: 64 * 1024 * 1024,
+			wal_size_limit: default_wal_size_limit(),
+			target_file_size_base: default_target_file_size_base(),
 			target_file_size_multiplier: 2,
 			file_compaction_trigger: 4,
-			// TODO: Fix to old behavior
-			compaction_readahead_size: 16 * 1024 * 1024,
-			max_concurrent_subcompactions: 4,
+			compaction_readahead_size: default_compaction_readahead_size(),
+			max_concurrent_subcompactions: default_max_concurrent_subcompactions(),
 			enable_pipelined_writes: true,
-			keep_log_file_num: 10,
+			keep_log_file_num: default_keep_log_file_num(),
 			storage_log_level: "warn".to_owned(),
 			compaction_style: "level".to_owned(),
 			deletion_factory_window_size: 1000,
 			deletion_factory_delete_count: 50,
 			deletion_factory_ratio: 0.5,
-			enable_blob_files: true,
+			enable_blob_files: default_enable_blob_files(),
 			min_blob_size: 4 * 1024,
-			blob_file_size: 256 * 1024 * 1024,
+			blob_file_size: default_blob_file_size(),
 			blob_compression_type: Default::default(),
 			enable_blob_gc: true,
 			blob_gc_age_cutoff: 0.5,
 			blob_gc_force_threshold: 0.5,
 			blob_compaction_readahead_size: 0,
-			// TODO: Fix to old behavior
-			block_cache_size: 16 * 1024 * 1024,
-			write_buffer_size: 128 * 1024 * 1024,
-			max_write_buffer_number: 32,
+			block_cache_size: default_block_cache_size(),
+			write_buffer_size: default_write_buffer_size(),
+			max_write_buffer_number: default_max_write_buffer_number(),
 			min_write_buffer_number_to_merge: 2,
 			sst_max_allowed_space_usage: 0,
 			grouped_commit_timeout: Duration::from_millis(5).as_nanos() as u64,
 			grouped_commit_wait_threshold: 12,
-			grouped_commit_max_batch_size: 4096,
+			grouped_commit_max_batch_size: default_grouped_commit_max_batch_size(),
 			initial_auto_readahead_size: 8 * 1024,
-			max_auto_readahead_size: 4 * 1024 * 1024,
+			max_auto_readahead_size: default_max_auto_readahead_size(),
 			file_reads_for_auto_readahead: 2,
 			prefix_extractor_enabled: true,
 			whole_key_filtering: true,
 			memtable_prefix_bloom_ratio: 0.1,
-			inline_scan_threshold: 4 * 1024 * 1024,
+			inline_scan_threshold: default_inline_scan_threshold(),
 		}
 	}
 }

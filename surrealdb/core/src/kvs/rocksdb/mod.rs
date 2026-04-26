@@ -120,6 +120,105 @@ struct TransactionInner {
 	tx: Box<rocksdb::Transaction<'static, OptimisticTransactionDB>>,
 }
 
+/// Apply the column-family-level RocksDB options derived from `config`
+/// to `target`. Keeping these grouped in one helper means that when
+/// versioning is enabled - and the default CF is opened via an
+/// explicit `ColumnFamilyDescriptor` with its own options - the
+/// explicit CF receives the same compaction, blob, compression and
+/// prefix-filter settings as the implicit default CF would have
+/// inherited from the main `opts`.
+fn apply_cf_level_options(target: &mut Options, config: &RocksDbConfig) {
+	// Set the target file size for compaction
+	info!(target: TARGET, "Target file size for compaction: {}", config.target_file_size_base);
+	target.set_target_file_size_base(config.target_file_size_base);
+	// Set the levelled target file size multipler
+	let size_multiplier = config.target_file_size_multiplier.min(i32::MAX as usize) as i32;
+	info!(target: TARGET, "Target file size compaction multiplier: {size_multiplier}");
+	target.set_target_file_size_multiplier(size_multiplier);
+	// Delay compaction until the minimum number of files accumulate
+	let compaction_trigger = config.file_compaction_trigger.min(i32::MAX as usize) as i32;
+	info!(target: TARGET, "Number of files to trigger compaction: {compaction_trigger}");
+	target.set_level_zero_file_num_compaction_trigger(compaction_trigger);
+	// Enable separation of keys and values
+	info!(target: TARGET, "Enable separation of keys and values: {}", config.enable_blob_files);
+	target.set_enable_blob_files(config.enable_blob_files);
+	// Store large values separate from keys
+	info!(target: TARGET, "Minimum blob value size: {}", config.min_blob_size);
+	target.set_min_blob_size(config.min_blob_size);
+	// Additional blob file options
+	info!(target: TARGET, "Target blob file size: {}", config.blob_file_size);
+	target.set_blob_file_size(config.blob_file_size);
+	// Set the blob compression type
+	let (db_compression, name) = match config.blob_compression_type {
+		cnf::BlobCompression::Snappy => (DBCompressionType::Snappy, "snappy"),
+		cnf::BlobCompression::Lz4 => (DBCompressionType::Lz4, "lz4"),
+		cnf::BlobCompression::Zstd => (DBCompressionType::Zstd, "zstd"),
+		cnf::BlobCompression::None => (DBCompressionType::None, "none"),
+	};
+	info!(target: TARGET, "Blob compression type: {name}");
+	target.set_blob_compression_type(db_compression);
+	// Whether to enable blob garbage collection
+	info!(target: TARGET, "Enable blob garbage collection: {}", config.enable_blob_gc);
+	target.set_enable_blob_gc(config.enable_blob_gc);
+	// Set the blob garbage collection age cutoff
+	info!(target: TARGET, "Blob GC age cutoff: {}", config.blob_gc_age_cutoff);
+	target.set_blob_gc_age_cutoff(config.blob_gc_age_cutoff);
+	// Set the blob garbage collection force threshold
+	info!(target: TARGET, "Blob GC force threshold: {}", config.blob_gc_force_threshold);
+	target.set_blob_gc_force_threshold(config.blob_gc_force_threshold);
+	// Set the blob compaction readahead size
+	info!(target: TARGET, "Blob compaction readahead size: {}", config.blob_compaction_readahead_size);
+	target.set_blob_compaction_readahead_size(config.blob_compaction_readahead_size);
+	// Set the delete compaction factory
+	info!(target: TARGET, "Setting delete compaction factory: {} / {} ({})",
+		config.deletion_factory_window_size,
+		config.deletion_factory_delete_count,
+		config.deletion_factory_ratio,
+	);
+	target.add_compact_on_deletion_collector_factory(
+		config.deletion_factory_window_size,
+		config.deletion_factory_delete_count,
+		config.deletion_factory_ratio,
+	);
+	// Set the datastore compaction style
+	info!(target: TARGET, "Setting compaction style: {}", config.compaction_style);
+	target.set_compaction_style(match config.compaction_style.to_ascii_lowercase().as_str() {
+		"universal" => DBCompactionStyle::Universal,
+		_ => DBCompactionStyle::Level,
+	});
+	// Set specific compression levels
+	info!(target: TARGET, "Setting compression level");
+	target.set_compression_per_level(&[
+		DBCompressionType::None, // L0
+		DBCompressionType::Lz4,  // L1
+		DBCompressionType::Lz4,  // L2
+		DBCompressionType::Lz4,  // L3
+		DBCompressionType::Lz4,  // L4
+		DBCompressionType::Zstd, // L5
+		DBCompressionType::Zstd, // L6
+		DBCompressionType::Zstd, // L7
+	]);
+	// Set the bottommost compression type
+	info!(target: TARGET, "Setting bottommost compression type: Zstd");
+	target.set_bottommost_compression_type(DBCompressionType::Zstd);
+	// Use Zstd typed dictionary training
+	info!(target: TARGET, "Using Zstd typed dictionary training");
+	target.set_bottommost_zstd_max_train_bytes(0, true);
+	// Configure the custom table-level prefix extractor. See
+	// `prefix_extractor.rs` for the semantics.
+	if config.prefix_extractor_enabled {
+		info!(target: TARGET, "Prefix extractor: enabled ({})", prefix_extractor::NAME);
+		target.set_prefix_extractor(prefix_extractor::build());
+		let ratio = config.memtable_prefix_bloom_ratio;
+		if ratio > 0.0 {
+			info!(target: TARGET, "Memtable prefix bloom ratio: {ratio}");
+			target.set_memtable_prefix_bloom_ratio(ratio);
+		}
+	} else {
+		info!(target: TARGET, "Prefix extractor: disabled");
+	}
+}
+
 impl Datastore {
 	/// Open a new database
 	pub(crate) async fn new(path: &str, config: RocksDbConfig) -> Result<Datastore> {
@@ -150,17 +249,6 @@ impl Datastore {
 		// Set the number of log files to keep
 		info!(target: TARGET, "Number of log files to keep: {}", config.keep_log_file_num);
 		opts.set_keep_log_file_num(config.keep_log_file_num);
-		// Set the target file size for compaction
-		info!(target: TARGET, "Target file size for compaction: {}", config.target_file_size_base);
-		opts.set_target_file_size_base(config.target_file_size_base);
-		// Set the levelled target file size multipler
-		let size_multiplier = config.target_file_size_multiplier.min(i32::MAX as usize) as i32;
-		info!(target: TARGET, "Target file size compaction multiplier: {size_multiplier}");
-		opts.set_target_file_size_multiplier(size_multiplier);
-		// Delay compaction until the minimum number of files accumulate
-		let compaction_trigger = config.file_compaction_trigger.min(i32::MAX as usize) as i32;
-		info!(target: TARGET, "Number of files to trigger compaction: {compaction_trigger}");
-		opts.set_level_zero_file_num_compaction_trigger(compaction_trigger);
 		// Set the compaction readahead size
 		info!(target: TARGET, "Compaction readahead size: {}", config.compaction_readahead_size);
 		opts.set_compaction_readahead_size(config.compaction_readahead_size);
@@ -170,36 +258,6 @@ impl Datastore {
 		// Use separate write thread queues
 		info!(target: TARGET, "Use separate thread queues: {}", config.enable_pipelined_writes);
 		opts.set_enable_pipelined_write(config.enable_pipelined_writes);
-		// Enable separation of keys and values
-		info!(target: TARGET, "Enable separation of keys and values: {}", config.enable_blob_files);
-		opts.set_enable_blob_files(config.enable_blob_files);
-		// Store large values separate from keys
-		info!(target: TARGET, "Minimum blob value size: {}", config.min_blob_size);
-		opts.set_min_blob_size(config.min_blob_size);
-		// Additional blob file options
-		info!(target: TARGET, "Target blob file size: {}", config.blob_file_size);
-		opts.set_blob_file_size(config.blob_file_size);
-		// Set the blob compression type
-		let (db_compression, name) = match config.blob_compression_type {
-			cnf::BlobCompression::Snappy => (DBCompressionType::Snappy, "snappy"),
-			cnf::BlobCompression::Lz4 => (DBCompressionType::Lz4, "lz4"),
-			cnf::BlobCompression::Zstd => (DBCompressionType::Zstd, "zstd"),
-			cnf::BlobCompression::None => (DBCompressionType::None, "none"),
-		};
-		info!(target: TARGET, "Blob compression type: {name}");
-		opts.set_blob_compression_type(db_compression);
-		// Whether to enable blob garbage collection
-		info!(target: TARGET, "Enable blob garbage collection: {}", config.enable_blob_gc);
-		opts.set_enable_blob_gc(config.enable_blob_gc);
-		// Set the blob garbage collection age cutoff
-		info!(target: TARGET, "Blob GC age cutoff: {}", config.blob_gc_age_cutoff);
-		opts.set_blob_gc_age_cutoff(config.blob_gc_age_cutoff);
-		// Set the blob garbage collection force threshold
-		info!(target: TARGET, "Blob GC force threshold: {}", config.blob_gc_force_threshold);
-		opts.set_blob_gc_force_threshold(config.blob_gc_force_threshold);
-		// Set the blob compaction readahead size
-		info!(target: TARGET, "Blob compaction readahead size: {}", config.blob_compaction_readahead_size);
-		opts.set_blob_compaction_readahead_size(config.blob_compaction_readahead_size);
 		// Set the write-ahead-log size limit in MB
 		info!(target: TARGET, "Write-ahead-log file size limit: {}MB", config.wal_size_limit);
 		opts.set_wal_size_limit_mb(config.wal_size_limit);
@@ -212,41 +270,6 @@ impl Datastore {
 		// Improve concurrency from write batch mutex
 		info!(target: TARGET, "Allow adaptive write thread yielding: true");
 		opts.set_enable_write_thread_adaptive_yield(true);
-		// Set the delete compaction factory
-		info!(target: TARGET, "Setting delete compaction factory: {} / {} ({})",
-			config.deletion_factory_window_size,
-			config.deletion_factory_delete_count,
-			config.deletion_factory_ratio,
-		);
-		opts.add_compact_on_deletion_collector_factory(
-			config.deletion_factory_window_size,
-			config.deletion_factory_delete_count,
-			config.deletion_factory_ratio,
-		);
-		// Set the datastore compaction style
-		info!(target: TARGET, "Setting compaction style: {}", config.compaction_style);
-		opts.set_compaction_style(match config.compaction_style.to_ascii_lowercase().as_str() {
-			"universal" => DBCompactionStyle::Universal,
-			_ => DBCompactionStyle::Level,
-		});
-		// Set specific compression levels
-		info!(target: TARGET, "Setting compression level");
-		opts.set_compression_per_level(&[
-			DBCompressionType::None, // L0
-			DBCompressionType::Lz4,  // L1
-			DBCompressionType::Lz4,  // L2
-			DBCompressionType::Lz4,  // L3
-			DBCompressionType::Lz4,  // L4
-			DBCompressionType::Zstd, // L5
-			DBCompressionType::Zstd, // L6
-			DBCompressionType::Zstd, // L7
-		]);
-		// Set the bottommost compression type
-		info!(target: TARGET, "Setting bottommost compression type: Zstd");
-		opts.set_bottommost_compression_type(DBCompressionType::Zstd);
-		// Use Zstd typed dictionary training
-		info!(target: TARGET, "Using Zstd typed dictionary training");
-		opts.set_bottommost_zstd_max_train_bytes(0, true);
 		// Set specific storage log level
 		info!(target: TARGET, "Setting storage engine log level: {}", config.storage_log_level);
 		opts.set_log_level(match config.storage_log_level.to_ascii_lowercase().as_str() {
@@ -261,22 +284,20 @@ impl Datastore {
 				)));
 			}
 		});
-		// Configure the custom table-level prefix extractor. This is a
-		// column-family option, so when versioning is enabled (and the
-		// default CF carries its own `cf_opts`) we also need to set it on
-		// `cf_opts` below. See `prefix_extractor.rs` for the semantics.
-		if config.prefix_extractor_enabled {
-			info!(target: TARGET, "Prefix extractor: enabled ({})", prefix_extractor::NAME);
-			opts.set_prefix_extractor(prefix_extractor::build());
-			let ratio = config.memtable_prefix_bloom_ratio;
-			if ratio > 0.0 {
-				info!(target: TARGET, "Memtable prefix bloom ratio: {ratio}");
-				opts.set_memtable_prefix_bloom_ratio(ratio);
-			}
-		} else {
-			info!(target: TARGET, "Prefix extractor: disabled");
-		}
-		// Configure the timestamp-aware comparator for user-defined timestamps
+		// Apply the column-family-level settings to the main `opts`. These
+		// govern the implicit default CF used when versioning is disabled;
+		// when versioning is enabled the same settings are mirrored onto
+		// the explicit CF descriptor's options below.
+		apply_cf_level_options(&mut opts, &config);
+		// Configure and create the memory manager. This also applies its
+		// per-CF settings (write buffer size, max/min memtables,
+		// block-based table factory, blob cache) to `opts`.
+		let memory_manager = Arc::new(MemoryManager::configure(&mut opts, &config)?);
+		// Configure the timestamp-aware comparator for user-defined
+		// timestamps. When versioning is enabled we open the database
+		// with an explicit default CF descriptor; RocksDB uses this
+		// descriptor's options for CF-level settings, so every CF-level
+		// setting applied above on `opts` must also be applied here.
 		let cf_opts = if config.versioned {
 			info!(target: TARGET, "Enabling user-defined timestamps (versioning)");
 			let mut cf_opts = Options::default();
@@ -287,25 +308,12 @@ impl Datastore {
 				Box::new(comparator::compare_ts),
 				Box::new(comparator::compare_without_ts),
 			);
-			// The default CF uses this dedicated `cf_opts` object (set
-			// via the column family descriptor below), so the prefix
-			// extractor configured on `opts` would not take effect. Mirror
-			// it here (and the matching memtable prefix bloom ratio) so
-			// versioned datastores get the same bloom-filter and scan
-			// optimisations as non-versioned ones.
-			if config.prefix_extractor_enabled {
-				cf_opts.set_prefix_extractor(prefix_extractor::build());
-				let ratio = config.memtable_prefix_bloom_ratio;
-				if ratio > 0.0 {
-					cf_opts.set_memtable_prefix_bloom_ratio(ratio);
-				}
-			}
+			apply_cf_level_options(&mut cf_opts, &config);
+			memory_manager.apply_to_cf_options(&mut cf_opts, &config);
 			Some(cf_opts)
 		} else {
 			None
 		};
-		// Configure and create the memory manager
-		let memory_manager = Arc::new(MemoryManager::configure(&mut opts, &config)?);
 		// Pre-configure the disk space manager
 		let should_create_disk_space_manager = DiskSpaceManager::configure(&mut opts, &config)?;
 		// Pre-configure WAL options based on the resolved sync mode
