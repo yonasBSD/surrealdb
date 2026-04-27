@@ -11,6 +11,7 @@ SurrealDB is a multi-model database built in Rust supporting document, graph, re
 ```
 surrealdb/           # Main SDK crate
 surrealdb/core/      # Core database engine (query execution, storage)
+surrealdb/mcp/       # Model Context Protocol server (stdio + HTTP)
 surrealdb/server/    # HTTP, WebSocket, gRPC server
 surrealdb/types/     # Public types and derive macros
 surrealism/          # Surrealism (WASM plugin system) crates

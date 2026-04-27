@@ -89,6 +89,15 @@ pub static HTTP_MAX_SIGNIN_BODY_SIZE: LazyLock<usize> =
 pub static HTTP_MAX_IMPORT_BODY_SIZE: LazyLock<usize> =
 	lazy_env_parse!(bytes, "SURREAL_HTTP_MAX_IMPORT_BODY_SIZE", usize, 4 << 30);
 
+/// The maximum HTTP body size of the HTTP /mcp endpoint (default: 4 MiB)
+///
+/// Sized to comfortably hold typical MCP JSON-RPC payloads (initialize
+/// handshakes, tool calls with structured parameter objects) without
+/// allowing a malicious client to allocate unbounded memory before the
+/// MCP layer's per-tool argument and key caps kick in.
+pub static HTTP_MAX_MCP_BODY_SIZE: LazyLock<usize> =
+	lazy_env_parse!(bytes, "SURREAL_HTTP_MAX_MCP_BODY_SIZE", usize, 4 << 20);
+
 /// Specifies the frequency with which ping messages are sent to the client
 pub const WEBSOCKET_PING_FREQUENCY: Duration = Duration::from_secs(5);
 

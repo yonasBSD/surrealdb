@@ -10,6 +10,8 @@ pub mod health;
 pub mod import;
 mod input;
 pub mod key;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 pub mod ml;
 pub(crate) mod output;
 mod params;
@@ -144,6 +146,9 @@ impl RouterFactory for CommunityComposer {
 
 		#[cfg(feature = "graphql")]
 		let router = router.merge(gql::router());
+
+		#[cfg(feature = "mcp")]
+		let router = router.merge(mcp::router());
 
 		router
 	}
@@ -337,7 +342,7 @@ impl SurrealRouter {
 			AllowOrigin::list(origins)
 		};
 
-		let allow_header = [
+		let mut allow_header = vec![
 			header::ACCEPT,
 			header::ACCEPT_ENCODING,
 			header::AUTHORIZATION,
@@ -349,6 +354,19 @@ impl SurrealRouter {
 			AUTH_NS.clone(),
 			AUTH_DB.clone(),
 		];
+
+		// MCP protocol headers for cross-origin browser clients
+		#[cfg(feature = "mcp")]
+		let mcp_expose_headers = {
+			allow_header.push(http::HeaderName::from_static("mcp-session-id"));
+			allow_header.push(http::HeaderName::from_static("mcp-protocol-version"));
+			allow_header.push(http::HeaderName::from_static("last-event-id"));
+			allow_header.push(http::HeaderName::from_static("x-custom-auth-headers"));
+			vec![
+				http::HeaderName::from_static("mcp-session-id"),
+				http::HeaderName::from_static("mcp-protocol-version"),
+			]
+		};
 
 		let service = service
 			.layer(AddExtensionLayer::new(app_state))
@@ -367,8 +385,8 @@ impl SurrealRouter {
 			.layer(headers::add_server_header(!opt.no_identification_headers)?)
 			.layer(headers::add_version_header(!opt.no_identification_headers)?)
 			// Apply CORS headers to relevant responses
-			.layer(
-				CorsLayer::new()
+			.layer({
+				let cors = CorsLayer::new()
 					.allow_methods([
 						http::Method::GET,
 						http::Method::PUT,
@@ -379,8 +397,13 @@ impl SurrealRouter {
 					])
 					.allow_headers(allow_header)
 					.allow_origin(allow_origin)
-					.max_age(Duration::from_secs(86400)),
-			);
+					.max_age(Duration::from_secs(86400));
+
+				#[cfg(feature = "mcp")]
+				let cors = cors.expose_headers(mcp_expose_headers);
+
+				cors
+			});
 
 		// Build the route tree from the RouterFactory
 		let axum_app = F::configure_router();

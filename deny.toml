@@ -61,11 +61,7 @@ yanked = "warn"
 # - for RUSTSEC-2023-0071, rsa gas a constant-time implementation allowing attackers to recover keys
 #   see https://github.com/RustCrypto/RSA/issues/19#issuecomment-1822995643 for more information
 # - for RUSTSEC-2024-0436, paste is now unmaintained and archived, but we only use paste in tests
-#   so we could wait for ${concat(...)} metavariable expressions (issue #124225) to stabilize
-# - for RUSTSEC-2026-0097, rand ThreadRng unsoundness under a narrow combination (custom log
-#   handler calling thread_rng while reseeding). Transitive rand 0.7/0.8 remain via surrealdb-tikv-client
-#   (fail, direct rand dep) and other crates on rand 0.8 until those dependencies move to rand
-#   >=0.9.3 or >=0.10.1. The lockfile uses rand 0.9.3 where the 0.9 series is selected.
+#   so we could wait for ${concat(...)} metavariable expressions (issue #124225) to stabilize.
 # - for RUSTSEC-2026-0098, RUSTSEC-2026-0099 and RUSTSEC-2026-0104, rustls-webpki 0.101.7 has
 #   name-constraint handling bugs (URI names accepted, wildcard DNS names accepted under subtree
 #   constraints) and a reachable panic when parsing a CRL with an empty `onlySomeReasons`
@@ -78,7 +74,6 @@ ignore = [
     "RUSTSEC-2025-0141",
     "RUSTSEC-2023-0071",
     "RUSTSEC-2024-0436",
-    "RUSTSEC-2026-0097",
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0099",
     "RUSTSEC-2026-0104",
@@ -125,6 +120,10 @@ name = "surrealdb-core"
 allow = ["BUSL-1.1"]
 
 [[licenses.exceptions]]
+name = "surrealdb-mcp"
+allow = ["BUSL-1.1"]
+
+[[licenses.exceptions]]
 name = "surrealdb-server"
 allow = ["BUSL-1.1"]
 
@@ -164,6 +163,11 @@ license-files = []
 
 [[licenses.clarify]]
 name = "surrealdb-core"
+expression = "BUSL-1.1"
+license-files = []
+
+[[licenses.clarify]]
+name = "surrealdb-mcp"
 expression = "BUSL-1.1"
 license-files = []
 

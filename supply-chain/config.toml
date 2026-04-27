@@ -37,6 +37,9 @@ audit-as-crates-io = false
 [policy.surrealdb-core]
 audit-as-crates-io = false
 
+[policy.surrealdb-mcp]
+audit-as-crates-io = false
+
 [policy.surrealdb-profiling]
 audit-as-crates-io = false
 
@@ -466,6 +469,10 @@ criteria = "safe-to-run"
 
 [[exemptions.dtoa-short]]
 version = "0.3.5"
+criteria = "safe-to-deploy"
+
+[[exemptions.dyn-clone]]
+version = "1.0.20"
 criteria = "safe-to-deploy"
 
 [[exemptions.earcutr]]
@@ -1348,6 +1355,10 @@ criteria = "safe-to-deploy"
 version = "0.5.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.rand_core]]
+version = "0.10.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.rand_hc]]
 version = "0.2.0"
 criteria = "safe-to-deploy"
@@ -1374,6 +1385,14 @@ criteria = "safe-to-deploy"
 
 [[exemptions.redox_users]]
 version = "0.5.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.ref-cast]]
+version = "1.0.25"
+criteria = "safe-to-deploy"
+
+[[exemptions.ref-cast-impl]]
+version = "1.0.25"
 criteria = "safe-to-deploy"
 
 [[exemptions.regex-syntax]]
@@ -1418,6 +1437,14 @@ criteria = "safe-to-deploy"
 
 [[exemptions.rkyv_derive]]
 version = "0.7.46"
+criteria = "safe-to-deploy"
+
+[[exemptions.rmcp]]
+version = "1.4.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.rmcp-macros]]
+version = "1.4.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.rmp]]
@@ -1556,6 +1583,14 @@ criteria = "safe-to-run"
 version = "0.1.29"
 criteria = "safe-to-deploy"
 
+[[exemptions.schemars]]
+version = "1.2.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.schemars_derive]]
+version = "1.2.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.scopeguard]]
 version = "1.2.0"
 criteria = "safe-to-deploy"
@@ -1582,6 +1617,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.seize]]
 version = "0.5.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.serde_derive_internals]]
+version = "0.29.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.serde_html_form]]
@@ -1662,6 +1701,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.spki]]
 version = "0.7.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.sse-stream]]
+version = "0.2.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.stable_deref_trait]]
