@@ -25,8 +25,9 @@ use uuid::Uuid;
 
 use super::RpcState;
 use crate::cnf::{
-	PKG_NAME, PKG_VERSION, WEBSOCKET_PING_FREQUENCY, WEBSOCKET_RESPONSE_BUFFER_SIZE,
-	WEBSOCKET_RESPONSE_CHANNEL_SIZE, WEBSOCKET_RESPONSE_FLUSH_PERIOD,
+	PKG_NAME, PKG_VERSION, WEBSOCKET_MAX_ATTACHED_SESSIONS, WEBSOCKET_PING_FREQUENCY,
+	WEBSOCKET_RESPONSE_BUFFER_SIZE, WEBSOCKET_RESPONSE_CHANNEL_SIZE,
+	WEBSOCKET_RESPONSE_FLUSH_PERIOD,
 };
 use crate::rpc::CONN_CLOSED_ERR;
 use crate::rpc::format::WsFormat;
@@ -53,7 +54,15 @@ pub struct Websocket {
 	pub(crate) state: Arc<RpcState>,
 	/// The datastore accessible to all RPC WebSocket connections
 	pub(crate) datastore: Arc<Datastore>,
-	/// The active sessions for this WebSocket connection
+	/// The active sessions for this WebSocket connection.
+	///
+	/// This map is **per-connection**: it is created fresh for every
+	/// WebSocket upgrade and torn down when the connection closes. A
+	/// session id attached here is only reachable from RPC calls that
+	/// arrive on this same socket, so cross-connection hijack via session
+	/// id enumeration is not possible on the WebSocket transport by construction.
+	/// The attach count is additionally capped by [`WEBSOCKET_MAX_ATTACHED_SESSIONS`]
+	/// as defence-in-depth against a single misbehaving client.
 	pub(crate) sessions: HashMap<Uuid, Arc<RwLock<Session>>>,
 	/// The active transactions for this WebSocket connection
 	pub(crate) transactions: DashMap<Uuid, Arc<Transaction>>,
@@ -520,10 +529,13 @@ impl RpcProtocol for Websocket {
 		&self.sessions
 	}
 
-	/// Lists all explicitly attached sessions.
+	/// Lists all explicitly attached sessions on this connection.
 	///
-	/// Filters out this connection's implicit default session keyed by
-	/// `self.id` so clients cannot enumerate or target it via `detach`.
+	/// WebSocket session maps are **per-connection** - the returned ids are only those the same
+	/// client attached on the same socket, so enumeration cannot leak another user's session id
+	/// (unlike the HTTP transport, where the underlying vulnerability originated). Filters out
+	/// this connection's implicit default session keyed by `self.id` so clients cannot enumerate
+	/// or target it via `detach`.
 	async fn sessions(&self) -> Result<DbResult, TypesError> {
 		let connection_id = self.id;
 		let array: Array = self
@@ -534,6 +546,25 @@ impl RpcProtocol for Websocket {
 			.map(|(key, _)| Value::Uuid(surrealdb_types::Uuid::from(key)))
 			.collect();
 		Ok(DbResult::Other(Value::Array(array)))
+	}
+
+	/// Registers a new session with the given ID, subject to the
+	/// [`WEBSOCKET_MAX_ATTACHED_SESSIONS`] per-connection cap.
+	///
+	/// The implicit connection session keyed by `self.id` counts towards
+	/// the cap so a client cannot sidestep it. Defence-in-depth against
+	/// a client attempting to exhaust memory within a single connection.
+	async fn attach(&self, session_id: Uuid) -> Result<DbResult, TypesError> {
+		if self.session_map().contains_key(&session_id) {
+			return Err(surrealdb_core::rpc::session_exists(session_id));
+		}
+		if self.session_map().len() >= *WEBSOCKET_MAX_ATTACHED_SESSIONS {
+			return Err(surrealdb_core::rpc::method_not_allowed(Method::Attach.to_string()));
+		}
+		let mut session = Session::default().with_rt(Self::LQ_SUPPORT);
+		session.id = Some(session_id);
+		self.session_map().insert(session_id, Arc::new(RwLock::new(session)));
+		Ok(DbResult::Other(Value::None))
 	}
 
 	/// Detaches an explicitly attached session.

@@ -307,6 +307,7 @@ tokio-stream.workspace = true
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 tracing.workspace = true
 ulid.workspace = true
+uuid = { workspace = true, features = ["v4"] }
 
 [build-dependencies]
 semver.workspace = true

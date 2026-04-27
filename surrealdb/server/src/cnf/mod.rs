@@ -53,6 +53,26 @@ pub static HTTP_MAX_API_BODY_SIZE: LazyLock<usize> =
 pub static HTTP_MAX_RPC_BODY_SIZE: LazyLock<usize> =
 	lazy_env_parse!(bytes, "SURREAL_HTTP_MAX_RPC_BODY_SIZE", usize, 4 << 20);
 
+/// The maximum number of explicitly attached sessions the HTTP transport
+/// will retain at once (default: 16384).
+///
+/// The HTTP `/rpc` session map is process-global (there is no per-connection
+/// scope as with WebSocket), so an uncapped map is a denial-of-service target
+/// for anonymous callers. This cap bounds total memory attributable to
+/// attached HTTP sessions. Ephemeral per-request sessions do not count
+/// against this cap.
+pub static HTTP_MAX_ATTACHED_SESSIONS: LazyLock<usize> =
+	lazy_env_parse!("SURREAL_HTTP_MAX_ATTACHED_SESSIONS", usize, 16384);
+
+/// The maximum number of explicitly attached sessions a single WebSocket
+/// connection may hold at once (default: 256).
+///
+/// WebSocket session maps are per-connection - dropping the connection
+/// cleans them up - so this cap primarily bounds resource use by a single
+/// misbehaving or malicious client within one connection.
+pub static WEBSOCKET_MAX_ATTACHED_SESSIONS: LazyLock<usize> =
+	lazy_env_parse!("SURREAL_WEBSOCKET_MAX_ATTACHED_SESSIONS", usize, 256);
+
 /// The maximum HTTP body size of the HTTP /key endpoints (default: 16 KiB)
 pub static HTTP_MAX_KEY_BODY_SIZE: LazyLock<usize> =
 	lazy_env_parse!(bytes, "SURREAL_HTTP_MAX_KEY_BODY_SIZE", usize, 16 << 10);
