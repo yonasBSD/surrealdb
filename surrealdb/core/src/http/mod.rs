@@ -109,7 +109,7 @@ impl HttpClient {
 	pub fn new(
 		allow: Targets<NetTarget>,
 		deny: Targets<NetTarget>,
-		config: &CommonConfig,
+		_config: &CommonConfig,
 	) -> Result<Self> {
 		let _ = allow;
 		let _ = deny;

@@ -306,6 +306,8 @@ async fn fetch_jwks_from_url(
 	url: &str,
 	user_agent: &str,
 ) -> Result<JwkSet> {
+	#[cfg(target_family = "wasm")]
+	let _ = user_agent;
 	let client = Client::new();
 	let req = client.get(url);
 	// Add a User-Agent header so that WAF rules don't reject the request

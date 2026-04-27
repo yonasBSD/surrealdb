@@ -88,6 +88,8 @@ impl BucketStoreProvider for CommunityComposer {
 		config: Config,
 	) -> BoxFuture<'a, Result<Arc<dyn ObjectStore>>> {
 		Box::pin(async {
+			#[cfg(target_arch = "wasm32")]
+			let _ = config;
 			if MemoryStore::parse_url(url) {
 				return Ok(Arc::new(MemoryStore::new()) as Arc<dyn ObjectStore>);
 			}

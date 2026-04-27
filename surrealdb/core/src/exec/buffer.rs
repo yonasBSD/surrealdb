@@ -86,7 +86,7 @@ pub(crate) fn buffer_stream(
 	stream: ValueBatchStream,
 	_mode: AccessMode,
 	_cardinality: CardinalityHint,
-	buffer_size: usize,
+	_buffer_size: usize,
 ) -> ValueBatchStream {
 	stream
 }
