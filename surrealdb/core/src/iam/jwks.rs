@@ -379,8 +379,7 @@ fn cache_key_from_url(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-	use rand::Rng;
-	use rand::distributions::Alphanumeric;
+	use rand::distr::{Alphanumeric, SampleString};
 	use wiremock::matchers::{header, method, path};
 	use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -389,8 +388,7 @@ mod tests {
 
 	// Use unique path to prevent accidental cache reuse
 	fn random_path() -> String {
-		let rng = rand::thread_rng();
-		rng.sample_iter(&Alphanumeric).take(8).map(char::from).collect()
+		Alphanumeric.sample_string(&mut rand::rng(), 8)
 	}
 
 	static DEFAULT_JWKS: LazyLock<JwkSet> = LazyLock::new(|| {

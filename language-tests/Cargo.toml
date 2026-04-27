@@ -19,25 +19,25 @@ upgrade = ["backend-surrealkv", "tokio-tungstenite", "revision"] # Upgrade test 
 surrealdb-core = { path = "../surrealdb/core", default-features = false, features = ["scripting", "kv-mem"] }
 surrealdb-types = { path = "../surrealdb/types" }
 reblessive = { version = "0.4.3" }
-rust_decimal = { version = "1.40.0", features = ["maths", "serde-str"] }
+rust_decimal = { version = "1.41.0", features = ["maths", "serde-str"] }
 
 # Used for capturing logs from core
 #tracing = "*"
 #tracing-subscriber = { version = "*", features = ["fmt","ansi"] }
 
 # Error handling
-anyhow = "1.0.100"
+anyhow = "1.0.102"
 
 # Async utility crates
-tokio = { version = "1.49.0", features = ["full"] }
-futures = "0.3.31"
+tokio = { version = "1.52.0", features = ["full"] }
+futures = "0.3.32"
 
 # Config and cli parsing
-clap = { version = "4.5.54", features = ["cargo"] }
+clap = { version = "4.6.1", features = ["cargo"] }
 serde = { version = "1.0.228", features = ["derive"] }
-toml = "0.9.11"
-toml_edit = { version = "0.24.0", features = ["serde"] }
-semver = "1.0.27"
+toml = "0.9.12"
+toml_edit = { version = "0.24.1", features = ["serde"] }
+semver = "1.0.28"
 
 # Used for formatting output
 similar = "2.7.0"

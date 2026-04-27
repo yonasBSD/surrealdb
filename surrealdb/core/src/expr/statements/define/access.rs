@@ -1,6 +1,5 @@
 use anyhow::{Result, bail};
-use rand::Rng;
-use rand::distributions::Alphanumeric;
+use rand::distr::{Alphanumeric, SampleString};
 use reblessive::tree::Stk;
 use surrealdb_types::{SqlFormat, ToSql};
 
@@ -53,7 +52,7 @@ impl DefineAccessStatement {
 	/// This key will be used to sign tokens issued with this access method
 	/// This value is used by default in every access method other than JWT
 	pub(crate) fn random_key() -> String {
-		rand::thread_rng().sample_iter(&Alphanumeric).take(128).map(char::from).collect::<String>()
+		Alphanumeric.sample_string(&mut rand::rng(), 128)
 	}
 
 	pub fn from_definition(base: Base, def: &AccessDefinition) -> Self {

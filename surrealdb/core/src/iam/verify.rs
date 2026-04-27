@@ -986,6 +986,7 @@ mod tests {
 	use argon2::password_hash::{PasswordHasher, SaltString};
 	use chrono::Duration;
 	use jsonwebtoken::{EncodingKey, encode};
+	use rand_core::OsRng;
 	use rstest::rstest;
 
 	use super::*;
@@ -1507,8 +1508,7 @@ mod tests {
 		use base64::Engine;
 		use base64::engine::general_purpose::STANDARD_NO_PAD;
 		use jsonwebtoken::jwk::{Jwk, JwkSet};
-		use rand::Rng;
-		use rand::distributions::Alphanumeric;
+		use rand::distr::{Alphanumeric, SampleString};
 		use wiremock::matchers::{method, path};
 		use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1516,8 +1516,7 @@ mod tests {
 
 		// Use unique path to prevent accidental cache reuse
 		fn random_path() -> String {
-			let rng = rand::thread_rng();
-			rng.sample_iter(&Alphanumeric).take(8).map(char::from).collect()
+			Alphanumeric.sample_string(&mut rand::rng(), 8)
 		}
 
 		// Key identifier used in both JWT and JWT
@@ -1653,7 +1652,7 @@ mod tests {
 
 	#[test]
 	fn test_verify_pass() {
-		let salt = SaltString::generate(&mut rand::thread_rng());
+		let salt = SaltString::generate(&mut OsRng);
 		let hash = Argon2::default().hash_password("test".as_bytes(), &salt).unwrap().to_string();
 
 		// Verify with the matching password

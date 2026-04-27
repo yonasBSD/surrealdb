@@ -1,8 +1,7 @@
 use argon2::Argon2;
 use argon2::password_hash::{PasswordHasher, SaltString};
-use rand::Rng;
-use rand::distributions::Alphanumeric;
-use rand::rngs::OsRng;
+use rand::distr::{Alphanumeric, SampleString};
+use rand_core::OsRng;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use super::DefineKind;
@@ -99,11 +98,7 @@ impl From<DefineUserStatement> for crate::expr::statements::DefineUserStatement 
 				.to_string(),
 		};
 
-		let code = rand::thread_rng()
-			.sample_iter(&Alphanumeric)
-			.take(128)
-			.map(char::from)
-			.collect::<String>();
+		let code = Alphanumeric.sample_string(&mut rand::rng(), 128);
 
 		Self {
 			kind: v.kind.into(),

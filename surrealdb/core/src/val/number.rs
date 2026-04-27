@@ -1179,8 +1179,8 @@ mod tests {
 	use std::cmp::Ordering;
 
 	use ahash::HashSet;
+	use rand::Rng;
 	use rand::seq::SliceRandom;
-	use rand::{Rng, thread_rng};
 	use rust_decimal::Decimal;
 	use rust_decimal::prelude::ToPrimitive;
 
@@ -1235,7 +1235,7 @@ mod tests {
 		let j = Number::Float(f64::NAN);
 		let original = vec![a, b, c, d, e, f, g, h, i, j];
 		let mut copy = original.clone();
-		let mut rng = thread_rng();
+		let mut rng = rand::rng();
 		copy.shuffle(&mut rng);
 		copy.sort();
 		assert_eq!(original, copy);
@@ -1244,11 +1244,11 @@ mod tests {
 	#[test]
 	fn ord_fuzz() {
 		fn random_number() -> Number {
-			let mut rng = thread_rng();
-			match rng.gen_range(0..3) {
-				0 => Number::Int(rng.r#gen()),
-				1 => Number::Float(f64::from_bits(rng.r#gen())),
-				_ => Number::Decimal(Number::Float(f64::from_bits(rng.r#gen())).as_decimal()),
+			let mut rng = rand::rng();
+			match rng.random_range(0..3) {
+				0 => Number::Int(rng.random()),
+				1 => Number::Float(f64::from_bits(rng.random())),
+				_ => Number::Decimal(Number::Float(f64::from_bits(rng.random())).as_decimal()),
 			}
 		}
 
@@ -1274,14 +1274,14 @@ mod tests {
 		}
 
 		fn random_permutation(number: Number) -> Number {
-			let mut rng = thread_rng();
-			let value = match rng.gen_range(0..4) {
-				0 => number + Number::from(rng.r#gen::<f64>()),
+			let mut rng = rand::rng();
+			let value = match rng.random_range(0..4) {
+				0 => number + Number::from(rng.random::<f64>()),
 				1 if !matches!(number, Number::Int(i64::MIN)) => number * Number::from(-1),
 				2 => Number::Float(next_down(number.as_float())),
 				_ => number,
 			};
-			match rng.gen_range(0..3) {
+			match rng.random_range(0..3) {
 				0 => Number::Int(value.as_int()),
 				1 => Number::Float(value.as_float()),
 				_ => Number::Decimal(value.as_decimal()),

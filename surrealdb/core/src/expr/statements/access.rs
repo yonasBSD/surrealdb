@@ -100,10 +100,10 @@ impl Subject {
 }
 
 fn random_string(length: usize, pool: &[u8]) -> String {
-	let mut rng = rand::thread_rng();
+	let mut rng = rand::rng();
 	let string: String = (0..length)
 		.map(|_| {
-			let i = rng.gen_range(0..pool.len());
+			let i = rng.random_range(0..pool.len());
 			pool[i] as char
 		})
 		.collect();

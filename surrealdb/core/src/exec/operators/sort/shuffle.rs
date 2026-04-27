@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use rand::Rng;
 use rand::seq::SliceRandom;
-use rand::{Rng, thread_rng};
 #[cfg(not(target_family = "wasm"))]
 use tokio::task::spawn_blocking;
 
@@ -147,7 +147,7 @@ impl ExecOperator for RandomShuffle {
 async fn full_shuffle(mut values: Vec<Value>) -> Vec<Value> {
 	// Move shuffle to blocking task to avoid blocking async executor
 	spawn_blocking(move || {
-		let mut rng = thread_rng();
+		let mut rng = rand::rng();
 		values.shuffle(&mut rng);
 		values
 	})
@@ -158,7 +158,7 @@ async fn full_shuffle(mut values: Vec<Value>) -> Vec<Value> {
 /// Perform a full Fisher-Yates shuffle of all values (WASM version).
 #[cfg(target_family = "wasm")]
 async fn full_shuffle(mut values: Vec<Value>) -> Vec<Value> {
-	let mut rng = thread_rng();
+	let mut rng = rand::rng();
 	values.shuffle(&mut rng);
 	values
 }
@@ -183,7 +183,7 @@ async fn reservoir_sample(values: Vec<Value>, limit: usize) -> Vec<Value> {
 
 /// Synchronous reservoir sampling implementation.
 fn reservoir_sample_sync(values: Vec<Value>, limit: usize) -> Vec<Value> {
-	let mut rng = thread_rng();
+	let mut rng = rand::rng();
 	let mut reservoir: Vec<Value> = Vec::with_capacity(limit);
 
 	for (i, value) in values.into_iter().enumerate() {
@@ -192,7 +192,7 @@ fn reservoir_sample_sync(values: Vec<Value>, limit: usize) -> Vec<Value> {
 			reservoir.push(value);
 		} else {
 			// Randomly decide whether to include this value
-			let j = rng.gen_range(0..=i);
+			let j = rng.random_range(0..=i);
 			if j < limit {
 				reservoir[j] = value;
 			}

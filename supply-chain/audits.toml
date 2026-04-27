@@ -338,7 +338,7 @@ end = "2025-09-03"
 
 [[trusted.bytes]]
 criteria = "safe-to-deploy"
-user-id = 6741 # Alice Ryhl (Darksonn)
+user-id = 6741
 start = "2021-01-11"
 end = "2025-09-03"
 
@@ -782,7 +782,7 @@ end = "2025-09-03"
 
 [[trusted.loom]]
 criteria = "safe-to-deploy"
-user-id = 6741 # Alice Ryhl (Darksonn)
+user-id = 6741
 start = "2021-04-12"
 end = "2025-09-03"
 
@@ -1220,7 +1220,7 @@ end = "2026-10-30"
 
 [[trusted.slab]]
 criteria = "safe-to-deploy"
-user-id = 6741 # Alice Ryhl (Darksonn)
+user-id = 6741
 start = "2021-10-13"
 end = "2025-09-03"
 
@@ -1448,7 +1448,7 @@ end = "2025-09-03"
 
 [[trusted.tokio]]
 criteria = "safe-to-deploy"
-user-id = 6741 # Alice Ryhl (Darksonn)
+user-id = 6741
 start = "2020-12-25"
 end = "2025-09-03"
 
@@ -1466,7 +1466,7 @@ end = "2025-09-03"
 
 [[trusted.tokio-macros]]
 criteria = "safe-to-deploy"
-user-id = 6741 # Alice Ryhl (Darksonn)
+user-id = 6741
 start = "2020-10-26"
 end = "2025-09-03"
 
@@ -1478,7 +1478,7 @@ end = "2025-09-03"
 
 [[trusted.tokio-util]]
 criteria = "safe-to-deploy"
-user-id = 6741 # Alice Ryhl (Darksonn)
+user-id = 6741
 start = "2021-01-12"
 end = "2025-09-03"
 

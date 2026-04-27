@@ -3,8 +3,8 @@ use std::collections::BinaryHeap;
 use std::mem;
 use std::sync::Arc;
 
-use rand::prelude::SliceRandom;
-use rand::{Rng, thread_rng};
+use rand::Rng;
+use rand::seq::SliceRandom;
 #[cfg(not(target_family = "wasm"))]
 use rayon::prelude::ParallelSliceMut;
 #[cfg(not(target_family = "wasm"))]
@@ -84,7 +84,7 @@ impl MemoryRandom {
 	}
 
 	fn shuffle_batch(values: &mut Vec<Value>, ordered: &mut Vec<usize>, batch: Vec<Value>) {
-		let mut rng = thread_rng();
+		let mut rng = rand::rng();
 
 		// Compute the index range of this new batch
 		let start = ordered.len();
@@ -106,7 +106,7 @@ impl MemoryRandom {
 
 		// Fisher-Yates shuffle to shuffle the elements as they are merged
 		for idx in start..end {
-			let j = rng.gen_range(0..=idx);
+			let j = rng.random_range(0..=idx);
 			ordered.swap(idx, j);
 		}
 	}

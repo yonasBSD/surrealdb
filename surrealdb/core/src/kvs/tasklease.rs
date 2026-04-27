@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use anyhow::{Result, bail};
 use chrono::{DateTime, Duration, Utc};
-use rand::{Rng, thread_rng};
+use rand::Rng;
 use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
@@ -193,7 +193,7 @@ impl LeaseHandler {
 			}
 			// Apply exponential backoff with full jitter to reduce contention
 			// This randomizes sleep time between 1 and current tempo value
-			let sleep_ms = thread_rng().gen_range(1..=tempo);
+			let sleep_ms = rand::rng().random_range(1..=tempo);
 			sleep(std::time::Duration::from_millis(sleep_ms)).await;
 			// Double the backoff time for next iteration
 			tempo *= 2;

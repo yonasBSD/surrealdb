@@ -446,7 +446,7 @@ pub(super) mod tests {
 	use ahash::HashSet;
 	use anyhow::Result;
 	use flate2::read::GzDecoder;
-	use rand::prelude::SmallRng;
+	use rand::rngs::SmallRng;
 	use rand::{Rng, SeedableRng};
 	use roaring::RoaringTreemap;
 	use rust_decimal::prelude::Zero;
@@ -637,8 +637,10 @@ pub(super) mod tests {
 		}
 		fn generate(&self, rng: &mut SmallRng) -> Number {
 			match self {
-				RandomItemGenerator::Int(from, to) => Number::Int(rng.gen_range(*from..*to)),
-				RandomItemGenerator::Float(from, to) => Number::Float(rng.gen_range(*from..=*to)),
+				RandomItemGenerator::Int(from, to) => Number::Int(rng.random_range(*from..*to)),
+				RandomItemGenerator::Float(from, to) => {
+					Number::Float(rng.random_range(*from..=*to))
+				}
 			}
 		}
 	}

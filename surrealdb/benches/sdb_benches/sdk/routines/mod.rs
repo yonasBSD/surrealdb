@@ -2,7 +2,7 @@
 
 use criterion::Bencher;
 use criterion::measurement::WallTime;
-use rand::seq::SliceRandom;
+use rand::seq::IndexedRandom;
 use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
 
@@ -12,8 +12,8 @@ mod read;
 pub(super) use read::*;
 
 fn rand_id() -> String {
-	let mut rng = rand::thread_rng();
-	(0..20).map(|_| *surrealdb_core::cnf::ID_CHARS.choose(&mut rng).unwrap_or(&'0')).collect()
+	let mut rng = rand::rng();
+	(0..20).map(|_| *surrealdb_core::cnf::ID_CHARS[..].choose(&mut rng).unwrap_or(&'0')).collect()
 }
 
 /// Routine trait for the benchmark routines.

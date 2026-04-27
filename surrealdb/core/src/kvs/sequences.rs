@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use rand::{Rng, thread_rng};
+use rand::Rng;
 use revision::revisioned;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
@@ -555,7 +555,7 @@ impl Sequence {
 				return Ok(r);
 			}
 			// exponential backoff with full jitter
-			let sleep_ms = thread_rng().gen_range(1..=tempo);
+			let sleep_ms = rand::rng().random_range(1..=tempo);
 			sleep(Duration::from_millis(sleep_ms)).await;
 			if tempo < MAX_BACKOFF {
 				tempo *= 2;

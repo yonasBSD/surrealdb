@@ -141,6 +141,7 @@ pin-project-lite.workspace = true
 quick_cache.workspace = true
 radix_trie = { workspace = true, features = ["serde"] }
 rand.workspace = true
+rand_core.workspace = true
 rayon.workspace = true
 regex.workspace = true
 roaring = { workspace = true, features = ["serde"] }

@@ -94,27 +94,27 @@ tikv = { version = "0.3.0-surreal.4", default-features = false, package = "surre
 addr = { version = "0.15.6", default-features = false, features = ["std"] }
 ahash = "0.8.12"
 ammonia = "4.1.2"
-anyhow = "1.0.100"
+anyhow = "1.0.102"
 arbitrary = "1.4.2"
-arc-swap = "1.8.0"
+arc-swap = "1.9.1"
 argon2 = "0.5.3"
 arrayvec = "0.7.6"
 async-channel = "2.5.0"
-async-executor = "1.13.3"
+async-executor = "1.14.0"
 async-stream = "0.3.6"
-async-graphql = { version = "7.2.0", default-features = false, features = ["custom-error-conversion"] }
-async-graphql-axum = "7.2.0"
+async-graphql = { version = "7.2.1", default-features = false, features = ["custom-error-conversion"] }
+async-graphql-axum = "7.2.1"
 async-trait = "0.1.89"
 base64 = "0.22.1"
 bcrypt = "0.18.0"
-bitflags = "2.10.0"
-blake3 = "1.8.3"
+bitflags = "2.11.1"
+blake3 = "1.8.4"
 boxcar = "0.2.14"
 bytes = "1.11.1"
 castaway = "0.2.4"
-chrono = { version = "0.4.43", default-features = false }
+chrono = { version = "0.4.44", default-features = false }
 ciborium = "0.2.2"
-clap = "4.5.54"
+clap = "4.6.1"
 dashmap = "6.1.0"
 dialoguer = "0.11"
 deunicode = "1.6.2"
@@ -122,53 +122,54 @@ ext-sort = "^0.1.5"
 fastnum = "0.7.4"
 flatbuffers = { version = "25.12.19", features = ["serde"] }
 fst = "0.4.7"
-futures = "0.3.31"
-futures-util = "0.3.31"
+futures = "0.3.32"
+futures-util = "0.3.32"
 fuzzy-matcher = "0.3.7"
 geo = { version = "0.32.0", default-features = false }
-geo-types = "0.7.18"
+geo-types = "0.7.19"
 getrandom = "0.3.4"
 hashbrown = "0.16.1"
 hex = "0.4.3"
 http = "1.4.0"
-hyper = "1.8"
+hyper = "1.9"
 humantime = "2.3.0"
-indexmap = "2.13.0"
-ipnet = "2.11.0"
+indexmap = "2.14.0"
+ipnet = "2.12.0"
 jemallocator = { version = "0.6.1", package = "tikv-jemallocator" }
 jsonwebtoken = { version = "10.3.0", default-features = false, features = ["use_pem"] }
 logos = "0.16.1" # TODO: pin version
 md-5 = "0.10.6"
-mimalloc = "0.1.48"
-native-tls = "0.2.14"
+mimalloc = "0.1.49"
+native-tls = "0.2.18"
 ndarray = "0.17.2"
 ndarray-stats = "0.7.0"
 nix = { version = "0.30.1", default-features = false }
 num-traits = "0.2.19"
 num_cpus = "1.17.0"
-object_store = "0.13.0"
-papaya = "0.2.3"
+object_store = "0.13.2"
+papaya = "0.2.4"
 parking_lot = "0.12.5"
 paste = "1.0.15"
 path-clean = "1.0.1"
 pbkdf2 = "0.12.2"
 phf = "0.13.1"
-pin-project-lite = "0.2.16"
+pin-project-lite = "0.2.17"
 pprof = "0.15.0"
-quick_cache = "0.6.18"
+quick_cache = "0.6.21"
 radix_trie = "0.3.0" # TODO: Look at the use of this dependency. Last update 4 years ago, unmaintained.
-rand = { version = "0.8.5", features = ["small_rng"] }
-rayon = "1.11.0"
-regex = "1.12.2"
-regex-syntax = "0.8.8"
-reqwest = { version = "0.13.1", default-features = false }
+rand = "0.9.4"
+rand_core = "0.6"
+rayon = "1.12.0"
+regex = "1.12.3"
+regex-syntax = "0.8.10"
+reqwest = { version = "0.13.2", default-features = false }
 ring = "0.17.14"
 roaring = "0.11.3"
-rustls = { version = "0.23.36", default-features = false, features = ["logging", "std", "tls12"] }
-rust_decimal = "1.40.0"
+rustls = { version = "0.23.38", default-features = false, features = ["logging", "std", "tls12"] }
+rust_decimal = "1.41.0"
 rust-stemmers = "1.2.0" # TODO: Look at the use of this dependency. Last update 5 years ago, unmaintained.
 scrypt = "0.11.0"
-semver = "1.0.27"
+semver = "1.0.28"
 serde = "1.0.228"
 serde_json = "1.0.149"
 sha1 = "0.10.6"
@@ -178,19 +179,19 @@ strsim = "0.11.1"
 subtle = "2.6"
 surrealdb-protocol = { version = "0.10.1", default-features = false }
 sysinfo = "0.37.2"
-tempfile = "3.24.0"
-thiserror = "2.0.17"
-tokio = { version = "1.49.0", default-features = false }
+tempfile = "3.27.0"
+thiserror = "2.0.18"
+tokio = { version = "1.52.1", default-features = false }
 tokio-stream = "0.1"
 tokio-tungstenite = "0.28.0"
-tokio-tungstenite-wasm = "0.8.1"
+tokio-tungstenite-wasm = "0.8.2"
 tokio-util = "0.7.18"
 tracing = { version = "0.1.44", features = ["release_max_level_debug"] }
 ulid = "1.2.1"
 unicase = "2.9.0"
 url = "2.5.8"
-uuid = "1.19.0"
-wasm-bindgen-futures = "0.4.58"
+uuid = "1.23.1"
+wasm-bindgen-futures = "=0.4.58"
 wasmtimer = { version = "0.4.3", default-features = false }
 
 # Dev dependencies
@@ -206,11 +207,11 @@ tracing-subscriber = "0.3"
 wiremock = "0.6"
 
 # SurrealML specific dependencies
-ort = { version = "2.0.0-rc.11", features = ["cuda", "ndarray"] }
+ort = { version = "2.0.0-rc.12", features = ["cuda", "ndarray"] }
 
 # Surrealism specific dependencies
-tar = "0.4.44"
-toml = "0.9.11"
+tar = "0.4.45"
+toml = "0.9.12"
 wasm-encoder = "0.245"
 wasm-opt = "0.116.1"
 wasmparser = "0.245"
@@ -287,7 +288,7 @@ futures-util.workspace = true
 http.workspace = true
 jsonwebtoken.workspace = true
 rand.workspace = true
-rcgen = "0.14.6"
+rcgen = "0.14.7"
 reqwest = { workspace = true, default-features = false, features = [
     "blocking",
     "gzip",

@@ -112,7 +112,7 @@ impl FileCollector {
 		match orders {
 			Ordering::Random => {
 				let f = move || {
-					let mut rng = rand::thread_rng();
+					let mut rng = rand::rng();
 					let mut iter = reader.into_iter();
 					// fill initial array
 					let mut res: Vec<Value> = Vec::with_capacity(num as usize);
@@ -130,7 +130,7 @@ impl FileCollector {
 						let v = v?;
 						// pick an index to insert the value in, swapping existing values if it is
 						// within the range.
-						let idx = rng.gen_range(0..(i + 1 + num as usize));
+						let idx = rng.random_range(0..(i + 1 + num as usize));
 						if let Some(slot) = res.get_mut(idx as usize) {
 							*slot = v
 						}

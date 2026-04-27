@@ -3,7 +3,7 @@ use std::mem::{self};
 use std::ops::Bound;
 
 use anyhow::{Result, ensure};
-use rand::prelude::SliceRandom;
+use rand::seq::SliceRandom;
 use reblessive::tree::Stk;
 
 use super::args::{Optional, Rest};
@@ -734,7 +734,7 @@ pub fn reverse((mut array,): (Array,)) -> Result<Value> {
 }
 
 pub fn shuffle((mut array,): (Array,)) -> Result<Value> {
-	let mut rng = rand::thread_rng();
+	let mut rng = rand::rng();
 	array.shuffle(&mut rng);
 	Ok(array.into())
 }

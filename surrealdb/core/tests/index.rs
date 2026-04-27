@@ -121,7 +121,7 @@ async fn batch_ingestion(
 	let mut batch = Vec::with_capacity(batch_count);
 	let mut map = HashMap::with_capacity(batch_count);
 	for _ in 0..batch_count {
-		let action = rng.r#gen::<f32>();
+		let action = rng.random::<f32>();
 		for (threshold, sql) in sql_distribution {
 			if action <= *threshold {
 				batch.push(*sql);

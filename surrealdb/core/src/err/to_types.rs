@@ -135,7 +135,7 @@ pub fn into_types_error(error: Error) -> TypesError {
 		AccessRecordSignupQueryFailed | AccessRecordSigninQueryFailed => {
 			TypesError::query(message, None)
 		}
-		AccessRecordNoSignup | AccessRecordNoSignin => TypesError::query(message, None),
+		AccessRecordNoSignup | AccessRecordNoSignin => TypesError::not_allowed(message, None),
 
 		// Serialization
 		Unencodable => TypesError::serialization(message, None),

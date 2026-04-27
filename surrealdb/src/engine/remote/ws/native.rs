@@ -356,7 +356,7 @@ mod tests {
 
 	use flate2::Compression;
 	use flate2::write::GzEncoder;
-	use rand::{Rng, thread_rng};
+	use rand::Rng;
 	use surrealdb_core::rpc;
 	use web_time::SystemTime;
 
@@ -380,9 +380,9 @@ mod tests {
 			2_000_000
 		};
 		let mut vector: Vec<i32> = Vec::new();
-		let mut rng = thread_rng();
+		let mut rng = rand::rng();
 		for _ in 0..vector_size {
-			vector.push(rng.r#gen());
+			vector.push(rng.random());
 		}
 		let mut results = vec![];
 		let ref_payload;

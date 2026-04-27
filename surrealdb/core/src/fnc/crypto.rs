@@ -89,7 +89,7 @@ pub mod argon2 {
 	use anyhow::Result;
 	use argon2::Argon2;
 	use argon2::password_hash::{PasswordHash, PasswordHasher, SaltString};
-	use rand::rngs::OsRng;
+	use rand_core::OsRng;
 
 	use super::COST_ALLOWANCE;
 	use crate::val::Value;
@@ -159,7 +159,7 @@ pub mod pbkdf2 {
 	use anyhow::Result;
 	use pbkdf2::Pbkdf2;
 	use pbkdf2::password_hash::{PasswordHash, PasswordHasher, SaltString};
-	use rand::rngs::OsRng;
+	use rand_core::OsRng;
 
 	use super::COST_ALLOWANCE;
 	use crate::val::Value;
@@ -194,7 +194,7 @@ pub mod pbkdf2 {
 pub mod scrypt {
 
 	use anyhow::Result;
-	use rand::rngs::OsRng;
+	use rand_core::OsRng;
 	use scrypt::Scrypt;
 	use scrypt::password_hash::{PasswordHash, PasswordHasher, SaltString};
 

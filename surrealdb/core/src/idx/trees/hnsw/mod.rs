@@ -10,8 +10,8 @@ mod layer;
 use std::sync::Arc;
 
 use anyhow::Result;
-use rand::prelude::SmallRng;
-use rand::{Rng, SeedableRng, thread_rng};
+use rand::rngs::SmallRng;
+use rand::{Rng, SeedableRng};
 use reblessive::tree::Stk;
 use revision::{DeserializeRevisioned, SerializeRevisioned, revisioned};
 use roaring::RoaringTreemap;
@@ -173,7 +173,7 @@ where
 			layer0: HnswLayer::new(ikb.clone(), 0, m0),
 			layers: Vec::default(),
 			elements: HnswElements::new(table_id, ikb.clone(), p.distance.clone(), vector_cache),
-			rng: SmallRng::from_rng(thread_rng())?,
+			rng: SmallRng::from_rng(&mut rand::rng()),
 			heuristic: p.into(),
 			ikb,
 		})
@@ -261,7 +261,7 @@ where
 
 	/// Generates a random level for a new element using the level multiplier `ml`.
 	fn get_random_level(&mut self) -> usize {
-		let unif: f64 = self.rng.r#gen(); // generate a uniform random number between 0 and 1
+		let unif: f64 = self.rng.random(); // generate a uniform random number between 0 and 1
 		(-unif.ln() * self.ml).floor() as usize // calculate the layer
 	}
 

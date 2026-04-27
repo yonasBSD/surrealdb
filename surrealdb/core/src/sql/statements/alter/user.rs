@@ -1,6 +1,6 @@
 use argon2::Argon2;
 use argon2::password_hash::{PasswordHasher, SaltString};
-use rand::rngs::OsRng;
+use rand_core::OsRng;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use super::AlterKind;

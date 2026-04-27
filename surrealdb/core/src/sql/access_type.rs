@@ -1,8 +1,7 @@
 use std::str::FromStr;
 
 use anyhow::Result;
-use rand::Rng;
-use rand::distributions::Alphanumeric;
+use rand::distr::{Alphanumeric, SampleString};
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use super::Expr;
@@ -11,7 +10,7 @@ use crate::fmt::CoverStmts;
 use crate::sql::{Algorithm, Literal};
 
 pub(crate) fn random_key() -> String {
-	rand::thread_rng().sample_iter(&Alphanumeric).take(128).map(char::from).collect::<String>()
+	Alphanumeric.sample_string(&mut rand::rng(), 128)
 }
 
 /// The type of access methods available

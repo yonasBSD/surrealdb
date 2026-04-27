@@ -696,7 +696,7 @@ where
 				// Jitter adds randomness (0.5 to 1.5x) to prevent thundering herd
 				let base_backoff = Duration::from_millis(100 * 2u64.pow((attempt - 1).min(5)));
 				let base_backoff = base_backoff.min(Duration::from_secs(5));
-				let jitter = rand::thread_rng().gen_range(0.5..=1.5);
+				let jitter = rand::rng().random_range(0.5..=1.5);
 				let backoff = base_backoff.mul_f64(jitter);
 				sleep(backoff).await;
 			}

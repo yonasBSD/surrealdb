@@ -18,7 +18,7 @@ use anyhow::{Context as _, Result, ensure};
 use async_channel::Sender;
 use bytes::{Bytes, BytesMut};
 use futures::{Future, Stream};
-use rand::{Rng, thread_rng};
+use rand::Rng;
 use reblessive::TreeStack;
 use surrealdb_types::{AuthError, Error as TypesError, SurrealValue, object};
 #[cfg(not(target_family = "wasm"))]
@@ -1203,7 +1203,7 @@ impl Datastore {
 			if remaining.is_zero() {
 				break;
 			}
-			let tempo = Duration::from_secs(thread_rng().gen_range(0..10)).min(remaining);
+			let tempo = Duration::from_secs(rand::rng().random_range(0..10)).min(remaining);
 			sleep(tempo).await;
 			attempt += 1;
 		}

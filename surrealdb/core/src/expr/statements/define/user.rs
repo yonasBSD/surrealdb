@@ -1,9 +1,8 @@
 use anyhow::{Result, bail};
 use argon2::Argon2;
 use argon2::password_hash::{PasswordHasher, SaltString};
-use rand::Rng as _;
-use rand::distributions::Alphanumeric;
-use rand::rngs::OsRng;
+use rand::distr::{Alphanumeric, SampleString};
+use rand_core::OsRng;
 use reblessive::tree::Stk;
 use surrealdb_types::{SqlFormat, ToSql};
 
@@ -57,11 +56,7 @@ impl DefineUserStatement {
 				.hash_password(pass.as_ref(), &SaltString::generate(&mut OsRng))
 				.expect("password hashing should not fail")
 				.to_string(),
-			code: rand::thread_rng()
-				.sample_iter(&Alphanumeric)
-				.take(128)
-				.map(char::from)
-				.collect::<String>(),
+			code: Alphanumeric.sample_string(&mut rand::rng(), 128),
 			roles: vec![role],
 			duration: UserDuration::default(),
 			comment: Expr::Literal(Literal::None),

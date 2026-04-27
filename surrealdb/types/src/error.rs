@@ -628,6 +628,7 @@ impl ErrorDetails {
 			"AlreadyExists" => Self::AlreadyExists(None),
 			"Connection" => Self::Connection(None),
 			"Thrown" => Self::Thrown,
+			"Context" => Self::Context,
 			// Unknown kinds fall back to Internal (forward compat)
 			_ => Self::Internal,
 		}
@@ -658,6 +659,7 @@ impl ErrorDetails {
 				ConnectionError::from_value(value).map(|v| ErrorDetails::Connection(Some(v)))
 			}
 			"Thrown" => Ok(Self::Thrown),
+			"Context" => Ok(Self::Context),
 			_ => Ok(Self::Internal),
 		}
 	}

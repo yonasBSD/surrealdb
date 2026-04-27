@@ -83,7 +83,7 @@ mod tests {
 
 	use futures::ready;
 	use pin_project_lite::pin_project;
-	use rand::{Rng, thread_rng};
+	use rand::Rng;
 	use tokio::time::{Sleep, sleep};
 
 	use super::try_join_all_buffered;
@@ -117,12 +117,12 @@ mod tests {
 		try_join_all: fn(Vec<BenchFuture>) -> F,
 		count: usize,
 	) -> f32 {
-		let mut rng = thread_rng();
+		let mut rng = rand::rng();
 		let mut total = Duration::ZERO;
 		let samples = (250 / count.max(1)).max(10);
 		for _ in 0..samples {
 			let futures = Vec::from_iter((0..count).map(|_| BenchFuture {
-				sleep: sleep(Duration::from_millis(rng.gen_range(0..5))),
+				sleep: sleep(Duration::from_millis(rng.random_range(0..5))),
 			}));
 			let start = Instant::now();
 			try_join_all(futures).await.unwrap();

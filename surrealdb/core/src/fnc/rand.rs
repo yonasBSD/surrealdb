@@ -1,9 +1,8 @@
 use anyhow::{Result, bail, ensure};
 use chrono::{TimeZone, Utc};
 use rand::Rng;
-use rand::distributions::{Alphanumeric, DistString};
-use rand::prelude::IteratorRandom;
-use rand::seq::SliceRandom;
+use rand::distr::{Alphanumeric, SampleString};
+use rand::seq::{IndexedRandom, IteratorRandom};
 use ulid::Ulid;
 
 use super::args::{Any, Args, Arity, FromArg, Optional};
@@ -23,10 +22,10 @@ pub fn r#enum(Any(mut args): Any) -> Result<Value> {
 	Ok(match args.len() {
 		0 => Value::None,
 		1 => match args.remove(0) {
-			Value::Array(v) => v.into_iter().choose(&mut rand::thread_rng()).unwrap_or(Value::None),
+			Value::Array(v) => v.into_iter().choose(&mut rand::rng()).unwrap_or(Value::None),
 			v => v,
 		},
-		_ => args.into_iter().choose(&mut rand::thread_rng()).expect("non-empty args"),
+		_ => args.into_iter().choose(&mut rand::rng()).expect("non-empty args"),
 	})
 }
 
@@ -72,9 +71,9 @@ impl<T: FromArg> FromArg for NoneOrRange<T> {
 pub fn float((NoneOrRange(range),): (NoneOrRange<f64>,)) -> Result<Value> {
 	let v = if let Some((min, max)) = range {
 		if max < min {
-			rand::thread_rng().gen_range(max..=min)
+			rand::rng().random_range(max..=min)
 		} else {
-			rand::thread_rng().gen_range(min..=max)
+			rand::rng().random_range(min..=max)
 		}
 	} else {
 		rand::random::<f64>()
@@ -107,7 +106,7 @@ pub fn id((Optional(arg1), Optional(arg2)): (Optional<i64>, Optional<i64>)) -> R
 			}
 		);
 
-		rand::thread_rng().gen_range((lower as usize)..=(upper as usize))
+		rand::rng().random_range((lower as usize)..=(upper as usize))
 	} else {
 		ensure!(
 			lower <= LIMIT,
@@ -122,17 +121,17 @@ pub fn id((Optional(arg1), Optional(arg2)): (Optional<i64>, Optional<i64>)) -> R
 	};
 
 	// Generate the random id
-	let mut rng = rand::thread_rng();
-	let id: String = (0..len).map(|_| *ID_CHARS.choose(&mut rng).unwrap_or(&'0')).collect();
+	let mut rng = rand::rng();
+	let id: String = (0..len).map(|_| *ID_CHARS[..].choose(&mut rng).unwrap_or(&'0')).collect();
 	Ok(Value::from(id))
 }
 
 pub fn int((NoneOrRange(range),): (NoneOrRange<i64>,)) -> Result<Value> {
 	Ok(if let Some((min, max)) = range {
 		if max < min {
-			rand::thread_rng().gen_range(max..=min)
+			rand::rng().random_range(max..=min)
 		} else {
-			rand::thread_rng().gen_range(min..=max)
+			rand::rng().random_range(min..=max)
 		}
 	} else {
 		rand::random::<i64>()
@@ -164,7 +163,7 @@ pub fn string((Optional(arg1), Optional(arg2)): (Optional<i64>, Optional<i64>)) 
 			}
 		);
 
-		rand::thread_rng().gen_range((lower as usize)..=(upper as usize))
+		rand::rng().random_range((lower as usize)..=(upper as usize))
 	} else {
 		ensure!(
 			lower <= LIMIT,
@@ -178,7 +177,7 @@ pub fn string((Optional(arg1), Optional(arg2)): (Optional<i64>, Optional<i64>)) 
 		lower as usize
 	};
 	// Generate the random string
-	Ok(Alphanumeric.sample_string(&mut rand::thread_rng(), len).into())
+	Ok(Alphanumeric.sample_string(&mut rand::rng(), len).into())
 }
 
 pub fn duration((dur1, dur2): (Duration, Duration)) -> Result<Value> {
@@ -189,7 +188,7 @@ pub fn duration((dur1, dur2): (Duration, Duration)) -> Result<Value> {
 		(dur2, dur1)
 	};
 
-	let rand = rand::thread_rng().gen_range(from.as_nanos()..=to.as_nanos());
+	let rand = rand::rng().random_range(from.as_nanos()..=to.as_nanos());
 
 	let nanos = (rand % 1_000_000_000) as u32;
 
@@ -250,7 +249,7 @@ pub fn time((NoneOrRange(range),): (NoneOrRange<Value>,)) -> Result<Value> {
 	};
 	// Generate the random time, try up to 5 times
 	for _ in 0..5 {
-		let val = rand::thread_rng().gen_range(min..=max);
+		let val = rand::rng().random_range(min..=max);
 		if let Some(v) = Utc.timestamp_opt(val, 0).earliest() {
 			return Ok(v.into());
 		}
