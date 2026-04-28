@@ -1732,7 +1732,7 @@ version = "0.3.0-surreal.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.surrealkv]]
-version = "0.21.0"
+version = "0.21.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.symbolic-common]]

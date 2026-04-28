@@ -7681,9 +7681,9 @@ dependencies = [
 
 [[package]]
 name = "surrealkv"
-version = "0.21.0"
+version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "485ec2c4bbb6c0a708e1fb8c439cbc9e69d400899a8f7bde2ee56b91c0a713f3"
+checksum = "a5a39b9baad29d5a4ca629d9b5e1176c543430648e0e8f55a64a4a8217cc131d"
 dependencies = [
  "arc-swap",
  "async-trait",
