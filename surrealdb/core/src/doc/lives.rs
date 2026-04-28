@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_channel::Sender;
+use chrono::Utc;
 use futures::future::try_join_all;
 use reblessive::TreeStack;
 use reblessive::tree::Stk;
@@ -18,7 +19,7 @@ use crate::expr::FlowResultExt as _;
 use crate::expr::paths::{AC, ID, RD, TK};
 use crate::kvs::Transaction;
 use crate::types::{PublicAction, PublicNotification};
-use crate::val::{Value, convert_value_to_public_value};
+use crate::val::{Number, Value, convert_value_to_public_value};
 
 impl Document {
 	/// Processes any LIVE SELECT statements which
@@ -123,6 +124,16 @@ impl Document {
 			Some(v) => v,
 			None => return Ok(()),
 		};
+		// Skip notification if the session that created this LIVE query has expired.
+		// session["exp"] is a unix timestamp (i64) set by DURATION FOR SESSION; absent means no
+		// expiry. This mirrors the per-request check in Datastore::execute without requiring the
+		// originating Session object to remain in memory beyond the RPC connection lifetime.
+		if let Value::Object(ref session_obj) = *sess
+			&& let Some(Value::Number(Number::Int(exp))) = session_obj.get("exp")
+			&& Utc::now().timestamp() > *exp
+		{
+			return Ok(());
+		}
 		// Ensure that auth info exists on the LIVE query
 		let auth = match live_subscription.auth.clone() {
 			Some(v) => v,
@@ -411,5 +422,97 @@ impl MessageBroker for DefaultBroker {
 			// as it means that the channel was closed.
 			let _ = self.0.send(notification).await;
 		})
+	}
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+	use anyhow::Result;
+	use chrono::Utc;
+
+	use crate::catalog::providers::CatalogProvider;
+	use crate::channel::Receiver;
+	use crate::dbs::{Capabilities, Session};
+	use crate::kvs::Datastore;
+	use crate::kvs::LockType::Optimistic;
+	use crate::kvs::TransactionType::Write;
+	use crate::types::PublicNotification;
+
+	async fn new_ds_with_broker() -> Result<(Receiver<PublicNotification>, Datastore)> {
+		let (send, recv) = crate::channel::bounded(1000);
+		let ds = Datastore::builder()
+			.with_capabilities(Capabilities::all())
+			.with_auth(false)
+			.with_notify(send)
+			.build_with_path("memory")
+			.await?;
+		Ok((recv, ds))
+	}
+
+	async fn setup_ns_db_table(ds: &Datastore, ns: &str, db: &str, tb: &str) {
+		let tx = ds.transaction(Write, Optimistic).await.unwrap();
+		tx.ensure_ns_db(None, ns, db).await.unwrap();
+		tx.commit().await.unwrap();
+		let ses = Session::owner().with_ns(ns).with_db(db);
+		ds.execute(&format!("DEFINE TABLE {tb}"), &ses, None).await.unwrap();
+	}
+
+	/// Sanity check: a LIVE query with a non-expiring session receives notifications normally.
+	#[tokio::test]
+	async fn test_live_active_session_sends_notification() {
+		let (recv, ds) = new_ds_with_broker().await.unwrap();
+		let (ns, db, tb) = ("test", "test", "person");
+		setup_ns_db_table(&ds, ns, db, tb).await;
+
+		let live_ses = Session::owner().with_ns(ns).with_db(db).with_rt(true);
+		ds.execute(&format!("LIVE SELECT * FROM {tb}"), &live_ses, None).await.unwrap();
+		while recv.try_recv().is_ok() {}
+
+		let owner_ses = Session::owner().with_ns(ns).with_db(db);
+		let res = ds.execute(&format!("CREATE {tb}"), &owner_ses, None).await.unwrap();
+		assert!(res[0].result.is_ok());
+
+		// Notifications are forwarded from the per-execution broker to the datastore
+		// channel by a spawned task, so yield briefly to allow that task to run.
+		let notification =
+			tokio::time::timeout(tokio::time::Duration::from_millis(500), recv.recv()).await;
+		assert!(notification.is_ok(), "expected a notification from the active LIVE query");
+	}
+
+	/// A LIVE query whose originating session has expired via TTL must not receive
+	/// notifications after the TTL passes. This guards against the session-expiry
+	/// data-leakage scenario described in GHSA-mf3f-f4wh-w626: data written after
+	/// a session expires should not be streamed to the now-invalid subscriber.
+	///
+	/// We set `exp` to the current integer second so the session is still technically
+	/// valid at query-creation time (`Utc::now().timestamp() > exp` is false), then
+	/// sleep ≥1.1 s to guarantee the integer counter has advanced past `exp`.
+	#[tokio::test]
+	async fn test_live_expired_session_suppresses_notification() {
+		let (recv, ds) = new_ds_with_broker().await.unwrap();
+		let (ns, db, tb) = ("test", "test", "person");
+		setup_ns_db_table(&ds, ns, db, tb).await;
+
+		let mut live_ses = Session::owner().with_ns(ns).with_db(db).with_rt(true);
+		live_ses.exp = Some(Utc::now().timestamp());
+		ds.execute(&format!("LIVE SELECT * FROM {tb}"), &live_ses, None).await.unwrap();
+		while recv.try_recv().is_ok() {}
+
+		// Sleep long enough that the integer-second counter advances past `exp`.
+		tokio::time::sleep(tokio::time::Duration::from_millis(1100)).await;
+
+		let owner_ses = Session::owner().with_ns(ns).with_db(db);
+		let res = ds.execute(&format!("CREATE {tb}"), &owner_ses, None).await.unwrap();
+		assert!(res[0].result.is_ok(), "CREATE must succeed regardless of LIVE query TTL");
+
+		// Give the background forwarding task time to deliver any notification that might
+		// have been queued, then verify the channel remains empty.
+		let spurious =
+			tokio::time::timeout(tokio::time::Duration::from_millis(200), recv.recv()).await;
+		assert!(
+			spurious.is_err(),
+			"no notification must be sent after the LIVE query's session TTL has expired"
+		);
 	}
 }

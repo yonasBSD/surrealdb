@@ -508,6 +508,9 @@ pub trait RpcProtocol {
 		let mut session = session_lock.write().await;
 		// Clear the current session
 		crate::iam::clear::clear(&mut session).map_err(types_error_from_anyhow)?;
+		// Cleanup live queries so that the now-invalidated session no longer receives
+		// notifications.
+		self.cleanup_lqs(&session_id).await;
 		// Return nothing on success
 		Ok(DbResult::Other(PublicValue::None))
 	}
