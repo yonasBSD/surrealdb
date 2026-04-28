@@ -1,6 +1,6 @@
 [package]
 name = "surrealdb-mcp"
-publish = false
+publish = true
 authors.workspace = true
 edition.workspace = true
 license-file.workspace = true
