@@ -30,6 +30,11 @@ pub mod ntw;
 /// when running SurrealDB as a library.
 pub mod rpc;
 mod telemetry;
+/// Process-wide rustls `CryptoProvider` installation. Public so embedders and
+/// downstream binaries (e.g. the Enterprise cluster transport) can install
+/// the same provider — including the FIPS-validated provider when built with
+/// `feature = "fips"` — instead of duplicating the install logic.
+pub mod tls;
 
 use std::future::Future;
 use std::process::ExitCode;

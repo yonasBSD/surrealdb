@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::Args;
-use rustls::crypto::CryptoProvider;
 use surrealdb::engine::{any, tasks};
 use surrealdb_core::buc::BucketStoreProvider;
 use surrealdb_core::kvs::TransactionBuilderFactory;
@@ -192,8 +191,10 @@ pub async fn init<
 		..
 	}: StartCommandArguments,
 ) -> Result<()> {
-	// Install the crypto provider before any TLS operations occur
-	let _ = CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider());
+	// Install the rustls process-default crypto provider before any TLS
+	// operations occur. Under `feature = "fips"` this asserts FIPS mode is
+	// active and aborts startup otherwise.
+	crate::tls::install_default_crypto_provider()?;
 	// Check the path is valid
 	C::path_valid(&path)?;
 	// Check if we should output a banner

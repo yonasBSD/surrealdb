@@ -155,6 +155,10 @@ criteria = "safe-to-deploy"
 version = "1.0.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.aws-lc-fips-sys]]
+version = "0.13.14"
+criteria = "safe-to-deploy"
+
 [[exemptions.aws-lc-rs]]
 version = "1.16.3"
 criteria = "safe-to-deploy"
