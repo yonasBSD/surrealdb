@@ -275,7 +275,7 @@ impl Segment {
 			match self {
 				Self::Fixed(x) if x == current => Some(None),
 				Self::Dynamic(x, k) => {
-					let val: Value = current.to_owned().into();
+					let val: Value = (*current).into();
 					let val: Option<Value> = match k {
 						None => Some(val),
 						Some(k) => val.cast_to_kind(k).ok(),
@@ -287,7 +287,7 @@ impl Segment {
 					let values = segments
 						.iter()
 						.copied()
-						.map(|x| Value::String(x.to_owned()))
+						.map(|x| Value::String((*x).into()))
 						.collect::<Vec<_>>();
 
 					Some(Some((x.to_owned(), Value::Array(Array(values)))))

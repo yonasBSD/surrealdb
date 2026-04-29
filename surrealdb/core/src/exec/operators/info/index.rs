@@ -143,7 +143,7 @@ async fn execute_index_info(
 		// Get the building status
 		let status = ib.get_status(ns, db, &ix).await;
 		let mut out = Object::default();
-		out.insert("building".to_string(), status.into());
+		out.insert("building", status.into());
 		return Ok(out.into());
 	}
 

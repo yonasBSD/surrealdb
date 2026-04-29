@@ -181,7 +181,7 @@ impl ExecOperator for IndexScan {
 			}
 		};
 		let mut attrs = vec![
-			("index".to_string(), self.index_ref.name.clone()),
+			("index".to_string(), self.index_ref.name.to_string()),
 			("access".to_string(), access_str),
 			("direction".to_string(), format!("{:?}", self.direction)),
 		];

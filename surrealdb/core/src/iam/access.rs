@@ -143,9 +143,9 @@ pub async fn revoke_refresh_token_record(
 	db: &str,
 ) -> Result<()> {
 	let stmt = access::AccessStatementRevoke {
-		ac,
+		ac: ac.into(),
 		base: Some(Base::Db),
-		gr: Some(gr),
+		gr: Some(gr.into()),
 		cond: None,
 	};
 	let sess = Session::owner().with_ns(ns).with_db(db);

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::bail;
 use async_trait::async_trait;
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use crate::catalog::providers::DatabaseProvider;
@@ -61,7 +62,7 @@ impl ToSql for Literal {
 
 /// Parameter reference - $foo
 #[derive(Debug, Clone)]
-pub struct Param(pub(crate) String);
+pub struct Param(pub(crate) Strand);
 
 impl Param {
 	/// Fetch a parameter from the database and check permissions.
@@ -72,7 +73,7 @@ impl Param {
 		ns_id: NamespaceId,
 		db_id: DatabaseId,
 	) -> anyhow::Result<Value> {
-		match txn.get_db_param(ns_id, db_id, &self.0, ctx.exec_ctx.version_stamp()).await {
+		match txn.get_db_param(ns_id, db_id, self.0.as_str(), ctx.exec_ctx.version_stamp()).await {
 			Ok(param_def) => {
 				// Check permissions
 				if ctx.exec_ctx.should_check_perms(Action::View)? {
@@ -80,7 +81,7 @@ impl Param {
 						Permission::Full => {}
 						Permission::None => {
 							bail!(Error::ParamPermissions {
-								name: self.0.clone()
+								name: self.0.to_string()
 							})
 						}
 						Permission::Specific(perm_expr) => {
@@ -98,7 +99,7 @@ impl Param {
 										}
 										Ok(_) => {
 											bail!(Error::ParamPermissions {
-												name: self.0.clone()
+												name: self.0.to_string()
 											})
 										}
 										Err(crate::expr::ControlFlow::Err(e)) => {
@@ -106,7 +107,7 @@ impl Param {
 										}
 										Err(_) => {
 											bail!(Error::ParamPermissions {
-												name: self.0.clone()
+												name: self.0.to_string()
 											})
 										}
 									}
@@ -114,7 +115,7 @@ impl Param {
 								Err(_) => {
 									// If we can't plan the expression, deny by default
 									bail!(Error::ParamPermissions {
-										name: self.0.clone()
+										name: self.0.to_string()
 									})
 								}
 							}
@@ -162,11 +163,11 @@ impl PhysicalExpr for Param {
 				}
 				// Check if $this was explicitly bound as a parameter (e.g. by subquery)
 				if let Some(local_params) = ctx.local_params
-					&& let Some(v) = local_params.get(&self.0)
+					&& let Some(v) = local_params.get(self.0.as_str())
 				{
 					return Ok(v.clone());
 				}
-				if let Some(v) = ctx.exec_ctx.value(&self.0) {
+				if let Some(v) = ctx.exec_ctx.value(self.0.as_str()) {
 					return Ok(v.clone());
 				}
 				return Ok(Value::None);
@@ -176,14 +177,14 @@ impl PhysicalExpr for Param {
 
 		// Check block-local parameters (they shadow global params)
 		if let Some(local_params) = ctx.local_params
-			&& let Some(value) = local_params.get(&self.0)
+			&& let Some(value) = local_params.get(self.0.as_str())
 		{
 			return Ok(value.clone());
 		}
 
 		// FrozenContext handles scoped parameter lookup via parent-chain,
 		// including protected params ($auth, $access, $token, $session)
-		if let Some(v) = ctx.exec_ctx.value(&self.0) {
+		if let Some(v) = ctx.exec_ctx.value(self.0.as_str()) {
 			return Ok(v.clone());
 		}
 
@@ -248,11 +249,11 @@ impl PhysicalExpr for Param {
 					return Some(Ok(v.clone()));
 				}
 				if let Some(local_params) = ctx.local_params
-					&& let Some(v) = local_params.get(&self.0)
+					&& let Some(v) = local_params.get(self.0.as_str())
 				{
 					return Some(Ok(v.clone()));
 				}
-				if let Some(v) = ctx.exec_ctx.value(&self.0) {
+				if let Some(v) = ctx.exec_ctx.value(self.0.as_str()) {
 					return Some(Ok(v.clone()));
 				}
 				return Some(Ok(Value::None));
@@ -260,11 +261,11 @@ impl PhysicalExpr for Param {
 			_ => {}
 		}
 		if let Some(local_params) = ctx.local_params
-			&& let Some(value) = local_params.get(&self.0)
+			&& let Some(value) = local_params.get(self.0.as_str())
 		{
 			return Some(Ok(value.clone()));
 		}
-		if let Some(v) = ctx.exec_ctx.value(&self.0) {
+		if let Some(v) = ctx.exec_ctx.value(self.0.as_str()) {
 			return Some(Ok(v.clone()));
 		}
 		if self.0.as_str() == "parent"
@@ -278,7 +279,8 @@ impl PhysicalExpr for Param {
 
 impl ToSql for Param {
 	fn fmt_sql(&self, f: &mut String, fmt: SqlFormat) {
-		write_sql!(f, fmt, "${}", self.0)
+		use crate::fmt::EscapeKwFreeIdent;
+		write_sql!(f, fmt, "${}", EscapeKwFreeIdent(self.0.as_str()))
 	}
 }
 

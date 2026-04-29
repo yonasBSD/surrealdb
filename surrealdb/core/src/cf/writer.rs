@@ -149,7 +149,7 @@ mod tests {
 		let tx1 = ds.transaction(Write, Optimistic).await.unwrap();
 		let record_a = RecordId {
 			table: tb_name.clone(),
-			key: RecordIdKey::String("A".to_owned()),
+			key: RecordIdKey::String("A".into()),
 		};
 		let value_a: Value = "a".into();
 		let previous = Value::None;
@@ -167,7 +167,7 @@ mod tests {
 		let tx2 = ds.transaction(Write, Optimistic).await.unwrap();
 		let record_c = RecordId {
 			table: tb_name.clone(),
-			key: RecordIdKey::String("C".to_owned()),
+			key: RecordIdKey::String("C".into()),
 		};
 		let value_c: Value = "c".into();
 		tx2.changefeed_buffer_record_change(
@@ -184,7 +184,7 @@ mod tests {
 		let tx3 = ds.transaction(Write, Optimistic).await.unwrap();
 		let record_b = RecordId {
 			table: tb_name.clone(),
-			key: RecordIdKey::String("B".to_owned()),
+			key: RecordIdKey::String("B".into()),
 		};
 		let value_b: Value = "b".into();
 		tx3.changefeed_buffer_record_change(
@@ -198,7 +198,7 @@ mod tests {
 		);
 		let record_c2 = RecordId {
 			table: tb_name.clone(),
-			key: RecordIdKey::String("C".to_owned()),
+			key: RecordIdKey::String("C".into()),
 		};
 		let value_c2: Value = "c2".into();
 		tx3.changefeed_buffer_record_change(
@@ -311,7 +311,7 @@ mod tests {
 	) -> RecordId {
 		let record_id = RecordId {
 			table: tb.name.clone(),
-			key: RecordIdKey::String(id),
+			key: RecordIdKey::String(id.into()),
 		};
 		let value_a: Value = "a".into();
 		let previous = Value::None.into();
@@ -334,13 +334,13 @@ mod tests {
 		let table_id = TableId(3);
 		let ns_def = NamespaceDefinition {
 			namespace_id,
-			name: NS.to_string(),
+			name: NS.into(),
 			comment: None,
 		};
 		let db_def = DatabaseDefinition {
 			namespace_id,
 			database_id,
-			name: DB.to_string(),
+			name: DB.into(),
 			changefeed: Some(ChangeFeed {
 				expiry: Duration::from_secs(10),
 				store_diff,

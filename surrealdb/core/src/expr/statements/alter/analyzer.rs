@@ -1,6 +1,7 @@
 use std::ops::Deref;
 
 use anyhow::Result;
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql};
 
 use super::AlterKind;
@@ -13,7 +14,7 @@ use crate::val::Value;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub(crate) struct AlterAnalyzerStatement {
-	pub name: String,
+	pub name: Strand,
 	pub if_exists: bool,
 	pub function: AlterKind<String>,
 	pub tokenizers: AlterKind<Vec<Tokenizer>>,
@@ -40,7 +41,7 @@ impl AlterAnalyzerStatement {
 		};
 
 		match self.function {
-			AlterKind::Set(ref v) => az.function = Some(v.clone()),
+			AlterKind::Set(ref v) => az.function = Some(v.clone().into()),
 			AlterKind::Drop => az.function = None,
 			AlterKind::None => {}
 		}

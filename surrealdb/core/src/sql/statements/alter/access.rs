@@ -1,3 +1,4 @@
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use super::AlterKind;
@@ -9,7 +10,7 @@ use crate::types::PublicDuration;
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 /// AST node for `ALTER ACCESS`.
 pub struct AlterAccessStatement {
-	pub name: String,
+	pub name: Strand,
 	pub base: Base,
 	pub if_exists: bool,
 	pub authenticate: AlterKind<Expr>,
@@ -25,7 +26,7 @@ impl ToSql for AlterAccessStatement {
 		if self.if_exists {
 			write_sql!(f, fmt, " IF EXISTS");
 		}
-		write_sql!(f, fmt, " {} ON {}", EscapeKwFreeIdent(&self.name), &self.base);
+		write_sql!(f, fmt, " {} ON {}", EscapeKwFreeIdent(self.name.as_str()), &self.base);
 
 		match self.authenticate {
 			AlterKind::Set(ref v) => write_sql!(f, fmt, " AUTHENTICATE {}", CoverStmts(v)),

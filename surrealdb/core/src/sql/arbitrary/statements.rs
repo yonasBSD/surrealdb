@@ -354,7 +354,7 @@ impl<'a> Arbitrary<'a> for Ast {
 			}) = e && let Expr::Param(ref left) = **left
 			{
 				*e = TopLevelExpr::Expr(Expr::Let(Box::new(SetStatement {
-					name: left.clone().into_string(),
+					name: left.clone().into_strand(),
 					kind: None,
 					what: (**right).clone(),
 				})))

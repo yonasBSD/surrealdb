@@ -1032,7 +1032,7 @@ impl<'ctx> Planner<'ctx> {
 
 	async fn resolve_expr_to_string(&self, expr: &Expr) -> Result<String, Error> {
 		match expr {
-			Expr::Literal(Literal::String(s)) => Ok(s.clone()),
+			Expr::Literal(Literal::String(s)) => Ok(s.as_str().to_owned()),
 			Expr::Param(param) => {
 				let value =
 					self.resolve_param(param.as_str()).await.unwrap_or(crate::val::Value::None);
@@ -1118,7 +1118,7 @@ impl<'ctx> Planner<'ctx> {
 				{
 					for p in parts.iter().skip(1) {
 						if let Part::Field(name) = p {
-							self.fields.insert(name.clone());
+							self.fields.insert(name.as_str().to_owned());
 						}
 						self.visit_part(p)?;
 					}
@@ -1126,7 +1126,7 @@ impl<'ctx> Planner<'ctx> {
 				}
 
 				if let Some(Part::Field(name)) = parts.first() {
-					self.fields.insert(name.clone());
+					self.fields.insert(name.as_str().to_owned());
 				}
 				for p in parts.iter() {
 					self.visit_part(p)?;

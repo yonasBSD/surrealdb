@@ -367,7 +367,7 @@ impl<'a> IndexOperation<'a> {
 	fn err_index_exists(&self, rid: RecordId, mut n: Array) -> Result<()> {
 		bail!(Error::IndexExists {
 			record: rid,
-			index: self.ix.name.clone(),
+			index: self.ix.name.to_string(),
 			value: match n.0.len() {
 				1 => n.0.remove(0).to_sql(),
 				_ => n.to_sql(),

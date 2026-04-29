@@ -1,6 +1,5 @@
 #![allow(clippy::derived_hash_with_manual_eq)]
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
 use std::hash;
 use std::iter::once;
 
@@ -137,18 +136,16 @@ impl Geometry {
 
 	/// Get the GeoJSON object representation for this geometry
 	pub fn as_object(&self) -> Object {
-		let mut obj = BTreeMap::<String, Value>::new();
-		obj.insert("type".into(), self.as_type().into());
+		let mut obj = Object::default();
+		obj.insert("type", self.as_type().into());
 		obj.insert(
 			match self {
 				Self::Collection(_) => "geometries",
 				_ => "coordinates",
-			}
-			.into(),
+			},
 			self.as_coordinates(),
 		);
-
-		obj.into()
+		obj
 	}
 
 	#[cfg_attr(not(feature = "scripting"), expect(dead_code))]

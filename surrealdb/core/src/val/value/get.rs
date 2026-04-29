@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -18,7 +17,7 @@ use crate::expr::part::{FindRecursionPlan, Next, NextMethod, Part, Recurse, Spli
 use crate::expr::statements::select::SelectStatement;
 use crate::expr::{ControlFlow, Expr, FlowResult, FlowResultExt as _, Idiom, Literal, Lookup};
 use crate::fnc::idiom;
-use crate::val::{RecordIdKey, Value};
+use crate::val::{Object, RecordIdKey, Value};
 
 macro_rules! fallback_function {
 	(if $first:expr => InvalidFunction($e:ident) then $second:expr) => {
@@ -270,16 +269,16 @@ impl Value {
 					Part::All => stk.run(|stk| self.get(stk, ctx, opt, doc, path.next())).await,
 					Part::Destructure(p) => {
 						let cur_doc = CursorDoc::from(self.clone());
-						let mut obj = BTreeMap::<String, Value>::new();
+						let mut obj = Object::default();
 						for p in p.iter() {
 							let idiom = p.idiom();
 							obj.insert(
-								p.field().to_owned(),
+								p.field(),
 								stk.run(|stk| idiom.compute(stk, ctx, opt, Some(&cur_doc))).await?,
 							);
 						}
 
-						let obj = Value::from(obj);
+						let obj = Value::Object(obj);
 						stk.run(|stk| obj.get(stk, ctx, opt, doc, path.next())).await
 					}
 					Part::Method(name, args) => {
@@ -733,7 +732,7 @@ mod tests {
 			res,
 			Value::from(RecordId {
 				table: "test".into(),
-				key: RecordIdKey::String("tobie".to_owned())
+				key: RecordIdKey::String("tobie".into())
 			})
 		);
 	}
@@ -759,7 +758,7 @@ mod tests {
 			res,
 			Value::from(RecordId {
 				table: "test".into(),
-				key: RecordIdKey::String("jaime".to_owned())
+				key: RecordIdKey::String("jaime".into())
 			})
 		);
 	}
@@ -814,7 +813,7 @@ mod tests {
 		assert_eq!(
 			res,
 			Value::from(vec![Value::from(map! {
-				"age".to_string() => Value::from(36),
+				"age" => Value::from(36),
 			})])
 		);
 	}
@@ -829,7 +828,7 @@ mod tests {
 		assert_eq!(
 			res,
 			Value::from(map! {
-				"age".to_string() => Value::from(34),
+				"age" => Value::from(34),
 			})
 		);
 	}

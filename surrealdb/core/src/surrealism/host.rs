@@ -211,8 +211,8 @@ impl InvocationContext for Host {
 					anyhow::anyhow!("Expected version for model function '{fnc}'")
 				})?;
 				Function::Model(Model {
-					name,
-					version,
+					name: name.into(),
+					version: version.into(),
 				})
 			}
 			_ => {

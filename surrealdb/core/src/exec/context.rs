@@ -15,10 +15,10 @@
 //! Note: Parts of this module are work-in-progress for the hierarchical context model.
 #![allow(dead_code)]
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use surrealdb_strand::Strand;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -33,7 +33,7 @@ use crate::kvs::{Datastore, Transaction};
 use crate::val::{Datetime, Value};
 
 /// Parameters passed to queries (e.g., `$param` values).
-pub(crate) type Parameters = HashMap<Cow<'static, str>, Arc<Value>>;
+pub(crate) type Parameters = HashMap<Strand, Arc<Value>>;
 
 /// Shared cache of [`FieldState`](crate::exec::operators::scan::pipeline::FieldState)
 /// keyed by `(table_name, check_perms)`.
@@ -75,20 +75,24 @@ impl ContextLevel {
 ///
 /// This contains session data that can be accessed by functions like
 /// `session::ns()`, `session::db()`, `session::id()`, etc.
+///
+/// String-shaped fields are stored as [`Strand`] so that extracting them from the session `Value`
+/// and re-emitting them via `session::ns()` / `session::db()` / etc. is a move rather than a
+/// `Strand -> String -> Strand` round-trip on every call.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SessionInfo {
 	/// The currently selected namespace
-	pub ns: Option<String>,
+	pub ns: Option<Strand>,
 	/// The currently selected database
-	pub db: Option<String>,
+	pub db: Option<Strand>,
 	/// The current session ID
 	pub id: Option<Uuid>,
 	/// The current connection IP address
-	pub ip: Option<String>,
+	pub ip: Option<Strand>,
 	/// The current connection origin
-	pub origin: Option<String>,
+	pub origin: Option<Strand>,
 	/// The current access method
-	pub ac: Option<String>,
+	pub ac: Option<Strand>,
 	/// The current record authentication data
 	pub rd: Option<Value>,
 	/// The current authentication token
@@ -637,9 +641,9 @@ impl ExecutionContext {
 	/// This is used by LET statements to add variables to the execution context.
 	/// Creates a proper child FrozenContext, preserving the parent chain for
 	/// correct scoped parameter lookup and shadowing.
-	pub fn with_param(&self, name: impl Into<Cow<'static, str>>, value: Value) -> Self {
+	pub fn with_param(&self, name: impl Into<Strand>, value: Value) -> Self {
 		let mut child = Context::new_child(self.ctx());
-		child.add_value(name.into(), Arc::new(value));
+		child.add_value(name, Arc::new(value));
 		self.with_new_ctx(child.freeze())
 	}
 

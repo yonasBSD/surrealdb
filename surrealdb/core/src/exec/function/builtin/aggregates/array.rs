@@ -136,7 +136,7 @@ impl Accumulator for ArrayJoinAccumulator {
 			.map(|v| v.clone().into_raw_string())
 			.collect::<Vec<_>>()
 			.join(&self.separator);
-		Ok(Value::String(joined))
+		Ok(Value::String(joined.into()))
 	}
 
 	fn reset(&mut self) {

@@ -1,5 +1,5 @@
 use crate::expr::operation::Operation;
-use crate::val::Value;
+use crate::val::{Strand, Value};
 
 impl Value {
 	pub(crate) fn diff(&self, val: &Value) -> Vec<Operation> {
@@ -11,7 +11,7 @@ impl Value {
 		res
 	}
 
-	fn diff_rec(&self, val: &Value, path: &mut Vec<String>, ops: &mut Vec<Operation>) {
+	fn diff_rec(&self, val: &Value, path: &mut Vec<Strand>, ops: &mut Vec<Operation>) {
 		match (self, val) {
 			(Value::Object(a), Value::Object(b)) if a != b => {
 				// Loop over old keys
@@ -46,13 +46,13 @@ impl Value {
 			(Value::Array(a), Value::Array(b)) if a != b => {
 				let min_len = a.len().min(b.len());
 				for n in 0..min_len {
-					path.push(n.to_string());
+					path.push(n.to_string().into());
 					a[n].diff_rec(&b[n], path, ops);
 					path.pop();
 				}
 				for n in min_len..b.len() {
 					let mut path = path.clone();
-					path.push(n.to_string());
+					path.push(n.to_string().into());
 					ops.push(Operation::Add {
 						path,
 						value: b[n].clone(),
@@ -60,7 +60,7 @@ impl Value {
 				}
 				for n in min_len..a.len() {
 					let mut path = path.clone();
-					path.push(n.to_string());
+					path.push(n.to_string().into());
 					ops.push(Operation::Remove {
 						path,
 					})

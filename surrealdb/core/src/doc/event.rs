@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -6,6 +5,7 @@ use anyhow::{Result, bail};
 use reblessive::TreeStack;
 use reblessive::tree::Stk;
 use revision::revisioned;
+use surrealdb_strand::Strand;
 use surrealdb_types::ToSql;
 #[cfg(not(target_family = "wasm"))]
 use tokio::spawn;
@@ -211,7 +211,7 @@ pub struct AsyncEventRecord {
 	auth_enabled: bool,
 	/// Captured context values (session variables and event inputs like event, value, before,
 	/// after, and input) restored for processing.
-	values: HashMap<Cow<'static, str>, Arc<Value>>,
+	values: HashMap<Strand, Arc<Value>>,
 	/// Auth context with any event-specific limits applied.
 	auth_with_limit: Arc<Auth>,
 	/// Snapshot of the event definition used for execution and retry policy.
@@ -233,7 +233,7 @@ impl AsyncEventRecord {
 		if let Some(d) = opt.async_event_depth()
 			&& d >= event_definition.max_depth()
 		{
-			bail!(Error::EvReachMaxDepth(event_definition.name.clone(), d))
+			bail!(Error::EvReachMaxDepth(event_definition.name.to_string(), d))
 		}
 		Ok(Self {
 			attempt: 0,
@@ -269,11 +269,17 @@ impl AsyncEventRecord {
 		// Resolve namespace/database IDs and ensure they still match the queued key.
 		let ns = tx.expect_ns_by_name(&self.ns).await?;
 		if ns.namespace_id != eq.ns {
-			bail!(Error::EvNamespaceMismatch(self.event_definition.name.clone(), ns.name.clone()));
+			bail!(Error::EvNamespaceMismatch(
+				self.event_definition.name.to_string(),
+				ns.name.to_string(),
+			));
 		}
 		let db = tx.expect_db_by_name(&self.ns, &self.db).await?;
 		if db.database_id != eq.db {
-			bail!(Error::EvDatabaseMismatch(self.event_definition.name.clone(), db.name.clone()));
+			bail!(Error::EvDatabaseMismatch(
+				self.event_definition.name.to_string(),
+				db.name.to_string(),
+			));
 		}
 		let opt = parent_opts.clone();
 		let opt = opt

@@ -2715,10 +2715,10 @@ impl Datastore {
 		crate::obs::put(&path, data).await?;
 		// Insert the model in to the database
 		let model = DefineModelStatement {
-			name: name.to_string(),
-			version: version.to_string(),
-			comment: Expr::Literal(Literal::String(description.to_string())),
-			hash,
+			name: name.to_string().into(),
+			version: version.to_string().into(),
+			comment: Expr::Literal(Literal::String(description.into())),
+			hash: hash.into(),
 			kind: Default::default(),
 			permissions: Default::default(),
 		};

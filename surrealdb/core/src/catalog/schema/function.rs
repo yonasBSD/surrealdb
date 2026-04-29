@@ -1,4 +1,5 @@
 use revision::revisioned;
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql};
 
 use crate::catalog::Permission;
@@ -13,7 +14,7 @@ use crate::val::Value;
 #[revisioned(revision = 2)]
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct FunctionDefinition {
-	pub(crate) name: String,
+	pub(crate) name: Strand,
 	pub(crate) args: Vec<(String, Kind)>,
 	pub(crate) block: Block,
 	pub(crate) comment: Option<String>,
@@ -46,7 +47,7 @@ impl FunctionDefinition {
 			comment: self
 				.comment
 				.clone()
-				.map(|x| sql::Expr::Literal(sql::Literal::String(x)))
+				.map(|x| sql::Expr::Literal(sql::Literal::String(x.into())))
 				.unwrap_or(sql::Expr::Literal(sql::Literal::None)),
 		}
 	}
@@ -55,16 +56,16 @@ impl FunctionDefinition {
 impl InfoStructure for FunctionDefinition {
 	fn structure(self) -> Value {
 		Value::from(map! {
-			"name".to_string() => self.name.into(),
-			"args".to_string() => self.args
+			"name" => self.name.into(),
+			"args" => self.args
 				.into_iter()
 				.map(|(n, k)| vec![n.into(), k.to_sql().into()].into())
 				.collect::<Vec<Value>>()
 				.into(),
-			"block".to_string() => self.block.to_sql().into(),
-			"permissions".to_string() => self.permissions.structure(),
-			"comment".to_string(), if let Some(v) = self.comment => v.to_sql().into(),
-			"returns".to_string(), if let Some(v) = self.returns => v.to_sql().into(),
+			"block" => self.block.to_sql().into(),
+			"permissions" => self.permissions.structure(),
+			"comment", if let Some(v) = self.comment => v.to_sql().into(),
+			"returns", if let Some(v) = self.returns => v.to_sql().into(),
 		})
 	}
 }

@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql};
 
 use crate::cnf::PROTECTED_PARAM_NAMES;
@@ -52,7 +53,7 @@ pub struct BlockPhysicalExpr {
 /// This creates a child context that adds local block params on top.
 fn create_planning_context(
 	exec_ctx: &crate::exec::ExecutionContext,
-	local_params: &HashMap<String, Value>,
+	local_params: &HashMap<Strand, Value>,
 ) -> FrozenContext {
 	if local_params.is_empty() {
 		return exec_ctx.ctx().clone();
@@ -109,7 +110,7 @@ impl PhysicalExpr for BlockPhysicalExpr {
 		}
 
 		// Track block-local parameters (from LET statements)
-		let mut local_params: HashMap<String, Value> = HashMap::new();
+		let mut local_params: HashMap<Strand, Value> = HashMap::new();
 
 		// Track the result of the last expression
 		let mut result = Value::None;
@@ -160,7 +161,7 @@ impl BlockPhysicalExpr {
 		&self,
 		expr: &Expr,
 		ctx: &EvalContext<'_>,
-		local_params: &mut HashMap<String, Value>,
+		local_params: &mut HashMap<Strand, Value>,
 		current_exec_ctx: &mut crate::exec::ExecutionContext,
 		legacy_ctx: &mut Option<FrozenContext>,
 		current_value_for_legacy: Option<&Value>,
@@ -170,7 +171,7 @@ impl BlockPhysicalExpr {
 				// Check for protected parameter names
 				if PROTECTED_PARAM_NAMES.contains(&set_stmt.name.as_str()) {
 					return Err(Error::InvalidParam {
-						name: set_stmt.name.clone(),
+						name: set_stmt.name.to_string(),
 					}
 					.into());
 				}
@@ -221,7 +222,7 @@ impl BlockPhysicalExpr {
 				// Apply type coercion if specified
 				let value = if let Some(kind) = &set_stmt.kind {
 					value.coerce_to_kind(kind).map_err(|e| Error::SetCoerce {
-						name: set_stmt.name.clone(),
+						name: set_stmt.name.to_string(),
 						error: Box::new(e),
 					})?
 				} else {
@@ -229,14 +230,14 @@ impl BlockPhysicalExpr {
 				};
 
 				// Store in local params and update execution context
-				local_params.insert(set_stmt.name.clone(), value.clone());
-				*current_exec_ctx =
-					current_exec_ctx.with_param(set_stmt.name.clone(), value.clone());
+				let name: Strand = set_stmt.name.clone();
+				local_params.insert(name.clone(), value.clone());
+				*current_exec_ctx = current_exec_ctx.with_param(name.clone(), value.clone());
 
 				// Update the legacy context with the new parameter
 				if let Some(ctx) = legacy_ctx {
 					let mut new_ctx = crate::ctx::Context::new_child(ctx);
-					new_ctx.add_value(set_stmt.name.clone(), Arc::new(value));
+					new_ctx.add_value(name, Arc::new(value));
 					*ctx = new_ctx.freeze();
 				}
 

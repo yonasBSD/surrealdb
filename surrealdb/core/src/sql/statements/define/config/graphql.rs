@@ -1,6 +1,8 @@
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql};
 
 use crate::fmt::EscapeKwFreeIdent;
+use crate::val::TableName;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
@@ -57,12 +59,8 @@ impl From<TablesConfig> for crate::catalog::GraphQLTablesConfig {
 		match v {
 			TablesConfig::None => Self::None,
 			TablesConfig::Auto => Self::Auto,
-			TablesConfig::Include(cs) => {
-				Self::Include(cs.into_iter().map(|t| t.name.into()).collect())
-			}
-			TablesConfig::Exclude(cs) => {
-				Self::Exclude(cs.into_iter().map(|t| t.name.into()).collect())
-			}
+			TablesConfig::Include(cs) => Self::Include(cs.into_iter().map(|t| t.name).collect()),
+			TablesConfig::Exclude(cs) => Self::Exclude(cs.into_iter().map(|t| t.name).collect()),
 		}
 	}
 }
@@ -75,14 +73,14 @@ impl From<crate::catalog::GraphQLTablesConfig> for TablesConfig {
 			crate::catalog::GraphQLTablesConfig::Include(cs) => Self::Include(
 				cs.into_iter()
 					.map(|t| TableConfig {
-						name: t.into_string(),
+						name: t,
 					})
 					.collect(),
 			),
 			crate::catalog::GraphQLTablesConfig::Exclude(cs) => Self::Exclude(
 				cs.into_iter()
 					.map(|t| TableConfig {
-						name: t.into_string(),
+						name: t,
 					})
 					.collect(),
 			),
@@ -93,7 +91,7 @@ impl From<crate::catalog::GraphQLTablesConfig> for TablesConfig {
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Hash)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct TableConfig {
-	pub name: String,
+	pub name: TableName,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, PartialOrd, Hash)]
@@ -104,9 +102,9 @@ pub enum FunctionsConfig {
 	Auto,
 	// These variants are not actually implemented yet
 	#[cfg_attr(feature = "arbitrary", arbitrary(skip))]
-	Include(Vec<String>),
+	Include(Vec<Strand>),
 	#[cfg_attr(feature = "arbitrary", arbitrary(skip))]
-	Exclude(Vec<String>),
+	Exclude(Vec<Strand>),
 }
 
 /// Controls whether GraphQL schema introspection is enabled.
@@ -223,7 +221,7 @@ impl ToSql for TablesConfig {
 
 impl ToSql for TableConfig {
 	fn fmt_sql(&self, f: &mut String, fmt: SqlFormat) {
-		EscapeKwFreeIdent(&self.name).fmt_sql(f, fmt);
+		EscapeKwFreeIdent(self.name.as_str()).fmt_sql(f, fmt);
 	}
 }
 
@@ -238,7 +236,7 @@ impl ToSql for FunctionsConfig {
 					if i > 0 {
 						f.push_str(", ");
 					}
-					func.fmt_sql(f, fmt);
+					EscapeKwFreeIdent(func.as_str()).fmt_sql(f, fmt);
 				}
 				f.push(']');
 			}
@@ -248,7 +246,7 @@ impl ToSql for FunctionsConfig {
 					if i > 0 {
 						f.push_str(", ");
 					}
-					func.fmt_sql(f, fmt);
+					EscapeKwFreeIdent(func.as_str()).fmt_sql(f, fmt);
 				}
 				f.push(']');
 			}

@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::{self, Debug};
 #[cfg(storage)]
@@ -11,6 +10,7 @@ use std::time::Duration;
 use anyhow::Context as _;
 use anyhow::{Result, bail};
 use async_channel::Sender;
+use surrealdb_strand::Strand;
 #[cfg(feature = "surrealism")]
 use surrealism_runtime::package::{SurrealismPackage, UnpackOptions};
 #[cfg(feature = "surrealism")]
@@ -68,7 +68,7 @@ pub struct Context {
 	// Whether or not this context is cancelled.
 	cancelled: Arc<AtomicBool>,
 	// A collection of read only values stored in this context.
-	values: HashMap<Cow<'static, str>, Arc<Value>>,
+	values: HashMap<Strand, Arc<Value>>,
 	// Stores the notification channel if available
 	notifications: Option<Sender<PublicNotification>>,
 	// An optional query planner
@@ -515,7 +515,7 @@ impl Context {
 	/// with the same key.
 	pub(crate) fn add_value<K>(&mut self, key: K, value: Arc<Value>)
 	where
-		K: Into<Cow<'static, str>>,
+		K: Into<Strand>,
 	{
 		self.values.insert(key.into(), value);
 	}
@@ -525,7 +525,7 @@ impl Context {
 	pub(crate) fn add_values<T, K, V>(&mut self, iter: T)
 	where
 		T: IntoIterator<Item = (K, V)>,
-		K: Into<Cow<'static, str>>,
+		K: Into<Strand>,
 		V: Into<Arc<Value>>,
 	{
 		self.values.extend(iter.into_iter().map(|(k, v)| (k.into(), v.into())))
@@ -782,8 +782,8 @@ impl Context {
 	/// unless this context is isolated.
 	pub(crate) fn collect_values(
 		&self,
-		map: HashMap<Cow<'static, str>, Arc<Value>>,
-	) -> HashMap<Cow<'static, str>, Arc<Value>> {
+		map: HashMap<Strand, Arc<Value>>,
+	) -> HashMap<Strand, Arc<Value>> {
 		let mut map = if !self.isolated
 			&& let Some(p) = &self.parent
 		{
@@ -833,7 +833,7 @@ impl Context {
 		for (name, val) in vars {
 			if PROTECTED_PARAM_NAMES.contains(&name.as_str()) {
 				return Err(Error::InvalidParam {
-					name,
+					name: name.into_string(),
 				});
 			}
 			self.add_value(name, Arc::new(val));

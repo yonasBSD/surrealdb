@@ -1,3 +1,4 @@
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use crate::fmt::EscapeKwFreeIdent;
@@ -47,7 +48,7 @@ impl From<crate::catalog::Index> for Index {
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Hash)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct FullTextParams {
-	pub az: String,
+	pub az: Strand,
 	pub hl: bool,
 	pub sc: Scoring,
 }
@@ -64,7 +65,7 @@ impl From<FullTextParams> for crate::catalog::FullTextParams {
 impl From<crate::catalog::FullTextParams> for FullTextParams {
 	fn from(v: crate::catalog::FullTextParams) -> Self {
 		Self {
-			az: v.analyzer,
+			az: v.analyzer.clone(),
 			hl: v.highlight,
 			sc: v.scoring.into(),
 		}

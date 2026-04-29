@@ -4,6 +4,7 @@ use super::AlterKind;
 use crate::fmt::{CoverStmts, EscapeKwFreeIdent, QuoteStr};
 use crate::sql::reference::Reference;
 use crate::sql::{Expr, Idiom, Kind, Permissions};
+use crate::val::TableName;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
@@ -50,7 +51,7 @@ impl From<AlterDefault> for crate::expr::statements::alter::AlterDefault {
 pub struct AlterFieldStatement {
 	#[cfg_attr(feature = "arbitrary", arbitrary(with = crate::sql::arbitrary::local_idiom))]
 	pub name: Idiom,
-	pub what: String,
+	pub what: TableName,
 	pub if_exists: bool,
 	pub kind: AlterKind<Kind>,
 	pub flexible: AlterKind<()>,
@@ -69,7 +70,7 @@ impl ToSql for AlterFieldStatement {
 		if self.if_exists {
 			write_sql!(f, fmt, " IF EXISTS");
 		}
-		write_sql!(f, fmt, " {} ON {}", self.name, EscapeKwFreeIdent(&self.what));
+		write_sql!(f, fmt, " {} ON {}", self.name, EscapeKwFreeIdent(self.what.as_str()));
 		match self.kind {
 			AlterKind::Set(ref x) => write_sql!(f, fmt, " TYPE {x}"),
 			AlterKind::Drop => write_sql!(f, fmt, " DROP TYPE"),
@@ -124,7 +125,7 @@ impl From<AlterFieldStatement> for crate::expr::statements::alter::AlterFieldSta
 	fn from(v: AlterFieldStatement) -> Self {
 		crate::expr::statements::alter::AlterFieldStatement {
 			name: v.name.into(),
-			what: v.what.into(),
+			what: v.what,
 			if_exists: v.if_exists,
 			kind: v.kind.into(),
 			flexible: v.flexible.into(),
@@ -143,7 +144,7 @@ impl From<crate::expr::statements::alter::AlterFieldStatement> for AlterFieldSta
 	fn from(v: crate::expr::statements::alter::AlterFieldStatement) -> Self {
 		AlterFieldStatement {
 			name: v.name.into(),
-			what: v.what.into_string(),
+			what: v.what,
 			if_exists: v.if_exists,
 			kind: v.kind.into(),
 			flexible: v.flexible.into(),

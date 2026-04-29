@@ -1,15 +1,16 @@
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use super::AlterKind;
 use crate::fmt::{EscapeKwFreeIdent, Fmt, QuoteStr};
 use crate::sql::filter::Filter;
-use crate::sql::tokenizer::Tokenizer;
+use crate::sql::tokenizer::{Tokenizer, write_tokenizers_sql};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 /// AST node for `ALTER ANALYZER`.
 pub struct AlterAnalyzerStatement {
-	pub name: String,
+	pub name: Strand,
 	pub if_exists: bool,
 	pub function: AlterKind<String>,
 	pub tokenizers: AlterKind<Vec<Tokenizer>>,
@@ -23,7 +24,7 @@ impl ToSql for AlterAnalyzerStatement {
 		if self.if_exists {
 			write_sql!(f, fmt, " IF EXISTS");
 		}
-		write_sql!(f, fmt, " {}", EscapeKwFreeIdent(&self.name));
+		write_sql!(f, fmt, " {}", EscapeKwFreeIdent(self.name.as_str()));
 
 		match self.function {
 			AlterKind::Set(ref v) => {
@@ -39,8 +40,8 @@ impl ToSql for AlterAnalyzerStatement {
 
 		match self.tokenizers {
 			AlterKind::Set(ref v) => {
-				let tokens: Vec<String> = v.iter().map(|t| t.to_sql()).collect();
-				write_sql!(f, fmt, " TOKENIZERS {}", tokens.join(","));
+				write_sql!(f, fmt, " TOKENIZERS ");
+				write_tokenizers_sql(f, fmt, v.iter().copied());
 			}
 			AlterKind::Drop => f.push_str(" DROP TOKENIZERS"),
 			AlterKind::None => {}

@@ -211,7 +211,7 @@ impl<'ctx> Planner<'ctx> {
 	pub(crate) async fn convert_part(&self, part: Part) -> Result<Arc<dyn PhysicalExpr>, Error> {
 		match part {
 			Part::Field(name) => Ok(Arc::new(FieldPart {
-				name,
+				name: name.into_string(),
 			})),
 
 			Part::Value(expr) => {
@@ -249,13 +249,13 @@ impl<'ctx> Planner<'ctx> {
 					phys_args.push(self.physical_expr(arg).await?);
 				}
 				let registry = self.function_registry();
-				match registry.get_method(&name) {
+				match registry.get_method(name.as_str()) {
 					Some(descriptor) => Ok(Arc::new(MethodPart {
 						descriptor: descriptor.clone(),
 						args: phys_args,
 					})),
 					None => Ok(Arc::new(ClosureFieldCallPart {
-						field: name,
+						field: name.into_string(),
 						args: phys_args,
 					})),
 				}

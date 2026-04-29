@@ -38,7 +38,7 @@ use super::error::{GqlError, resolver_error};
 use super::ext::ValidatorExt;
 use crate::catalog::providers::{AuthorisationProvider, DatabaseProvider, TableProvider};
 use crate::catalog::{
-	DatabaseId, GraphQLConfig, GraphQLFunctionsConfig, GraphQLIntrospectionConfig,
+	DatabaseId, FieldDefinition, GraphQLConfig, GraphQLFunctionsConfig, GraphQLIntrospectionConfig,
 	GraphQLTablesConfig, NamespaceId,
 };
 use crate::dbs::Session;
@@ -125,12 +125,18 @@ pub async fn generate_schema(
 			match gql_config.functions {
 				GraphQLFunctionsConfig::None => None,
 				GraphQLFunctionsConfig::Auto => Some(fns),
-				GraphQLFunctionsConfig::Include(inc) => {
-					Some(fns.iter().filter(|f| inc.contains(&f.name)).cloned().collect())
-				}
-				GraphQLFunctionsConfig::Exclude(exc) => {
-					Some(fns.iter().filter(|f| !exc.contains(&f.name)).cloned().collect())
-				}
+				GraphQLFunctionsConfig::Include(inc) => Some(
+					fns.iter()
+						.filter(|f| inc.iter().any(|n| n.as_str() == f.name.as_str()))
+						.cloned()
+						.collect(),
+				),
+				GraphQLFunctionsConfig::Exclude(exc) => Some(
+					fns.iter()
+						.filter(|f| !exc.iter().any(|n| n.as_str() == f.name.as_str()))
+						.cloned()
+						.collect(),
+				),
 			}
 		}
 	};
@@ -168,7 +174,7 @@ pub async fn generate_schema(
 
 	match tbs {
 		Some(ref tbs) if !tbs.is_empty() => {
-			let mut table_fields = HashMap::new();
+			let mut table_fields: HashMap<TableName, Arc<[FieldDefinition]>> = HashMap::new();
 			query = process_tbs(
 				tbs.clone(),
 				query,
@@ -340,7 +346,7 @@ pub(crate) fn sql_value_to_gql_value(v: SurValue) -> Result<GqlValue, GqlError> 
 			),
 			num @ SurNumber::Decimal(_) => GqlValue::String(num.to_string()),
 		},
-		SurValue::String(s) => GqlValue::String(s),
+		SurValue::String(s) => GqlValue::String(s.into_string()),
 		SurValue::Duration(d) => GqlValue::String(d.to_string()),
 		SurValue::Datetime(d) => GqlValue::String(d.to_rfc3339()),
 		SurValue::Uuid(uuid) => GqlValue::String(uuid.to_string()),
@@ -383,7 +389,7 @@ pub(crate) fn sql_value_to_gql_value_with_kind(
 	{
 		for k in ks {
 			if let Kind::Literal(KindLiteral::String(lit)) = k
-				&& lit == s
+				&& lit.as_str() == s.as_str()
 			{
 				return Ok(GqlValue::Enum(Name::new(literal_enum_item_name(enum_scope, lit))));
 			}
@@ -400,7 +406,7 @@ pub(crate) fn sql_value_to_gql_value_with_kind(
 fn record_id_to_raw(t: &SurRecordId) -> String {
 	let key_str = match &t.key {
 		SurRecordIdKey::Number(n) => n.to_string(),
-		SurRecordIdKey::String(s) => s.clone(),
+		SurRecordIdKey::String(s) => s.to_string(),
 		SurRecordIdKey::Uuid(u) => u.to_string(),
 		// For complex keys (arrays, objects, ranges), fall back to SQL format
 		_ => t.key.to_sql(),
@@ -458,7 +464,7 @@ fn enum_token_to_literal(ks: &[Kind], token: &str, enum_scope: Option<&str>) -> 
 		if let Kind::Literal(KindLiteral::String(lit)) = kind {
 			let expected = literal_enum_item_name(enum_scope, lit);
 			if expected == token {
-				return Some(lit.clone());
+				return Some(lit.as_str().to_owned());
 			}
 		}
 	}
@@ -627,7 +633,7 @@ pub fn kind_to_type_with_enum_prefix(
 								"just checked that this is a Kind::Literal(Literal::String(_))"
 							);
 						};
-						out
+						out.into_string()
 					})
 					.collect();
 
@@ -778,11 +784,18 @@ fn convert_static_record_id_key(
 			Ok(SurRecordIdKey::Array(SurArray(vals?)))
 		}
 		RecordIdKeyLit::Object(entries) => {
+			// Collect into `BTreeMap<Strand, _>` directly so the
+			// final `SurObject::from(map)` resolves to the zero-cost
+			// `From<BTreeMap<Strand, Value>> for Object` impl
+			// (a single field move). Going via
+			// `BTreeMap<String, _>` would force a `Strand::into_string`
+			// heap allocation per key and then re-convert every key
+			// back to `Strand` inside `From<BTreeMap<String, Value>>`.
 			let mut map = BTreeMap::new();
 			for entry in entries {
 				map.insert(entry.key, convert_static_expr(entry.value)?);
 			}
-			Ok(SurRecordIdKey::Object(SurObject(map)))
+			Ok(SurRecordIdKey::Object(SurObject::from(map)))
 		}
 		RecordIdKeyLit::Generate(_) => Err(resolver_error(
 			"Generated RecordId keys (rand(), ulid(), uuid()) are not supported in GraphQL inputs",
@@ -834,11 +847,14 @@ fn convert_static_literal(lit: Literal) -> Result<SurValue, GqlError> {
 			Ok(SurValue::Set(SurSet::from(vals?)))
 		}
 		Literal::Object(entries) => {
+			// See `convert_static_record_id_key` for why the
+			// accumulator is `BTreeMap<Strand, _>` rather than
+			// `BTreeMap<String, _>`.
 			let mut map = BTreeMap::new();
 			for entry in entries {
 				map.insert(entry.key, convert_static_expr(entry.value)?);
 			}
-			Ok(SurValue::Object(SurObject(map)))
+			Ok(SurValue::Object(SurObject::from(map)))
 		}
 		Literal::Duration(d) => Ok(SurValue::Duration(d)),
 		Literal::Datetime(dt) => Ok(SurValue::Datetime(dt)),
@@ -884,7 +900,7 @@ pub(crate) fn gql_to_sql_kind_with_scope(
 				{
 					return Ok(out);
 				}
-				Ok(SurValue::String(s.to_owned()))
+				Ok(SurValue::String(s.as_str().into()))
 			}
 			GqlValue::Null => Ok(SurValue::Null),
 			obj @ GqlValue::Object(_) => gql_to_sql_kind(obj, Kind::Object),
@@ -1035,11 +1051,14 @@ pub(crate) fn gql_to_sql_kind_with_scope(
 
 				match expr {
 					Expr::Literal(Literal::Object(o)) => {
+						// See `convert_static_record_id_key` for
+						// why the accumulator is
+						// `BTreeMap<Strand, _>`.
 						let mut map = BTreeMap::new();
 						for entry in o {
 							map.insert(entry.key, convert_static_expr(entry.value)?);
 						}
-						Ok(SurValue::Object(SurObject(map)))
+						Ok(SurValue::Object(SurObject::from(map)))
 					}
 					_ => Err(type_error(kind, val)),
 				}
@@ -1047,7 +1066,7 @@ pub(crate) fn gql_to_sql_kind_with_scope(
 			_ => Err(type_error(kind, val)),
 		},
 		Kind::String => match val {
-			GqlValue::String(s) => Ok(SurValue::String(s.to_owned())),
+			GqlValue::String(s) => Ok(SurValue::String(s.as_str().into())),
 			GqlValue::Enum(s) => Ok(SurValue::String(s.as_str().into())),
 			_ => Err(type_error(kind, val)),
 		},
@@ -1128,7 +1147,7 @@ pub(crate) fn gql_to_sql_kind_with_scope(
 				}
 				GqlValue::Enum(n) => {
 					if let Some(literal) = enum_token_to_literal(ks, n.as_str(), enum_scope) {
-						return Ok(SurValue::String(literal));
+						return Ok(SurValue::String(literal.into()));
 					}
 					either_try_kind!(ks, &GqlValue::String(n.to_string()), Kind::String);
 					Err(type_error(kind, val))

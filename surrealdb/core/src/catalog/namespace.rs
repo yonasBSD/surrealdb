@@ -3,6 +3,7 @@ use std::fmt::{Display, Formatter};
 use revision::{DeserializeRevisioned, Revisioned, SerializeRevisioned, revisioned};
 use serde::{Deserialize, Serialize};
 use storekey::{BorrowDecode, Encode};
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql};
 
 use crate::expr::statements::info::InfoStructure;
@@ -70,7 +71,7 @@ impl From<u32> for NamespaceId {
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Hash)]
 pub struct NamespaceDefinition {
 	pub namespace_id: NamespaceId,
-	pub name: String,
+	pub name: Strand,
 	pub comment: Option<String>,
 }
 impl_kv_value_revisioned!(NamespaceDefinition);
@@ -82,7 +83,7 @@ impl NamespaceDefinition {
 			comment: self
 				.comment
 				.clone()
-				.map(|v| Expr::Literal(Literal::String(v)))
+				.map(|v| Expr::Literal(Literal::String(v.into())))
 				.unwrap_or(Expr::Literal(Literal::None)),
 			..Default::default()
 		}
@@ -98,9 +99,9 @@ impl ToSql for NamespaceDefinition {
 impl InfoStructure for NamespaceDefinition {
 	fn structure(self) -> Value {
 		Value::from(map! {
-			"name".to_string() => self.name.into(),
-			"comment".to_string(), if let Some(v) = self.comment => v.into(),
-			"id".to_string() => self.namespace_id.0.into(),
+			"name" => self.name.into(),
+			"comment", if let Some(v) = self.comment => v.into(),
+			"id" => self.namespace_id.0.into(),
 		})
 	}
 }

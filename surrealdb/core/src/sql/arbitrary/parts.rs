@@ -302,7 +302,7 @@ impl<'a> Arbitrary<'a> for Middleware {
 		name.push_str(u.arbitrary()?);
 
 		Ok(Middleware {
-			name,
+			name: name.into(),
 			args: u.arbitrary()?,
 		})
 	}

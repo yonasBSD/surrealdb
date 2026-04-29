@@ -1,6 +1,7 @@
 use std::ops::Deref;
 
 use anyhow::Result;
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql};
 use uuid::Uuid;
 
@@ -15,7 +16,7 @@ use crate::val::{TableName, Value};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub(crate) struct AlterEventStatement {
-	pub name: String,
+	pub name: Strand,
 	pub what: TableName,
 	pub if_exists: bool,
 	pub when: AlterKind<Expr>,

@@ -4,6 +4,7 @@ use std::hash::{Hash, Hasher};
 use anyhow::Result;
 use revision::{DeserializeRevisioned, Revisioned, SerializeRevisioned, revisioned};
 use storekey::{BorrowDecode, Encode};
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use crate::err::Error;
@@ -55,7 +56,7 @@ impl From<u32> for IndexId {
 #[non_exhaustive]
 pub struct IndexDefinition {
 	pub(crate) index_id: IndexId,
-	pub(crate) name: String,
+	pub(crate) name: Strand,
 	pub(crate) table_name: TableName,
 	pub(crate) cols: Vec<Idiom>,
 	pub(crate) index: Index,
@@ -73,13 +74,13 @@ impl IndexDefinition {
 		sql::DefineIndexStatement {
 			kind: DefineKind::Default,
 			name: sql::Expr::Idiom(sql::Idiom::field(self.name.clone())),
-			what: sql::Expr::Table(self.table_name.clone().into_string()),
+			what: sql::Expr::Table(self.table_name.clone()),
 			cols: self.cols.iter().cloned().map(|x| sql::Expr::Idiom(x.into())).collect(),
 			index: self.index.to_sql_definition(),
 			comment: self
 				.comment
 				.clone()
-				.map(|x| sql::Expr::Literal(sql::Literal::String(x)))
+				.map(|x| sql::Expr::Literal(sql::Literal::String(x.into())))
 				.unwrap_or(sql::Expr::Literal(sql::Literal::None)),
 			concurrently: false,
 		}
@@ -108,12 +109,12 @@ impl IndexDefinition {
 impl InfoStructure for IndexDefinition {
 	fn structure(self) -> Value {
 		Value::from(map! {
-			"name".to_string() => self.name.into(),
-			"table".to_string() => self.table_name.into_string().into(),
-			"cols".to_string() => Value::Array(Array(self.cols.into_iter().map(|x| x.structure()).collect())),
-			"index".to_string() => self.index.structure(),
-			"comment".to_string(), if let Some(v) = self.comment => v.into(),
-			"prepare_remove".to_string(), if self.prepare_remove => self.prepare_remove.into()
+			"name" => self.name.into(),
+			"table" => Value::String(self.table_name.into()),
+			"cols" => Value::Array(Array(self.cols.into_iter().map(|x| x.structure()).collect())),
+			"index" => self.index.structure(),
+			"comment", if let Some(v) = self.comment => v.into(),
+			"prepare_remove", if self.prepare_remove => self.prepare_remove.into()
 		})
 	}
 }
@@ -175,7 +176,7 @@ impl ToSql for Index {
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct FullTextParams {
 	/// The analyzer to use.
-	pub analyzer: String,
+	pub analyzer: Strand,
 	/// Whether to highlight the search results.
 	pub highlight: bool,
 	/// The scoring to use.

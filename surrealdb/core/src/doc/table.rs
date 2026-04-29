@@ -377,7 +377,7 @@ impl Document {
 			.await?;
 
 		let id = Arc::new(RecordId {
-			table: view_table_name.to_string().into(),
+			table: view_table_name.clone(),
 			key,
 		});
 
@@ -470,7 +470,7 @@ impl Document {
 			});
 
 			let id = RecordId {
-				table: view_table_name.to_string().into(),
+				table: view_table_name.clone(),
 				key,
 			};
 
@@ -754,7 +754,7 @@ impl Document {
 			.await?;
 
 		let id = RecordId {
-			table: view_table_name.to_string().into(),
+			table: view_table_name.clone(),
 			key,
 		};
 

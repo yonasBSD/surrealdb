@@ -1,3 +1,4 @@
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use super::DefineKind;
@@ -8,7 +9,7 @@ use crate::sql::{Block, Expr, Kind, Literal, Permission};
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub(crate) struct DefineFunctionStatement {
 	pub kind: DefineKind,
-	pub name: String,
+	pub name: Strand,
 	pub args: Vec<(String, Kind)>,
 	pub block: Block,
 	pub comment: Expr,
@@ -25,7 +26,7 @@ impl ToSql for DefineFunctionStatement {
 			DefineKind::IfNotExists => write_sql!(f, fmt, " IF NOT EXISTS"),
 		}
 		write_sql!(f, fmt, " fn");
-		for s in self.name.split("::") {
+		for s in self.name.as_str().split("::") {
 			write_sql!(f, fmt, "::");
 			EscapeKwFreeIdent(s).fmt_sql(f, fmt);
 		}

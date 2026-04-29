@@ -1,4 +1,5 @@
 use reblessive::Stk;
+use surrealdb_strand::Strand;
 
 use super::basic::NumberToken;
 use super::mac::{expected, unexpected};
@@ -32,7 +33,7 @@ impl Parser<'_> {
 				// When using `SELECT VALUE ... AS ...`, only parse an alias if it is a valid
 				// identifier. It does not make sense to alias as a multi-part idiom because the
 				// alias will be not be projected.
-				let ident = self.parse_ident()?;
+				let ident = self.parse_ident_str()?.into();
 				Some(Idiom(vec![Part::Field(ident)]))
 			} else {
 				None
@@ -234,7 +235,7 @@ impl Parser<'_> {
 				};
 				Part::Graph(lookup)
 			}
-			_ => Part::Field(self.parse_ident()?),
+			_ => Part::Field(self.parse_ident_str()?.into()),
 		};
 		let start = vec![start];
 		self.parse_remaining_idiom(stk, start).await
@@ -260,7 +261,7 @@ impl Parser<'_> {
 				stk.run(|ctx| self.parse_curly_part(ctx)).await?
 			}
 			_ => {
-				let ident = self.parse_ident()?;
+				let ident = self.parse_ident_str()?.into();
 				if self.eat(t!("(")) {
 					self.parse_function_part(stk, ident).await?
 				} else {
@@ -279,7 +280,7 @@ impl Parser<'_> {
 				Part::All
 			}
 			_ => {
-				let ident = self.parse_ident()?;
+				let ident = self.parse_ident_str()?.into();
 				Part::Field(ident)
 			}
 		};
@@ -289,7 +290,7 @@ impl Parser<'_> {
 	pub(super) async fn parse_function_part(
 		&mut self,
 		stk: &mut Stk,
-		name: String,
+		name: Strand,
 	) -> ParseResult<Part> {
 		let args = self.parse_function_args(stk).await?;
 		Ok(Part::Method(name, args))
@@ -311,7 +312,7 @@ impl Parser<'_> {
 				break;
 			}
 
-			let field = self.parse_ident()?;
+			let field: Strand = self.parse_ident_str()?.into();
 			let part = match self.peek_kind() {
 				t!(":") => {
 					self.pop_peek();
@@ -381,12 +382,12 @@ impl Parser<'_> {
 		stk: &mut Stk,
 	) -> ParseResult<Option<RecurseInstruction>> {
 		let instruction = if self.eat(t!("+")) {
-			let kind = self.parse_ident()?;
+			let kind = self.parse_ident()?.into_string();
 			if kind.eq_ignore_ascii_case("path") {
 				let mut inclusive = false;
 				loop {
 					if self.eat(t!("+")) {
-						let kind = self.parse_ident()?;
+						let kind = self.parse_ident()?.into_string();
 						if kind.eq_ignore_ascii_case("inclusive") {
 							inclusive = true
 						} else {
@@ -403,7 +404,7 @@ impl Parser<'_> {
 				let mut inclusive = false;
 				loop {
 					if self.eat(t!("+")) {
-						let kind = self.parse_ident()?;
+						let kind = self.parse_ident()?.into_string();
 						if kind.eq_ignore_ascii_case("inclusive") {
 							inclusive = true
 						} else {
@@ -431,7 +432,7 @@ impl Parser<'_> {
 				let mut inclusive = false;
 				loop {
 					if self.eat(t!("+")) {
-						let kind = self.parse_ident()?;
+						let kind = self.parse_ident()?.into_string();
 						if kind.eq_ignore_ascii_case("inclusive") {
 							inclusive = true
 						} else {
@@ -509,7 +510,7 @@ impl Parser<'_> {
 	/// restrictive. Flatten, graphs, conditions and indexing by param is not
 	/// allowed.
 	pub(super) fn parse_basic_idiom(&mut self) -> ParseResult<Idiom> {
-		let start = self.parse_ident()?;
+		let start: Strand = self.parse_ident_str()?.into();
 		let mut parts = vec![Part::Field(start)];
 		loop {
 			let token = self.peek();
@@ -568,7 +569,7 @@ impl Parser<'_> {
 	/// Only field, all and number indexing is allowed. Flatten is also allowed
 	/// but only at the end.
 	pub(super) fn parse_local_idiom(&mut self) -> ParseResult<Idiom> {
-		let start = self.parse_ident()?;
+		let start: Strand = self.parse_ident_str()?.into();
 		let mut parts = vec![Part::Field(start)];
 		loop {
 			let token = self.peek();
@@ -864,7 +865,7 @@ mod tests {
 
 	/// creates a field part
 	fn f(s: &str) -> Part {
-		Part::Field(s.to_owned())
+		Part::Field(s.into())
 	}
 
 	/// creates a field part
@@ -1002,14 +1003,14 @@ mod tests {
 			out,
 			Expr::Idiom(Idiom(vec![
 				Part::Start(Expr::Literal(Literal::RecordId(RecordIdLit {
-					table: "person".to_owned(),
-					key: RecordIdKeyLit::String("test".to_owned())
+					table: "person".into(),
+					key: RecordIdKeyLit::String("test".into())
 				}))),
 				f("friend"),
 				Part::Graph(Lookup {
 					kind: LookupKind::Graph(Dir::Out),
 					what: vec![LookupSubject::Table {
-						table: "like".to_owned(),
+						table: "like".into(),
 						referencing_field: None
 					}],
 					..Default::default()
@@ -1017,7 +1018,7 @@ mod tests {
 				Part::Graph(Lookup {
 					kind: LookupKind::Graph(Dir::Out),
 					what: vec![LookupSubject::Table {
-						table: "person".to_owned(),
+						table: "person".into(),
 						referencing_field: None
 					}],
 					..Default::default()
@@ -1154,7 +1155,7 @@ mod tests {
 			out,
 			Expr::Idiom(Idiom(vec![
 				Part::Start(Expr::Literal(Literal::RecordId(RecordIdLit {
-					table: "test".to_owned(),
+					table: "test".into(),
 					key: RecordIdKeyLit::Number(1),
 				}))),
 				f("foo"),
@@ -1170,10 +1171,10 @@ mod tests {
 			out,
 			Expr::Idiom(Idiom(vec![
 				Part::Start(Expr::Literal(Literal::RecordId(RecordIdLit {
-					table: "test".to_owned(),
+					table: "test".into(),
 					key: RecordIdKeyLit::Number(1),
 				}))),
-				Part::Value(Expr::Literal(Literal::String("foo".to_owned()))),
+				Part::Value(Expr::Literal(Literal::String("foo".into()))),
 			]))
 		);
 	}
@@ -1186,7 +1187,7 @@ mod tests {
 			out,
 			Expr::Idiom(Idiom(vec![
 				Part::Start(Expr::Literal(Literal::RecordId(RecordIdLit {
-					table: "test".to_owned(),
+					table: "test".into(),
 					key: RecordIdKeyLit::Number(1),
 				}))),
 				Part::All

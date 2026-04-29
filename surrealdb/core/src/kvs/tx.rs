@@ -1174,13 +1174,13 @@ impl DatabaseProvider for Transaction {
 				let db_def = DatabaseDefinition {
 					namespace_id: ns_def.namespace_id,
 					database_id: self.get_next_db_id(ctx, ns_def.namespace_id).await?,
-					name: db.to_string(),
+					name: db.into(),
 					comment: None,
 					changefeed: None,
 					strict: false,
 				};
 
-				return self.put_db(&ns_def.name, db_def).await;
+				return self.put_db(ns_def.name.as_str(), db_def).await;
 			}
 		}
 	}
@@ -2284,7 +2284,7 @@ impl TableProvider for Transaction {
 
 		let name_lookup_key =
 			crate::key::table::ix::IndexNameLookupKey::new(ns, db, tb, ix.index_id);
-		self.set(&name_lookup_key, &ix.name).await?;
+		self.set(&name_lookup_key, &ix.name.to_string()).await?;
 
 		// Invalidate the cached list of all indexes for this table
 		let list_key = cache::tx::Lookup::Ixs(ns, db, tb.as_ref());

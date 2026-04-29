@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql};
 
 use super::evaluate_physical_path;
@@ -21,17 +22,17 @@ pub struct DestructurePart {
 #[derive(Debug, Clone)]
 pub enum DestructureField {
 	/// Include all fields from a nested object.
-	All(String),
+	All(Strand),
 	/// Include a single field by name.
-	Field(String),
+	Field(Strand),
 	/// Include a field with an aliased path.
 	Aliased {
-		field: String,
+		field: Strand,
 		path: Vec<Arc<dyn PhysicalExpr>>,
 	},
 	/// Nested destructure on a field.
 	Nested {
-		field: String,
+		field: Strand,
 		parts: Vec<DestructureField>,
 	},
 }
@@ -204,7 +205,7 @@ async fn evaluate_destructure(
 				}
 			}
 
-			Ok(Value::Object(crate::val::Object(result)))
+			Ok(Value::Object(crate::val::Object::from(result)))
 		}
 		Value::RecordId(rid) => {
 			let fetched = if ctx.skip_fetch_perms {

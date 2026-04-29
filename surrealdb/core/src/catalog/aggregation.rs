@@ -45,6 +45,7 @@ use std::mem;
 use ahash::HashMap;
 use anyhow::{Result, bail, ensure};
 use revision::revisioned;
+use surrealdb_strand::Strand;
 use surrealdb_types::ToSql;
 
 use crate::err::Error;
@@ -222,20 +223,27 @@ pub fn write_group_field_name(s: &mut String, idx: usize) {
 	write!(s, "_g{}", idx).expect("writing into a string cannot fail");
 }
 
+/// Format `{prefix}{idx}` directly into an inline `Strand`, bypassing the intermediate heap
+/// `String` that `Strand::from(format!(...))` would otherwise produce.
+///
+/// The public `aggregate_field_name` / `group_field_name` helpers below produce keys of the form
+/// `_a{idx}` and `_g{idx}`. Even `usize::MAX` formats to 20 decimal digits on 64-bit, so the
+/// 2-byte prefix + digits always fit inside [`INLINE_CAP`]. The expectation below is therefore
+/// unreachable in practice; it exists purely as a safety net so the function stays total.
+fn format_indexed_strand(prefix: &str, idx: usize) -> Strand {
+	Strand::from_display(format_args!("{prefix}{idx}"))
+}
+
 /// Returns the name of aggregate n used within the fields expression to calculate the result for
-/// the aggregate analysis
-pub fn aggregate_field_name(idx: usize) -> String {
-	let mut res = String::new();
-	write_aggregate_field_name(&mut res, idx);
-	res
+/// the aggregate analysis.
+pub fn aggregate_field_name(idx: usize) -> Strand {
+	format_indexed_strand("_a", idx)
 }
 
 /// Returns the name of group expression n used within the fields expression to calculate the result
 /// for the aggregate analysis.
-pub fn group_field_name(idx: usize) -> String {
-	let mut res = String::new();
-	write_group_field_name(&mut res, idx);
-	res
+pub fn group_field_name(idx: usize) -> Strand {
+	format_indexed_strand("_g", idx)
 }
 
 /// Updates the aggregation states from the results in the arguments array.

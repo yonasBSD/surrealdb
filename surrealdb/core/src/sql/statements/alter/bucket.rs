@@ -1,3 +1,4 @@
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use super::AlterKind;
@@ -8,7 +9,7 @@ use crate::sql::Permission;
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 /// AST node for `ALTER BUCKET`.
 pub struct AlterBucketStatement {
-	pub name: String,
+	pub name: Strand,
 	pub if_exists: bool,
 	pub backend: AlterKind<String>,
 	pub permissions: Option<Permission>,
@@ -22,7 +23,7 @@ impl ToSql for AlterBucketStatement {
 		if self.if_exists {
 			write_sql!(f, fmt, " IF EXISTS");
 		}
-		write_sql!(f, fmt, " {}", EscapeKwFreeIdent(&self.name));
+		write_sql!(f, fmt, " {}", EscapeKwFreeIdent(self.name.as_str()));
 
 		match self.readonly {
 			AlterKind::Set(_) => write_sql!(f, fmt, " READONLY"),

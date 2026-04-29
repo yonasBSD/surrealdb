@@ -307,7 +307,7 @@ pub fn resolve_order_by_alias(order_idiom: &Idiom, fields: &Fields) -> Option<(E
 				&& let Some(Part::Field(order_name)) = order_idiom.first()
 				&& alias_name == order_name
 			{
-				return Some((selector.expr.clone(), alias_name.clone()));
+				return Some((selector.expr.clone(), alias_name.as_str().to_owned()));
 			}
 			// Unaliased single-part field match
 			if order_idiom.len() == 1
@@ -317,7 +317,7 @@ pub fn resolve_order_by_alias(order_idiom: &Idiom, fields: &Fields) -> Option<(E
 				&& let Some(Part::Field(expr_name)) = expr_idiom.first()
 				&& name == expr_name
 			{
-				return Some((selector.expr.clone(), name.clone()));
+				return Some((selector.expr.clone(), name.as_str().to_owned()));
 			}
 			None
 		}
@@ -339,7 +339,7 @@ pub fn resolve_order_by_alias(order_idiom: &Idiom, fields: &Fields) -> Option<(E
 						&& let Some(Part::Field(name)) = expr_idiom.first()
 						&& name.as_str() == order_name.as_str()
 					{
-						return Some((selector.expr.clone(), order_name.clone()));
+						return Some((selector.expr.clone(), order_name.as_str().to_owned()));
 					}
 				}
 			}
@@ -353,7 +353,7 @@ pub(crate) fn idiom_to_flat_name(idiom: &Idiom) -> String {
 	if idiom.len() == 1
 		&& let Some(Part::Field(name)) = idiom.first()
 	{
-		return name.clone();
+		return name.as_str().to_owned();
 	}
 	idiom.to_sql()
 }

@@ -2,6 +2,7 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use crate::exec::physical_expr::{EvalContext, PhysicalExpr};
@@ -22,11 +23,11 @@ use crate::val::{Array, Object, RecordId, RecordIdKey, RecordIdKeyRange, TableNa
 #[derive(Debug)]
 pub enum PhysicalRecordIdKey {
 	Number(i64),
-	String(String),
+	String(Strand),
 	Uuid(Uuid),
 	Generate(RecordIdKeyGen),
 	Array(Vec<Arc<dyn PhysicalExpr>>),
-	Object(Vec<(String, Arc<dyn PhysicalExpr>)>),
+	Object(Vec<(Strand, Arc<dyn PhysicalExpr>)>),
 	Range {
 		start: Bound<Box<PhysicalRecordIdKey>>,
 		end: Bound<Box<PhysicalRecordIdKey>>,
@@ -209,7 +210,7 @@ impl ToSql for PhysicalRecordIdKey {
 	fn fmt_sql(&self, f: &mut String, fmt: SqlFormat) {
 		match self {
 			PhysicalRecordIdKey::Number(v) => write_sql!(f, fmt, "{v}"),
-			PhysicalRecordIdKey::String(v) => EscapeRidKey(v).fmt_sql(f, fmt),
+			PhysicalRecordIdKey::String(v) => EscapeRidKey(v.as_str()).fmt_sql(f, fmt),
 			PhysicalRecordIdKey::Uuid(v) => v.fmt_sql(f, fmt),
 			PhysicalRecordIdKey::Generate(v) => match v {
 				RecordIdKeyGen::Rand => f.push_str("rand()"),
@@ -232,7 +233,7 @@ impl ToSql for PhysicalRecordIdKey {
 					if i > 0 {
 						f.push_str(", ");
 					}
-					write_sql!(f, fmt, "{}: {}", key, expr);
+					write_sql!(f, fmt, "{}: {}", key.as_str(), expr);
 				}
 				f.push_str(" }");
 			}

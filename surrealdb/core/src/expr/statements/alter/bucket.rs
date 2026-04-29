@@ -1,6 +1,7 @@
 use std::ops::Deref;
 
 use anyhow::Result;
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql};
 
 use super::AlterKind;
@@ -15,7 +16,7 @@ use crate::val::Value;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub(crate) struct AlterBucketStatement {
-	pub name: String,
+	pub name: Strand,
 	pub if_exists: bool,
 	pub backend: AlterKind<String>,
 	pub permissions: Option<Permission>,
@@ -38,14 +39,14 @@ impl AlterBucketStatement {
 					return Ok(Value::None);
 				}
 				return Err(Error::BuNotFound {
-					name: self.name.clone(),
+					name: self.name.to_string(),
 				}
 				.into());
 			}
 		};
 
 		match self.backend {
-			AlterKind::Set(ref v) => bu.backend = Some(v.clone()),
+			AlterKind::Set(ref v) => bu.backend = Some(v.into()),
 			AlterKind::Drop => bu.backend = None,
 			AlterKind::None => {}
 		}

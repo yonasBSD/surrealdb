@@ -102,7 +102,7 @@ impl ExecOperator for FullTextScan {
 
 	fn attrs(&self) -> Vec<(String, String)> {
 		vec![
-			("index".to_string(), self.index_ref.name.clone()),
+			("index".to_string(), self.index_ref.name.to_string()),
 			("query".to_string(), self.query.clone()),
 		]
 	}

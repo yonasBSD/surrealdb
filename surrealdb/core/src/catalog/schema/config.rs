@@ -1,5 +1,6 @@
 use anyhow::Result;
 use revision::revisioned;
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use crate::catalog::ApiConfigDefinition;
@@ -136,8 +137,8 @@ pub enum GraphQLFunctionsConfig {
 	#[default]
 	None,
 	Auto,
-	Include(Vec<String>),
-	Exclude(Vec<String>),
+	Include(Vec<Strand>),
+	Exclude(Vec<Strand>),
 }
 
 impl InfoStructure for GraphQLFunctionsConfig {
@@ -194,8 +195,8 @@ impl ToSql for DefaultConfig {
 impl InfoStructure for DefaultConfig {
 	fn structure(self) -> Value {
 		Value::from(map!(
-			"namespace", if let Some(x) = self.namespace => Value::String(x),
-			"database", if let Some(x) = self.database => Value::String(x),
+			"namespace", if let Some(x) = self.namespace => Value::String(x.into()),
+			"database", if let Some(x) = self.database => Value::String(x.into()),
 		))
 	}
 }

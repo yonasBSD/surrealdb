@@ -57,7 +57,7 @@ impl Parser<'_> {
 					let peek = self.peek();
 					match peek.kind {
 						TokenKind::Identifier => {
-							let name = self.parse_ident()?;
+							let name = self.parse_ident()?.into_string();
 							match name.as_str() {
 								"QUERY_TIMEOUT" => {
 									res.query_timeout = AlterKind::Drop;
@@ -76,7 +76,7 @@ impl Parser<'_> {
 				}
 				TokenKind::Identifier => {
 					let peek = self.peek();
-					let name = self.parse_ident()?;
+					let name = self.parse_ident()?.into_string();
 					match name.as_str() {
 						"QUERY_TIMEOUT" => {
 							let duration = stk.run(|ctx| self.parse_expr_field(ctx)).await?;
@@ -123,7 +123,7 @@ impl Parser<'_> {
 		} else {
 			false
 		};
-		let name = self.parse_ident()?;
+		let name = self.parse_ident()?.into();
 		let mut res = AlterTableStatement {
 			name,
 			if_exists,
@@ -212,7 +212,7 @@ impl Parser<'_> {
 		let name = self.parse_ident()?;
 		expected!(self, t!("ON"));
 		self.eat(t!("TABLE"));
-		let what = self.parse_ident()?;
+		let what: crate::val::TableName = self.parse_ident_str()?.into();
 		let mut res = AlterEventStatement {
 			name,
 			what,
@@ -311,7 +311,7 @@ impl Parser<'_> {
 		let name = self.parse_ident()?;
 		expected!(self, t!("ON"));
 		self.eat(t!("TABLE"));
-		let table = self.parse_ident()?;
+		let table: crate::val::TableName = self.parse_ident_str()?.into();
 
 		let mut res = AlterIndexStatement {
 			name,
@@ -367,7 +367,7 @@ impl Parser<'_> {
 		let name = self.parse_local_idiom()?;
 		expected!(self, t!("ON"));
 		self.eat(t!("TABLE"));
-		let what = self.parse_ident()?;
+		let what: crate::val::TableName = self.parse_ident_str()?.into();
 		let mut res = AlterFieldStatement {
 			name,
 			what,
@@ -481,7 +481,7 @@ impl Parser<'_> {
 		} else {
 			false
 		};
-		let name = self.next_token_value::<crate::sql::Param>()?.into_string();
+		let name = self.next_token_value::<crate::sql::Param>()?.into_strand();
 		let mut res = AlterParamStatement {
 			name,
 			if_exists,
@@ -640,9 +640,9 @@ impl Parser<'_> {
 					self.pop_peek();
 					expected!(self, t!("fn"));
 					expected!(self, t!("::"));
-					let mut ident = self.parse_ident()?;
+					let mut ident = self.parse_ident()?.into_string();
 					while self.eat(t!("::")) {
-						let value = self.parse_ident()?;
+						let value = self.parse_ident()?.into_string();
 						ident.push_str("::");
 						ident.push_str(&value);
 					}
@@ -842,9 +842,9 @@ impl Parser<'_> {
 				}
 				t!("ROLES") => {
 					self.pop_peek();
-					let mut roles = vec![self.parse_ident()?];
+					let mut roles = vec![self.parse_ident()?.into_string()];
 					while self.eat(t!(",")) {
-						roles.push(self.parse_ident()?);
+						roles.push(self.parse_ident()?.into_string());
 					}
 					res.roles = AlterKind::Set(roles);
 				}
@@ -1161,15 +1161,15 @@ impl Parser<'_> {
 			t!("mod") => {
 				self.pop_peek();
 				expected_whitespace!(self, t!("::"));
-				let name = self.parse_ident()?;
+				let name = self.parse_ident()?.into_string();
 				crate::sql::ModuleName::Module(name)
 			}
 			t!("silo") => {
 				self.pop_peek();
 				expected_whitespace!(self, t!("::"));
-				let organisation = self.parse_ident()?;
+				let organisation = self.parse_ident()?.into_string();
 				expected_whitespace!(self, t!("::"));
-				let package = self.parse_ident()?;
+				let package = self.parse_ident()?.into_string();
 				expected_whitespace!(self, t!("<"));
 				let major = self.parse_version_digits()?;
 				expected_whitespace!(self, t!("."));

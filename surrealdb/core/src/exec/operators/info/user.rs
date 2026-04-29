@@ -155,7 +155,7 @@ async fn execute_user_info(
 				None => {
 					return Err(Error::UserNsNotFound {
 						name: user,
-						ns: ns.name.clone(),
+						ns: ns.name.to_string(),
 					}
 					.into());
 				}

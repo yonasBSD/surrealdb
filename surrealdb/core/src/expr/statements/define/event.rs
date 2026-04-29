@@ -76,7 +76,7 @@ impl DefineEventStatement {
 		txn.set(
 			&key,
 			&EventDefinition {
-				name: name.clone(),
+				name: name.clone().into(),
 				target_table: target_table.clone(),
 				when: self.when.clone(),
 				then: self.then.clone(),

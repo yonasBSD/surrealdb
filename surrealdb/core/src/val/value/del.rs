@@ -43,10 +43,10 @@ impl Value {
 					},
 					Part::Field(f) => match path.len() {
 						1 => {
-							v.remove(&**f);
+							v.remove(f);
 							Ok(())
 						}
-						_ => match v.get_mut(&**f) {
+						_ => match v.get_mut(f) {
 							Some(v) if !v.is_nullish() => {
 								stk.run(|stk| v.del(stk, ctx, opt, path.next())).await
 							}

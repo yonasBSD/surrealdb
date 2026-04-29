@@ -84,7 +84,7 @@ pub async fn expr_to_ident(
 	if let Expr::Idiom(Idiom(x)) = expr
 		&& let [Part::Field(x)] = x.as_slice()
 	{
-		return Ok(x.clone());
+		return Ok(x.as_str().to_owned());
 	}
 	// Handle table name expressions (when parsed with table_as_field = false)
 	if let Expr::Table(name) = expr {
@@ -119,7 +119,7 @@ pub async fn expr_to_optional_ident(
 	if let Expr::Idiom(Idiom(x)) = expr
 		&& let [Part::Field(x)] = x.as_slice()
 	{
-		return Ok(Some(x.clone()));
+		return Ok(Some(x.as_str().to_owned()));
 	}
 	// Handle table name expressions (when parsed with table_as_field = false)
 	if let Expr::Table(name) = expr {

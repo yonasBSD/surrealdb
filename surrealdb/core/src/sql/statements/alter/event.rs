@@ -1,16 +1,18 @@
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use super::AlterKind;
 use crate::catalog::EventKind;
 use crate::fmt::{CoverStmts, EscapeKwFreeIdent, Fmt, QuoteStr};
 use crate::sql::Expr;
+use crate::val::TableName;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 /// AST node for `ALTER EVENT`.
 pub struct AlterEventStatement {
-	pub name: String,
-	pub what: String,
+	pub name: Strand,
+	pub what: TableName,
 	pub if_exists: bool,
 	pub when: AlterKind<Expr>,
 	pub then: AlterKind<Vec<Expr>>,
@@ -28,8 +30,8 @@ impl ToSql for AlterEventStatement {
 			f,
 			fmt,
 			" {} ON {}",
-			EscapeKwFreeIdent(&self.name),
-			EscapeKwFreeIdent(&self.what)
+			EscapeKwFreeIdent(self.name.as_str()),
+			EscapeKwFreeIdent(self.what.as_str())
 		);
 
 		match self.kind {
@@ -72,7 +74,7 @@ impl From<AlterEventStatement> for crate::expr::statements::alter::AlterEventSta
 	fn from(v: AlterEventStatement) -> Self {
 		crate::expr::statements::alter::AlterEventStatement {
 			name: v.name,
-			what: v.what.into(),
+			what: v.what,
 			if_exists: v.if_exists,
 			when: v.when.into(),
 			then: match v.then {
@@ -92,7 +94,7 @@ impl From<crate::expr::statements::alter::AlterEventStatement> for AlterEventSta
 	fn from(v: crate::expr::statements::alter::AlterEventStatement) -> Self {
 		AlterEventStatement {
 			name: v.name,
-			what: v.what.into_string(),
+			what: v.what,
 			if_exists: v.if_exists,
 			when: v.when.into(),
 			then: match v.then {

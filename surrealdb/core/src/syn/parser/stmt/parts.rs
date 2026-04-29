@@ -1,6 +1,7 @@
 //! Contains parsing code for smaller common parts of statements.
 
 use reblessive::Stk;
+use surrealdb_strand::Strand;
 use surrealdb_types::ToSql;
 
 use crate::sql::changefeed::ChangeFeed;
@@ -513,9 +514,9 @@ impl Parser<'_> {
 		let fields = self.parse_fields(stk).await?;
 		let fields_span = before_fields.covers(self.recent_span());
 		expected!(self, t!("FROM"));
-		let mut from = vec![self.parse_ident()?];
+		let mut from: Vec<crate::val::TableName> = vec![self.parse_ident_str()?.into()];
 		while self.eat(t!(",")) {
-			from.push(self.parse_ident()?);
+			from.push(self.parse_ident_str()?.into());
 		}
 
 		let cond = self.try_parse_condition(stk).await?;
@@ -567,17 +568,17 @@ impl Parser<'_> {
 		}
 	}
 
-	pub fn parse_custom_function_name(&mut self) -> ParseResult<String> {
+	pub fn parse_custom_function_name(&mut self) -> ParseResult<Strand> {
 		expected!(self, t!("fn"));
 		expected!(self, t!("::"));
-		let mut name = self.parse_ident()?;
+		let mut name = self.parse_ident()?.into_string();
 		while self.eat(t!("::")) {
-			let part = self.parse_ident()?;
+			let part = self.parse_ident()?.into_string();
 			name.push_str("::");
-			name.push_str(part.as_str());
+			name.push_str(&part);
 		}
 		// Safety: Parser guarentees no null bytes.
-		Ok(name)
+		Ok(name.into())
 	}
 	pub(super) fn try_parse_explain(&mut self) -> ParseResult<Option<Explain>> {
 		Ok(self.eat(t!("EXPLAIN")).then(|| Explain(self.eat(t!("FULL")))))
@@ -595,9 +596,9 @@ impl Parser<'_> {
 				With::NoIndex
 			}
 			t!("INDEX") => {
-				let mut index = vec![self.parse_ident()?];
+				let mut index = vec![self.parse_ident()?.into_string()];
 				while self.eat(t!(",")) {
-					index.push(self.parse_ident()?);
+					index.push(self.parse_ident()?.into_string());
 				}
 				With::Index(index)
 			}

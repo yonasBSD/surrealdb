@@ -2,6 +2,7 @@ use std::ops::Deref;
 use std::time::Duration;
 
 use anyhow::Result;
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql};
 
 use super::AlterKind;
@@ -16,7 +17,7 @@ use crate::val::Value;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub(crate) struct AlterAccessStatement {
-	pub name: String,
+	pub name: Strand,
 	pub base: Base,
 	pub if_exists: bool,
 	pub authenticate: AlterKind<Expr>,
@@ -75,7 +76,7 @@ impl AlterAccessStatement {
 					return Ok(Value::None);
 				}
 				return Err(Error::AccessRootNotFound {
-					ac: self.name.clone(),
+					ac: self.name.to_string(),
 				}
 				.into());
 			}
@@ -97,7 +98,7 @@ impl AlterAccessStatement {
 					return Ok(Value::None);
 				}
 				return Err(Error::AccessNsNotFound {
-					ac: self.name.clone(),
+					ac: self.name.to_string(),
 					ns: opt.ns()?.to_string(),
 				}
 				.into());
@@ -121,7 +122,7 @@ impl AlterAccessStatement {
 				}
 				let (ns_name, db_name) = opt.ns_db()?;
 				return Err(Error::AccessDbNotFound {
-					ac: self.name.clone(),
+					ac: self.name.to_string(),
 					ns: ns_name.to_string(),
 					db: db_name.to_string(),
 				}

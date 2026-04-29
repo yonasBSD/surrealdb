@@ -66,6 +66,7 @@ features = ["kv-mem", "kv-rocksdb", "http", "scripting", "graphql"]
 targets = []
 
 [dependencies]
+surrealdb-strand.workspace = true
 
 # External surreal crates
 surrealmx = { workspace = true, optional = true }

@@ -5,7 +5,7 @@ use crate::err::Error;
 use crate::expr::Operation;
 use crate::expr::operation::PatchError;
 use crate::expr::part::Part;
-use crate::val::Value;
+use crate::val::{Strand, Value};
 
 impl Value {
 	pub(crate) fn patch(&mut self, ops: Value) -> Result<()> {
@@ -16,10 +16,10 @@ impl Value {
 			.map_err(Error::InvalidPatch)
 			.map_err(anyhow::Error::new)?
 		{
-			let to_parts = |path: Vec<String>| {
+			let to_parts = |path: Vec<Strand>| {
 				path.into_iter()
 					.map(|p| {
-						if let Ok(i) = p.parse::<i64>() {
+						if let Ok(i) = p.as_str().parse::<i64>() {
 							Part::index_int(i)
 						} else {
 							Part::Field(p)
@@ -36,7 +36,7 @@ impl Value {
 				} => {
 					// Split the last path part from the path
 					if let Some((last, left)) = path.split_last() {
-						if let Ok(x) = last.parse::<usize>() {
+						if let Ok(x) = last.as_str().parse::<usize>() {
 							let path =
 								left.iter().map(|x| Part::Field(x.clone())).collect::<Vec<_>>();
 
@@ -56,7 +56,7 @@ impl Value {
 							continue;
 						}
 
-						if last == "-" {
+						if last.as_str() == "-" {
 							let path =
 								left.iter().map(|x| Part::Field(x.clone())).collect::<Vec<_>>();
 
@@ -103,7 +103,7 @@ impl Value {
 						&& let Value::String(v) = this.pick(&path)
 					{
 						let dmp = dmp::new();
-						let pch = dmp.patch_from_text(p).map_err(|e| {
+						let pch = dmp.patch_from_text(p.into_string()).map_err(|e| {
 							Error::InvalidPatch(PatchError {
 								message: format!("{e:?}"),
 							})

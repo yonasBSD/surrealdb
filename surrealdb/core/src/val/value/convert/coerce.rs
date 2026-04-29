@@ -10,7 +10,7 @@ use crate::expr::Kind;
 use crate::expr::kind::{GeometryKind, HasKind, KindLiteral};
 use crate::val::{
 	Array, Bytes, Closure, Datetime, Duration, File, Geometry, Null, Number, Object, Range,
-	RecordId, Regex, Set, SqlNone, TableName, Uuid, Value,
+	RecordId, Regex, Set, SqlNone, Strand, TableName, Uuid, Value,
 };
 
 #[derive(Clone, Debug)]
@@ -351,7 +351,7 @@ impl<T: Coerce + HasKind> Coerce for BTreeMap<String, T> {
 			// TODO: Improve error message here.
 			// object<T> kinds don't actually exist in surql.
 			res.insert(
-				k,
+				k.into_string(),
 				v.coerce_to::<T>()
 					.with_element_of(|| format!("object<{}>", <T as HasKind>::kind().to_sql()))?,
 			);
@@ -383,7 +383,7 @@ impl<T: Coerce + HasKind, S: BuildHasher + Default> Coerce for HashMap<String, T
 			// TODO: Improve error message here.
 			// object<T> kinds don't actually exist in surql.
 			res.insert(
-				k,
+				k.into_string(),
 				v.coerce_to::<T>()
 					.with_element_of(|| format!("object<{}>", <T as HasKind>::kind().to_sql()))?,
 			);
@@ -437,10 +437,28 @@ impl_direct! {
 	Array => Array,
 	Set => Set,
 	RecordId => RecordId,
-	String => String,
+	String => Strand = String,
 	Geometry => Geometry,
 	Regex => Regex,
 	Table => TableName,
+}
+
+/// `String` coercion delegates to `Strand` and converts on success
+/// so existing `coerce_to::<String>()` call sites keep working.
+impl Coerce for String {
+	fn can_coerce(v: &Value) -> bool {
+		matches!(v, Value::String(_))
+	}
+
+	fn coerce(v: Value) -> Result<Self, CoerceError> {
+		match v {
+			Value::String(s) => Ok(s.into_string()),
+			v => Err(CoerceError::InvalidKind {
+				from: v,
+				into: Kind::of::<String>().to_sql(),
+			}),
+		}
+	}
 }
 
 // Coerce to runtime value implementations
@@ -697,7 +715,7 @@ impl Value {
 					return Ok(t);
 				}
 
-				Value::String(t.into_string())
+				Value::String(t.into())
 			}
 			x => x,
 		};
@@ -851,7 +869,7 @@ mod tests {
 	#[test]
 	fn test_coerce_to_table_generic() {
 		// Test coercing string to generic table type
-		let value = Value::String("users".to_string());
+		let value = Value::String("users".into());
 		let kind = Kind::Table(vec![]);
 		let result = value.coerce_to_kind(&kind);
 		assert!(result.is_ok());
@@ -863,7 +881,7 @@ mod tests {
 	#[test]
 	fn test_coerce_to_table_specific() {
 		// Coercion should fail for wrong table name (more strict than cast)
-		let value = Value::String("posts".to_string());
+		let value = Value::String("posts".into());
 		let kind = Kind::Table(vec!["users".into()]);
 		let result = value.coerce_to_kind(&kind);
 		// Coercion from string to specific table type should fail because

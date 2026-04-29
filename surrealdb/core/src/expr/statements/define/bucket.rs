@@ -57,7 +57,7 @@ impl DefineBucketStatement {
 				DefineKind::Default => {
 					if !opt.import {
 						bail!(Error::BuAlreadyExists {
-							value: bucket.name.clone(),
+							value: bucket.name.to_string(),
 						});
 					}
 				}
@@ -97,8 +97,8 @@ impl DefineBucketStatement {
 
 		let ap = BucketDefinition {
 			id: None,
-			name: name.clone(),
-			backend,
+			name: name.clone().into(),
+			backend: backend.map(|s| s.into()),
 			permissions: self.permissions.clone(),
 			readonly: self.readonly,
 			comment,

@@ -88,7 +88,7 @@ impl FieldDefinition {
 		DefineFieldStatement {
 			kind: sql::statements::define::DefineKind::Default,
 			name: Expr::Idiom(self.name.clone()).into(),
-			what: sql::Expr::Table(self.table.clone().into_string()),
+			what: sql::Expr::Table(self.table.clone()),
 			field_kind: self.field_kind.clone().map(|x| x.into()),
 			flexible: self.flexible,
 			readonly: self.readonly,
@@ -113,7 +113,7 @@ impl FieldDefinition {
 			comment: self
 				.comment
 				.clone()
-				.map(|x| sql::Expr::Literal(sql::Literal::String(x)))
+				.map(|x| sql::Expr::Literal(sql::Literal::String(x.into())))
 				.unwrap_or(sql::Expr::Literal(sql::Literal::None)),
 			reference: self.reference.clone().map(|x| x.into()),
 		}
@@ -123,23 +123,23 @@ impl FieldDefinition {
 impl InfoStructure for FieldDefinition {
 	fn structure(self) -> Value {
 		Value::from(map! {
-			"name".to_string() => self.name.structure(),
-			"table".to_string() => Value::String(self.table.into_string()),
-			"kind".to_string(), if let Some(v) = self.field_kind => v.structure(),
-			"flexible".to_string(), if self.flexible => true.into(),
-			"value".to_string(), if let Some(v) = self.value => v.structure(),
-			"assert".to_string(), if let Some(v) = self.assert => v.structure(),
-			"computed".to_string(), if let Some(v) = self.computed => v.structure(),
-			"default_always".to_string(), if matches!(&self.default, DefineDefault::Always(_) | DefineDefault::Set(_)) => Value::Bool(matches!(self.default,DefineDefault::Always(_))), // Only reported if DEFAULT is also enabled for this field
-			"default".to_string(), if let DefineDefault::Always(v) | DefineDefault::Set(v) = self.default => v.structure(),
-			"reference".to_string(), if let Some(v) = self.reference => v.structure(),
-			"readonly".to_string() => self.readonly.into(),
-			"permissions".to_string() => Value::from(map!{
-				"select".to_string() => self.select_permission.structure(),
-				"create".to_string() => self.create_permission.structure(),
-				"update".to_string() => self.update_permission.structure(),
+			"name" => self.name.structure(),
+			"table" => Value::String(self.table.into()),
+			"kind", if let Some(v) = self.field_kind => v.structure(),
+			"flexible", if self.flexible => true.into(),
+			"value", if let Some(v) = self.value => v.structure(),
+			"assert", if let Some(v) = self.assert => v.structure(),
+			"computed", if let Some(v) = self.computed => v.structure(),
+			"default_always", if matches!(&self.default, DefineDefault::Always(_) | DefineDefault::Set(_)) => Value::Bool(matches!(self.default,DefineDefault::Always(_))), // Only reported if DEFAULT is also enabled for this field
+			"default", if let DefineDefault::Always(v) | DefineDefault::Set(v) = self.default => v.structure(),
+			"reference", if let Some(v) = self.reference => v.structure(),
+			"readonly" => self.readonly.into(),
+			"permissions" => Value::from(map!{
+				"select" => self.select_permission.structure(),
+				"create" => self.create_permission.structure(),
+				"update" => self.update_permission.structure(),
 			}),
-			"comment".to_string(), if let Some(v) = self.comment => v.into(),
+			"comment", if let Some(v) = self.comment => v.into(),
 		})
 	}
 }

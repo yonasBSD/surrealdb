@@ -74,7 +74,7 @@ impl<'a> StreamingBucketOps<'a> {
 
 	/// Checks if the bucket allows writes.
 	fn require_writeable(&self) -> Result<()> {
-		ensure!(!self.bucket.readonly, Error::ReadonlyBucket(self.bucket.name.clone()));
+		ensure!(!self.bucket.readonly, Error::ReadonlyBucket(self.bucket.name.to_string()));
 		Ok(())
 	}
 
@@ -90,7 +90,7 @@ impl<'a> StreamingBucketOps<'a> {
 			ensure!(
 				!op.is_list(),
 				Error::BucketPermissions {
-					name: self.bucket.name.clone(),
+					name: self.bucket.name.to_string(),
 					op,
 				}
 			);
@@ -98,7 +98,7 @@ impl<'a> StreamingBucketOps<'a> {
 			match &self.bucket.permissions {
 				Permission::None => {
 					bail!(Error::BucketPermissions {
-						name: self.bucket.name.clone(),
+						name: self.bucket.name.to_string(),
 						op,
 					})
 				}
@@ -127,7 +127,7 @@ impl<'a> StreamingBucketOps<'a> {
 		self.store
 			.put(key, payload)
 			.await
-			.map_err(|e| Error::ObjectStoreFailure(self.bucket.name.clone(), e))?;
+			.map_err(|e| Error::ObjectStoreFailure(self.bucket.name.to_string(), e))?;
 
 		Ok(())
 	}
@@ -141,7 +141,7 @@ impl<'a> StreamingBucketOps<'a> {
 		self.store
 			.put_if_not_exists(key, payload)
 			.await
-			.map_err(|e| Error::ObjectStoreFailure(self.bucket.name.clone(), e))?;
+			.map_err(|e| Error::ObjectStoreFailure(self.bucket.name.to_string(), e))?;
 
 		Ok(())
 	}
@@ -154,7 +154,7 @@ impl<'a> StreamingBucketOps<'a> {
 			.store
 			.get(key)
 			.await
-			.map_err(|e| Error::ObjectStoreFailure(self.bucket.name.clone(), e))?
+			.map_err(|e| Error::ObjectStoreFailure(self.bucket.name.to_string(), e))?
 		{
 			Some(v) => v,
 			None => return Ok(None),
@@ -171,9 +171,9 @@ impl<'a> StreamingBucketOps<'a> {
 			.store
 			.head(key)
 			.await
-			.map_err(|e| Error::ObjectStoreFailure(self.bucket.name.clone(), e))?;
+			.map_err(|e| Error::ObjectStoreFailure(self.bucket.name.to_string(), e))?;
 
-		Ok(meta.map(|m| m.into_value(self.bucket.name.clone())))
+		Ok(meta.map(|m| m.into_value(self.bucket.name.to_string())))
 	}
 
 	/// Delete a file from the bucket.
@@ -184,7 +184,7 @@ impl<'a> StreamingBucketOps<'a> {
 		self.store
 			.delete(key)
 			.await
-			.map_err(|e| Error::ObjectStoreFailure(self.bucket.name.clone(), e))?;
+			.map_err(|e| Error::ObjectStoreFailure(self.bucket.name.to_string(), e))?;
 
 		Ok(())
 	}
@@ -197,7 +197,7 @@ impl<'a> StreamingBucketOps<'a> {
 		self.store
 			.copy(src, &dst)
 			.await
-			.map_err(|e| Error::ObjectStoreFailure(self.bucket.name.clone(), e))?;
+			.map_err(|e| Error::ObjectStoreFailure(self.bucket.name.to_string(), e))?;
 
 		Ok(())
 	}
@@ -210,7 +210,7 @@ impl<'a> StreamingBucketOps<'a> {
 		self.store
 			.copy_if_not_exists(src, &dst)
 			.await
-			.map_err(|e| Error::ObjectStoreFailure(self.bucket.name.clone(), e))?;
+			.map_err(|e| Error::ObjectStoreFailure(self.bucket.name.to_string(), e))?;
 
 		Ok(())
 	}
@@ -223,7 +223,7 @@ impl<'a> StreamingBucketOps<'a> {
 		self.store
 			.rename(src, &dst)
 			.await
-			.map_err(|e| Error::ObjectStoreFailure(self.bucket.name.clone(), e))?;
+			.map_err(|e| Error::ObjectStoreFailure(self.bucket.name.to_string(), e))?;
 
 		Ok(())
 	}
@@ -236,7 +236,7 @@ impl<'a> StreamingBucketOps<'a> {
 		self.store
 			.rename_if_not_exists(src, &dst)
 			.await
-			.map_err(|e| Error::ObjectStoreFailure(self.bucket.name.clone(), e))?;
+			.map_err(|e| Error::ObjectStoreFailure(self.bucket.name.to_string(), e))?;
 
 		Ok(())
 	}
@@ -248,7 +248,7 @@ impl<'a> StreamingBucketOps<'a> {
 		self.store
 			.exists(key)
 			.await
-			.map_err(|e| Error::ObjectStoreFailure(self.bucket.name.clone(), e))
+			.map_err(|e| Error::ObjectStoreFailure(self.bucket.name.to_string(), e))
 			.map_err(anyhow::Error::new)
 	}
 
@@ -260,9 +260,9 @@ impl<'a> StreamingBucketOps<'a> {
 			.store
 			.list(opts)
 			.await
-			.map_err(|e| Error::ObjectStoreFailure(self.bucket.name.clone(), e))?;
+			.map_err(|e| Error::ObjectStoreFailure(self.bucket.name.to_string(), e))?;
 
-		Ok(items.into_iter().map(|m| m.into_value(self.bucket.name.clone())).collect())
+		Ok(items.into_iter().map(|m| m.into_value(self.bucket.name.to_string())).collect())
 	}
 }
 
@@ -289,7 +289,7 @@ fn value_to_file(value: Value) -> Result<DestinationFile> {
 		}),
 		Value::String(s) => Ok(DestinationFile {
 			bucket: None,
-			key: s,
+			key: s.into_string(),
 		}),
 		_ => Err(anyhow::anyhow!("Invalid destination file value")),
 	}

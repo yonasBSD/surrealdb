@@ -1,5 +1,6 @@
 use anyhow::Result;
 use reblessive::tree::Stk;
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql};
 
 use crate::catalog::providers::TableProvider;
@@ -42,7 +43,7 @@ impl ToSql for RebuildStatement {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub(crate) struct RebuildIndexStatement {
-	pub name: String,
+	pub name: Strand,
 	pub table: TableName,
 	pub if_exists: bool,
 	pub concurrently: bool,
@@ -55,7 +56,7 @@ impl RebuildIndexStatement {
 		opt.is_allowed(Action::Edit, ResourceKind::Index, &Base::Db)?;
 		// Get the index definition
 		let (ns, db) = ctx.expect_ns_db_ids(opt).await?;
-		let res = ctx.tx().get_tb_index(ns, db, &self.table, &self.name, None).await?;
+		let res = ctx.tx().get_tb_index(ns, db, &self.table, self.name.as_str(), None).await?;
 		let ix = match res {
 			Some(x) => x,
 			None => {
@@ -63,7 +64,7 @@ impl RebuildIndexStatement {
 					return Ok(Value::None);
 				} else {
 					return Err(Error::IxNotFound {
-						name: self.name.clone(),
+						name: self.name.to_string(),
 					}
 					.into());
 				}

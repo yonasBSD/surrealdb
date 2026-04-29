@@ -1,3 +1,4 @@
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use crate::fmt::{CoverStmts, EscapeKwIdent};
@@ -7,7 +8,7 @@ use crate::sql::Expr;
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Default)]
 pub struct AlterSequenceStatement {
-	pub name: String,
+	pub name: Strand,
 	pub if_exists: bool,
 	pub timeout: Option<Expr>,
 }
@@ -18,7 +19,7 @@ impl ToSql for AlterSequenceStatement {
 		if self.if_exists {
 			write_sql!(f, fmt, " IF EXISTS");
 		}
-		write_sql!(f, fmt, " {}", EscapeKwIdent(&self.name, &["IF"]));
+		write_sql!(f, fmt, " {}", EscapeKwIdent(self.name.as_str(), &["IF"]));
 		if let Some(timeout) = &self.timeout {
 			write_sql!(f, fmt, " TIMEOUT {}", CoverStmts(timeout));
 		}

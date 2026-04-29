@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 use reblessive::tree::Stk;
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql};
 
 use super::DefineKind;
@@ -16,7 +17,7 @@ use crate::val::Value;
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub(crate) struct DefineFunctionStatement {
 	pub kind: DefineKind,
-	pub name: String,
+	pub name: Strand,
 	pub args: Vec<(String, Kind)>,
 	pub block: Block,
 	pub comment: Expr,
@@ -45,7 +46,7 @@ impl DefineFunctionStatement {
 				DefineKind::Default => {
 					if !opt.import {
 						bail!(Error::FcAlreadyExists {
-							name: self.name.clone(),
+							name: self.name.to_string(),
 						});
 					}
 				}

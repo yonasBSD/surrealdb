@@ -28,7 +28,7 @@ use crate::types::{
 /// utility function converting a `Value::String` into a `Expr::Table`
 fn value_to_table(value: PublicValue) -> Expr {
 	match value {
-		PublicValue::String(s) => Expr::Table(s),
+		PublicValue::String(s) => Expr::Table(crate::val::TableName::new(s)),
 		x => Expr::from_public_value(x),
 	}
 }
@@ -718,7 +718,7 @@ pub trait RpcProtocol {
 
 		// If value is a strand, handle it as if it was a table.
 		let what = match what {
-			PublicValue::String(x) => Expr::Table(x),
+			PublicValue::String(x) => Expr::Table(crate::val::TableName::new(x)),
 			x => Expr::from_public_value(x),
 		};
 
@@ -779,7 +779,7 @@ pub trait RpcProtocol {
 
 		// If value is a string, handle it as if it was a table.
 		let what = match what {
-			PublicValue::String(x) => Expr::Table(x),
+			PublicValue::String(x) => Expr::Table(crate::val::TableName::new(x)),
 			x => Expr::from_public_value(x),
 		};
 
@@ -837,8 +837,8 @@ pub trait RpcProtocol {
 
 		let into = match what {
 			PublicValue::Null | PublicValue::None => None,
-			PublicValue::Table(x) => Some(Expr::Table(x.into_string())),
-			PublicValue::String(x) => Some(Expr::Table(x)),
+			PublicValue::Table(x) => Some(Expr::Table(crate::val::TableName::new(x.into_string()))),
+			PublicValue::String(x) => Some(Expr::Table(crate::val::TableName::new(x))),
 			x => Some(Expr::from_public_value(x)),
 		};
 
@@ -882,8 +882,8 @@ pub trait RpcProtocol {
 
 		let table_name = match what {
 			PublicValue::Null | PublicValue::None => None,
-			PublicValue::Table(x) => Some(Expr::Table(x.into_string())),
-			PublicValue::String(x) => Some(Expr::Table(x)),
+			PublicValue::Table(x) => Some(Expr::Table(crate::val::TableName::new(x.into_string()))),
+			PublicValue::String(x) => Some(Expr::Table(crate::val::TableName::new(x))),
 			x => Some(Expr::from_public_value(x)),
 		};
 
@@ -1489,10 +1489,12 @@ pub trait RpcProtocol {
 			Some(&"ml") => {
 				let name = segments[1..].join("::");
 				Function::Model(Model {
-					name,
-					version: version.ok_or(invalid_params(
-						"Expected version to be set for model function".to_string(),
-					))?,
+					name: name.into(),
+					version: version
+						.ok_or(invalid_params(
+							"Expected version to be set for model function".to_string(),
+						))?
+						.into(),
 				})
 			}
 			_ => Function::Normal(name),

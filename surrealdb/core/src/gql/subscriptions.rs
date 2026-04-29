@@ -87,7 +87,7 @@ impl NotificationRouter {
 
 pub(crate) fn process_subscriptions(
 	tbs: &[TableDefinition],
-	table_fields: &HashMap<String, Arc<[FieldDefinition]>>,
+	table_fields: &HashMap<TableName, Arc<[FieldDefinition]>>,
 ) -> Option<Subscription> {
 	if tbs.is_empty() {
 		return None;
@@ -110,7 +110,7 @@ fn make_table_subscription_field(
 	fds: Arc<[FieldDefinition]>,
 ) -> SubscriptionField {
 	let tb_name = tb.name.clone();
-	let tb_name_str = tb_name.clone().into_string();
+	let tb_name_str = tb_name.as_str().to_string();
 	let table_filter_name = filter_name_from_table(&tb_name);
 	let selectable_fields = selectable_top_level_fields(&fds);
 
@@ -168,7 +168,7 @@ fn selectable_top_level_fields(fds: &[FieldDefinition]) -> HashSet<String> {
 			continue;
 		}
 		if let Some(Part::Field(name)) = fd.name.0.first() {
-			out.insert(name.clone());
+			out.insert(name.as_str().to_owned());
 		}
 	}
 	out

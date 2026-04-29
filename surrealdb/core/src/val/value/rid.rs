@@ -32,7 +32,7 @@ mod tests {
 		let val = parse_val!("{ id: test:id, test: { other: null, something: 123 } }");
 		let res = Value::RecordId(RecordId {
 			table: "test".into(),
-			key: RecordIdKey::String("id".to_owned()),
+			key: RecordIdKey::String("id".into()),
 		});
 		assert_eq!(res, val.rid());
 	}

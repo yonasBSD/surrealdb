@@ -110,7 +110,7 @@ impl DefineFieldStatement {
 			for ix in ctx.tx().all_tb_indexes(ns, db, &table, None).await?.iter() {
 				if ix.cols.iter().any(|col| col.starts_with(&name)) {
 					bail!(Error::ComputedFieldCannotBeIndexed {
-						index: ix.name.clone(),
+						index: ix.name.to_string(),
 						field: name.to_raw_string(),
 					})
 				}
@@ -223,7 +223,7 @@ impl DefineFieldStatement {
 					// Add the TYPE to the DEFINE TABLE statement
 					if *field_kind != relation.from {
 						tb.table_type = TableType::Relation(Relation {
-							from: field_kind.iter().map(|x| x.clone().into_string()).collect(),
+							from: field_kind.clone(),
 							..relation.clone()
 						});
 
@@ -253,7 +253,7 @@ impl DefineFieldStatement {
 					// Add the TYPE to the DEFINE TABLE statement
 					if *field_kind != relation.to {
 						tb.table_type = TableType::Relation(Relation {
-							to: field_kind.iter().map(|x| x.clone().into_string()).collect(),
+							to: field_kind.clone(),
 							..relation.clone()
 						});
 

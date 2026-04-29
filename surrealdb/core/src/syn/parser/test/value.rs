@@ -19,7 +19,7 @@ fn parse_index_expression() {
 	let Expr::Idiom(x) = value else {
 		panic!("not the right value type");
 	};
-	assert_eq!(x.0[0], Part::Field("a".to_owned()));
+	assert_eq!(x.0[0], Part::Field("a".into()));
 	assert_eq!(
 		x.0[1],
 		Part::Value(Expr::Binary {
@@ -149,13 +149,13 @@ fn parse_recursive_record_string() {
 	assert_eq!(
 		res,
 		Expr::Literal(Literal::RecordId(RecordIdLit {
-			table: "a".to_owned(),
+			table: "a".into(),
 			key: RecordIdKeyLit::Array(vec![Expr::Literal(Literal::RecordId(RecordIdLit {
-				table: "b".to_owned(),
+				table: "b".into(),
 				key: RecordIdKeyLit::Object(vec![ObjectEntry {
-					key: "c".to_owned(),
+					key: "c".into(),
 					value: Expr::Literal(Literal::RecordId(RecordIdLit {
-						table: "d".to_owned(),
+						table: "d".into(),
 						key: RecordIdKeyLit::Number(1)
 					}))
 				}])
@@ -173,8 +173,8 @@ fn parse_record_string_2() {
 	assert_eq!(
 		res,
 		Expr::Literal(Literal::RecordId(RecordIdLit {
-			table: "a".to_owned(),
-			key: RecordIdKeyLit::Array(vec![Expr::Literal(Literal::String("foo".to_owned()))])
+			table: "a".into(),
+			key: RecordIdKeyLit::Array(vec![Expr::Literal(Literal::String("foo".into()))])
 		}))
 	)
 }
@@ -312,7 +312,7 @@ fn number_method() {
 	.unwrap();
 	let expected = Expr::Idiom(Idiom(vec![
 		Part::Start(Expr::Literal(Literal::Float(9.7e-5))),
-		Part::Method("sin".to_string(), vec![]),
+		Part::Method("sin".into(), vec![]),
 	]));
 	assert_eq!(res, expected);
 
@@ -322,7 +322,7 @@ fn number_method() {
 	.unwrap();
 	let expected = Expr::Idiom(Idiom(vec![
 		Part::Start(Expr::Literal(Literal::Integer(1))),
-		Part::Method("sin".to_string(), vec![]),
+		Part::Method("sin".into(), vec![]),
 	]));
 	assert_eq!(res, expected);
 }

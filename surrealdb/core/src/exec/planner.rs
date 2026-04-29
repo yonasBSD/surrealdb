@@ -364,7 +364,7 @@ impl<'ctx> Planner<'ctx> {
 			Expr::Literal(lit) => Box::pin(self.physical_literal(lit)).await,
 			Expr::Constant(c) => Ok(Arc::new(PhysicalLiteral(c.compute()))),
 			Expr::Table(t) => Ok(Arc::new(PhysicalLiteral(crate::val::Value::Table(t)))),
-			Expr::Param(p) => Ok(Arc::new(Param(p.as_str().to_string()))),
+			Expr::Param(p) => Ok(Arc::new(Param(p.into_strand()))),
 			Expr::Idiom(idiom) => Box::pin(self.convert_idiom(idiom)).await,
 
 			// Operators
@@ -513,10 +513,12 @@ impl<'ctx> Planner<'ctx> {
 			&& let Expr::Idiom(idiom) = left
 		{
 			let resolved_query = match &right {
-				Expr::Literal(crate::expr::literal::Literal::String(s)) => Some(s.clone()),
+				Expr::Literal(crate::expr::literal::Literal::String(s)) => {
+					Some(s.as_str().to_owned())
+				}
 				Expr::Param(param) => self.ctx.value(param.as_str()).and_then(|v| {
 					if let crate::val::Value::String(s) = v {
-						Some(s.clone())
+						Some(s.as_str().to_owned())
 					} else {
 						None
 					}
@@ -538,9 +540,9 @@ impl<'ctx> Planner<'ctx> {
 				let idiom_clone = idiom.clone();
 				let query_clone = query.clone();
 				let left_phys = Box::pin(self.physical_expr(Expr::Idiom(idiom))).await?;
-				let right_phys = Box::pin(
-					self.physical_expr(Expr::Literal(crate::expr::literal::Literal::String(query))),
-				)
+				let right_phys = Box::pin(self.physical_expr(Expr::Literal(
+					crate::expr::literal::Literal::String(query.into()),
+				)))
 				.await?;
 				return Ok(Arc::new(crate::exec::physical_expr::MatchesOp::new(
 					left_phys,
@@ -843,11 +845,11 @@ impl<'ctx> Planner<'ctx> {
 			&& idiom.0.len() == 1
 			&& let Part::Field(name) = &idiom.0[0]
 		{
-			return Ok(Arc::new(PhysicalLiteral(crate::val::Value::String(name.clone()))));
+			return Ok(Arc::new(PhysicalLiteral(crate::val::Value::String(name.as_str().into()))));
 		}
 
 		if let Expr::Table(name) = expr {
-			return Ok(Arc::new(PhysicalLiteral(crate::val::Value::String(name.to_string()))));
+			return Ok(Arc::new(PhysicalLiteral(crate::val::Value::String(name.as_str().into()))));
 		}
 
 		Box::pin(self.physical_expr(expr)).await
@@ -1253,14 +1255,14 @@ pub(crate) async fn plan_expr_inner(
 	let ns =
 		ctx.value("session").and_then(|v| v.as_object()).and_then(|o| o.get("ns")).and_then(|v| {
 			match v {
-				crate::val::Value::String(s) => Some(s.clone()),
+				crate::val::Value::String(s) => Some(s.as_str().to_owned()),
 				_ => None,
 			}
 		});
 	let db =
 		ctx.value("session").and_then(|v| v.as_object()).and_then(|o| o.get("db")).and_then(|v| {
 			match v {
-				crate::val::Value::String(s) => Some(s.clone()),
+				crate::val::Value::String(s) => Some(s.as_str().to_owned()),
 				_ => None,
 			}
 		});
@@ -1324,7 +1326,7 @@ mod planner_tests {
 	#[tokio::test]
 	async fn test_planner_creates_let_operator() {
 		let expr = Expr::Let(Box::new(crate::expr::statements::SetStatement {
-			name: "x".to_string(),
+			name: "x".into(),
 			what: Expr::Literal(crate::expr::literal::Literal::Integer(42)),
 			kind: None,
 		}));

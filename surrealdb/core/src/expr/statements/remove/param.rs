@@ -1,4 +1,5 @@
 use anyhow::Result;
+use surrealdb_strand::Strand;
 
 use crate::catalog::providers::DatabaseProvider;
 use crate::ctx::FrozenContext;
@@ -9,7 +10,7 @@ use crate::iam::{Action, ResourceKind};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub(crate) struct RemoveParamStatement {
-	pub name: String,
+	pub name: Strand,
 	pub if_exists: bool,
 }
 

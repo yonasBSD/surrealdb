@@ -274,7 +274,7 @@ fn create_middleware_closure(
 					Err(_e) => {
 						return Box::pin(std::future::ready(Err(
 							ApiError::MiddlewareRequestParseFailure {
-								middleware: def.name,
+								middleware: def.name.to_string(),
 							}
 							.into(),
 						)));
@@ -283,7 +283,7 @@ fn create_middleware_closure(
 
 			// Parse function name - use ctx parameter directly
 			let function: crate::expr::Function = match function_with_capabilities(
-				&def.name,
+				def.name.as_str(),
 				ctx.get_capabilities().as_ref(),
 				&ctx.config,
 			) {
@@ -291,7 +291,7 @@ fn create_middleware_closure(
 				Err(_e) => {
 					return Box::pin(std::future::ready(Err(
 						ApiError::MiddlewareFunctionNotFound {
-							function: def.name.clone(),
+							function: def.name.to_string(),
 						}
 						.into(),
 					)));

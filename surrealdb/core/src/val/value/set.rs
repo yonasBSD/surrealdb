@@ -10,7 +10,7 @@ use crate::exe::try_join_all_buffered;
 use crate::exec::field_path::{FieldPath, FieldPathPart};
 use crate::expr::part::Part;
 use crate::expr::{Expr, FlowResultExt as _, Literal};
-use crate::val::{Object, Value};
+use crate::val::{Object, Strand, Value};
 
 impl Value {
 	/// Asynchronous method for setting a field on a `Value`
@@ -330,22 +330,22 @@ impl Value {
 		path: &[Part],
 	) -> Result<()> {
 		for p in path.iter().rev() {
-			let name = match p {
-				Part::Lookup(x) => x.to_sql(),
-				Part::Field(f) => f.as_str().to_owned(),
+			let name: Strand = match p {
+				Part::Lookup(x) => x.to_sql().into(),
+				Part::Field(f) => f.as_str().into(),
 				Part::Value(x) => {
 					let v = stk.run(|stk| x.compute(stk, ctx, opt, None)).await.catch_return()?;
 					match v {
 						Value::String(x) => x,
-						Value::RecordId(x) => x.to_sql(),
-						Value::Number(x) => x.to_sql(),
-						Value::Range(x) => x.to_sql(),
+						Value::RecordId(x) => x.to_sql().into(),
+						Value::Number(x) => x.to_sql().into(),
+						Value::Range(x) => x.to_sql().into(),
 						_ => return Ok(()),
 					}
 				}
 				x => {
 					if let Some(idx) = x.as_old_index() {
-						idx.to_string()
+						idx.to_string().into()
 					} else {
 						return Ok(());
 					}

@@ -1,5 +1,6 @@
 use std::ops::Deref;
 
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use crate::expr::idiom::Idioms as ExprIdioms;
@@ -59,8 +60,8 @@ impl Idiom {
 		)
 	}
 
-	pub fn field(name: String) -> Self {
-		Idiom(vec![Part::Field(name)])
+	pub fn field(name: impl Into<Strand>) -> Self {
+		Idiom(vec![Part::Field(name.into())])
 	}
 }
 

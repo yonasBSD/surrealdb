@@ -642,7 +642,7 @@ impl Parser<'_> {
 						break;
 					}
 				}
-				PostfixOperator::MethodCall(name, args)
+				PostfixOperator::MethodCall(name.into_string(), args)
 			}
 			// should be unreachable as we previously check if the token was a postfix op.
 			x => unreachable!("found non-operator token {x:?}"),

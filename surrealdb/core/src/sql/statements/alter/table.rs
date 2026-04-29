@@ -3,6 +3,7 @@ use surrealdb_types::{SqlFormat, ToSql, write_sql};
 use super::AlterKind;
 use crate::fmt::{EscapeKwFreeIdent, EscapeKwIdent, QuoteStr};
 use crate::sql::{ChangeFeed, Permissions, TableType};
+use crate::val::TableName;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
@@ -19,7 +20,7 @@ use crate::sql::{ChangeFeed, Permissions, TableType};
 /// Note: `COMPACT` is parsed and preserved on the expression side, however it is
 /// currently not rendered by this node's `ToSql` implementation.
 pub struct AlterTableStatement {
-	pub name: String,
+	pub name: TableName,
 	pub if_exists: bool,
 	pub schemafull: AlterKind<()>,
 	pub permissions: Option<Permissions>,
@@ -36,7 +37,7 @@ impl ToSql for AlterTableStatement {
 		if self.if_exists {
 			write_sql!(f, fmt, " IF EXISTS");
 		}
-		write_sql!(f, fmt, " {}", EscapeKwIdent(&self.name, &["IF"]));
+		write_sql!(f, fmt, " {}", EscapeKwIdent(self.name.as_str(), &["IF"]));
 		if let Some(kind) = &self.kind {
 			write_sql!(f, fmt, " TYPE");
 			match &kind {
@@ -100,7 +101,7 @@ impl ToSql for AlterTableStatement {
 impl From<AlterTableStatement> for crate::expr::statements::alter::AlterTableStatement {
 	fn from(v: AlterTableStatement) -> Self {
 		crate::expr::statements::alter::AlterTableStatement {
-			name: v.name.into(),
+			name: v.name,
 			if_exists: v.if_exists,
 			schemafull: v.schemafull.into(),
 			permissions: v.permissions.map(Into::into),
@@ -115,7 +116,7 @@ impl From<AlterTableStatement> for crate::expr::statements::alter::AlterTableSta
 impl From<crate::expr::statements::alter::AlterTableStatement> for AlterTableStatement {
 	fn from(v: crate::expr::statements::alter::AlterTableStatement) -> Self {
 		AlterTableStatement {
-			name: v.name.into_string(),
+			name: v.name,
 			if_exists: v.if_exists,
 			schemafull: v.schemafull.into(),
 			permissions: v.permissions.map(Into::into),

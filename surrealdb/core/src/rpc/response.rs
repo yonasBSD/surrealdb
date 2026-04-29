@@ -202,16 +202,16 @@ impl SurrealValue for DbResponse {
 
 	fn into_value(self) -> PublicValue {
 		let mut value = match self.result {
-			Ok(result) => map! { "result".to_string() => result.into_value() },
+			Ok(result) => map! { "result" => result.into_value() },
 			Err(err) => map! {
-				"error".to_string() => SurrealValue::into_value(err),
+				"error" => SurrealValue::into_value(err),
 			},
 		};
 		if let Some(id) = self.id {
-			value.insert("id".to_string(), id);
+			value.insert("id", id);
 		}
 		if let Some(session_id) = self.session_id {
-			value.insert(SESSION_ID.to_string(), PublicValue::Uuid(session_id.into()));
+			value.insert(SESSION_ID, PublicValue::Uuid(session_id.into()));
 		}
 		PublicValue::Object(PublicObject::from(value))
 	}

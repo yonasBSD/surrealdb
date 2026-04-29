@@ -84,8 +84,11 @@ impl LiveStatement {
 			// Use the current session authentication
 			// for when we store the LIVE Statement
 			session: ctx.value("session").cloned(),
-			// Add the variables to the subscription definition
-			vars: vars.0,
+			// Add the variables to the subscription definition. Keys are
+			// copied out of `Strand` into owned `String` here because
+			// `SubscriptionDefinition` is persisted in the catalog and
+			// stores `BTreeMap<String, Value>`.
+			vars: vars.0.into_iter().map(|(k, v)| (k.into_string(), v)).collect(),
 		};
 		// Get the id
 		let live_query_id = subscription_definition.id;

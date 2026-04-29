@@ -125,7 +125,9 @@ impl Executor {
 
 		let session_value = self.ctx.value("session")?;
 
-		// Extract fields from the session Value
+		// Extract fields from the session Value. `Value::String` holds a `Strand`, so we just
+		// move it into `SessionInfo` without the `Strand -> String -> Strand` round-trip the
+		// previous `into_string()` chain incurred on every batch.
 		let ns = match session_value.pick(NS.as_ref()) {
 			Value::String(s) => Some(s),
 			_ => None,
@@ -436,8 +438,8 @@ impl Executor {
 
 				// Return the current namespace and database
 				Ok(Value::from(map! {
-					"namespace".to_string() => self.opt.ns.clone().map(|x| Value::String(x.to_string())).unwrap_or(Value::None),
-					"database".to_string() => self.opt.db.clone().map(|x| Value::String(x.to_string())).unwrap_or(Value::None),
+					"namespace" => self.opt.ns.as_deref().map(|x| Value::String(x.into())).unwrap_or(Value::None),
+					"database" => self.opt.db.as_deref().map(|x| Value::String(x.into())).unwrap_or(Value::None),
 				}))
 			}
 			TopLevelExpr::Option(_) => {
@@ -462,7 +464,7 @@ impl Executor {
 					Some(kind) => res
 						.coerce_to_kind(kind)
 						.map_err(|e| Error::SetCoerce {
-							name: stm.name.clone(),
+							name: stm.name.to_string(),
 							error: Box::new(e),
 						})
 						.map_err(anyhow::Error::new)?,
@@ -471,7 +473,7 @@ impl Executor {
 
 				if stm.is_protected_set() {
 					return Err(ControlFlow::from(anyhow::Error::new(Error::InvalidParam {
-						name: stm.name.clone(),
+						name: stm.name.to_string(),
 					})));
 				}
 				// Set the parameter

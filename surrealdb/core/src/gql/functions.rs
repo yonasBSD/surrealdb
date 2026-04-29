@@ -82,7 +82,7 @@ pub async fn process_fns(
 
 					// Execute the function call via a LogicalPlan
 					let func_call = Expr::FunctionCall(Box::new(FunctionCall {
-						receiver: crate::expr::Function::Custom(fnd1.name.clone()),
+						receiver: crate::expr::Function::Custom(fnd1.name.to_string()),
 						arguments: args,
 					}));
 					let plan = LogicalPlan {

@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use reblessive::tree::Stk;
+use surrealdb_strand::Strand;
 use uuid::Uuid;
 
 use super::DefineKind;
@@ -50,7 +51,7 @@ impl Default for DefineTableStatement {
 		Self {
 			kind: DefineKind::Default,
 			id: None,
-			name: Expr::Literal(Literal::String(String::new())),
+			name: Expr::Literal(Literal::String(Strand::default())),
 			drop: false,
 			full: false,
 			view: None,
@@ -94,7 +95,7 @@ impl DefineTableStatement {
 					DefineKind::Default => {
 						if !opt.import {
 							bail!(Error::TbAlreadyExists {
-								name: name.clone().into_string(),
+								name: name.as_str().to_string(),
 							});
 						}
 					}
@@ -801,8 +802,7 @@ impl DefineTableStatement {
 			// Set the `in` field as a DEFINE FIELD definition
 			{
 				let key = crate::key::table::fd::new(ns, db, &tb.name, "in");
-				let val =
-					Some(Kind::Record(rel.from.iter().cloned().map(TableName::new).collect()));
+				let val = Some(Kind::Record(rel.from.clone()));
 				txn.set(
 					&key,
 					&FieldDefinition {
@@ -817,7 +817,7 @@ impl DefineTableStatement {
 			// Set the `out` field as a DEFINE FIELD definition
 			{
 				let key = crate::key::table::fd::new(ns, db, &tb.name, "out");
-				let val = Some(Kind::Record(rel.to.iter().cloned().map(TableName::new).collect()));
+				let val = Some(Kind::Record(rel.to.clone()));
 				txn.set(
 					&key,
 					&FieldDefinition {

@@ -448,7 +448,7 @@ impl FullTextIndex {
 	) -> Result<QueryTerms> {
 		let tokens = self
 			.analyzer
-			.generate_tokens(stk, ctx, opt, FilteringStage::Querying, query_string)
+			.generate_tokens(stk, ctx, opt, FilteringStage::Querying, query_string.into())
 			.await?;
 
 		let mut unique_terms: Vec<&str> = Vec::new();

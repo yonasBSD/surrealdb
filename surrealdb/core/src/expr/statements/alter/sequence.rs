@@ -2,6 +2,7 @@ use std::ops::Deref;
 
 use anyhow::Result;
 use reblessive::tree::Stk;
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql};
 
 use crate::catalog::providers::DatabaseProvider;
@@ -16,7 +17,7 @@ use crate::val::Duration;
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Default)]
 pub(crate) struct AlterSequenceStatement {
-	pub name: String,
+	pub name: Strand,
 	pub if_exists: bool,
 	pub timeout: Option<Expr>,
 }

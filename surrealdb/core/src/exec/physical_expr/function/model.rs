@@ -111,7 +111,7 @@ impl PhysicalExpr for ModelFunctionExec {
 				let mut args = v
 					.into_iter()
 					.map(|(k, v)| {
-						v.coerce_to::<f64>().map(|f| (k, f as f32)).map_err(|_| {
+						v.coerce_to::<f64>().map(|f| (k.into_string(), f as f32)).map_err(|_| {
 							Error::InvalidFunctionArguments {
 								name: format!("ml::{}<{}>", self.model.name, self.model.version),
 								message: ARGUMENTS.into(),

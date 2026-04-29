@@ -55,8 +55,8 @@ pub(crate) fn extract_computed_deps(expr: &Expr) -> ComputedDeps {
 /// the latter covers bracket access like `["name"]`.
 fn field_name_from_part(part: &Part) -> Option<String> {
 	match part {
-		Part::Field(name) => Some(name.clone()),
-		Part::Value(Expr::Literal(Literal::String(name))) => Some(name.clone()),
+		Part::Field(name) => Some(name.as_str().to_owned()),
+		Part::Value(Expr::Literal(Literal::String(name))) => Some(name.as_str().to_owned()),
 		_ => None,
 	}
 }
@@ -79,7 +79,7 @@ impl Visitor for FieldDependencyExtractor {
 		let consumed = match idiom.0.as_slice() {
 			// Direct field access: `field_name` or `field.nested.path`
 			[Part::Field(name), ..] => {
-				self.deps.insert(name.clone());
+				self.deps.insert(name.as_str().to_owned());
 				1
 			}
 			// `$this.field` / `$self["field"]` — equivalent to bare field.
@@ -269,7 +269,7 @@ mod tests {
 
 	/// Helper: build `Expr::Idiom` for a simple field name.
 	fn field_expr(name: &str) -> Expr {
-		Expr::Idiom(Idiom(vec![Part::Field(name.to_string())]))
+		Expr::Idiom(Idiom(vec![Part::Field(name.into())]))
 	}
 
 	/// Helper: build a literal integer expression.
@@ -316,9 +316,9 @@ mod tests {
 	fn nested_field_access() {
 		// Expression: `user.name.first` -- root dep is `user`
 		let expr = Expr::Idiom(Idiom(vec![
-			Part::Field("user".to_string()),
-			Part::Field("name".to_string()),
-			Part::Field("first".to_string()),
+			Part::Field("user".into()),
+			Part::Field("name".into()),
+			Part::Field("first".into()),
 		]));
 		let deps = extract_computed_deps(&expr);
 		assert_eq!(deps.fields, vec!["user"]);
@@ -379,7 +379,7 @@ mod tests {
 	fn this_field_expr(name: &str) -> Expr {
 		Expr::Idiom(Idiom(vec![
 			Part::Start(Expr::Param(crate::expr::Param::from("this".to_string()))),
-			Part::Field(name.to_string()),
+			Part::Field(name.into()),
 		]))
 	}
 
@@ -387,7 +387,7 @@ mod tests {
 	fn self_field_expr(name: &str) -> Expr {
 		Expr::Idiom(Idiom(vec![
 			Part::Start(Expr::Param(crate::expr::Param::from("self".to_string()))),
-			Part::Field(name.to_string()),
+			Part::Field(name.into()),
 		]))
 	}
 
@@ -410,9 +410,9 @@ mod tests {
 		// $this.a.b.c -- root dep is `a`
 		let expr = Expr::Idiom(Idiom(vec![
 			Part::Start(Expr::Param(crate::expr::Param::from("this".to_string()))),
-			Part::Field("a".to_string()),
-			Part::Field("b".to_string()),
-			Part::Field("c".to_string()),
+			Part::Field("a".into()),
+			Part::Field("b".into()),
+			Part::Field("c".into()),
 		]));
 		let deps = extract_computed_deps(&expr);
 		assert_eq!(deps.fields, vec!["a"]);
@@ -509,7 +509,7 @@ mod tests {
 		// $this["a"] -- bracket string access, equivalent to $this.a
 		let expr = Expr::Idiom(Idiom(vec![
 			Part::Start(Expr::Param(crate::expr::Param::from("this".to_string()))),
-			Part::Value(Expr::Literal(Literal::String("a".to_string()))),
+			Part::Value(Expr::Literal(Literal::String("a".into()))),
 		]));
 		let deps = extract_computed_deps(&expr);
 		assert_eq!(deps.fields, vec!["a"]);
@@ -521,7 +521,7 @@ mod tests {
 		// $self["c"] -- bracket string access, equivalent to $self.c
 		let expr = Expr::Idiom(Idiom(vec![
 			Part::Start(Expr::Param(crate::expr::Param::from("self".to_string()))),
-			Part::Value(Expr::Literal(Literal::String("c".to_string()))),
+			Part::Value(Expr::Literal(Literal::String("c".into()))),
 		]));
 		let deps = extract_computed_deps(&expr);
 		assert_eq!(deps.fields, vec!["c"]);
@@ -539,7 +539,7 @@ mod tests {
 				op: BinaryOperator::Add,
 				right: Box::new(Expr::Idiom(Idiom(vec![
 					Part::Start(Expr::Param(crate::expr::Param::from("self".to_string()))),
-					Part::Value(Expr::Literal(Literal::String("c".to_string()))),
+					Part::Value(Expr::Literal(Literal::String("c".into()))),
 				]))),
 			}),
 		};
@@ -553,7 +553,7 @@ mod tests {
 		// $foo.a -- unknown param, not $this/$self
 		let expr = Expr::Idiom(Idiom(vec![
 			Part::Start(Expr::Param(crate::expr::Param::from("foo".to_string()))),
-			Part::Field("a".to_string()),
+			Part::Field("a".into()),
 		]));
 		let deps = extract_computed_deps(&expr);
 		assert!(!deps.is_complete);

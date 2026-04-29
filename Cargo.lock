@@ -7354,6 +7354,7 @@ dependencies = [
  "subtle",
  "surrealdb-protocol",
  "surrealdb-rocksdb",
+ "surrealdb-strand",
  "surrealdb-tikv-client",
  "surrealdb-types",
  "surrealism-runtime",
@@ -7555,6 +7556,17 @@ dependencies = [
  "wasmparser 0.245.1",
  "web-time",
  "wiremock",
+]
+
+[[package]]
+name = "surrealdb-strand"
+version = "3.1.0-alpha"
+dependencies = [
+ "arbitrary",
+ "criterion 0.8.2",
+ "revision",
+ "serde",
+ "storekey",
 ]
 
 [[package]]

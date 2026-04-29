@@ -1,6 +1,7 @@
 use argon2::Argon2;
 use argon2::password_hash::{PasswordHasher, SaltString};
 use rand_core::OsRng;
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use super::AlterKind;
@@ -13,7 +14,7 @@ use crate::types::PublicDuration;
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 /// AST node for `ALTER USER`.
 pub struct AlterUserStatement {
-	pub name: String,
+	pub name: Strand,
 	pub base: Base,
 	pub if_exists: bool,
 	pub pass_type: Option<PassType>,
@@ -29,7 +30,7 @@ impl ToSql for AlterUserStatement {
 		if self.if_exists {
 			write_sql!(f, fmt, " IF EXISTS");
 		}
-		write_sql!(f, fmt, " {} ON {}", EscapeKwFreeIdent(&self.name), &self.base);
+		write_sql!(f, fmt, " {} ON {}", EscapeKwFreeIdent(self.name.as_str()), &self.base);
 
 		if let Some(ref pt) = self.pass_type {
 			match pt {

@@ -383,13 +383,13 @@ fn detect_nested_objects(
 
 		// Get the parent field name (first part must be a Field)
 		let parent_name = match &parts[0] {
-			Part::Field(name) => name.clone(),
+			Part::Field(name) => name.as_str().to_owned(),
 			_ => continue,
 		};
 
 		// Get the child field name (last part must be a Field)
 		let child_name = match parts.last() {
-			Some(Part::Field(name)) => name.clone(),
+			Some(Part::Field(name)) => name.as_str().to_owned(),
 			_ => continue,
 		};
 
@@ -697,7 +697,7 @@ fn make_table_list_field(
 	kvs: Arc<Datastore>,
 ) -> Field {
 	let tb_name = tb.name.clone();
-	let tb_name_str = tb_name.clone().into_string();
+	let tb_name_str = tb_name.as_str().to_string();
 	let table_order_name = format!("_order_{tb_name}");
 	let table_filter_name = filter_name_from_table(&tb_name);
 
@@ -752,7 +752,7 @@ fn make_table_list_field(
 /// or `null` if the record does not exist.
 fn make_table_get_field(tb: &TableDefinition, kvs: Arc<Datastore>) -> Field {
 	let tb_name = tb.name.clone();
-	let tb_name_str = tb_name.clone().into_string();
+	let tb_name_str = tb_name.as_str().to_string();
 
 	Field::new(format!("_get_{}", tb.name), TypeRef::named(&tb_name_str), move |ctx| {
 		let tb_name = tb_name.clone();
@@ -891,12 +891,12 @@ fn build_table_type(
 	tb: &TableDefinition,
 	fds: &[FieldDefinition],
 	relations: &[RelationInfo],
-	exposed_table_names: &HashSet<String>,
-	relation_table_fds: &HashMap<String, Arc<[FieldDefinition]>>,
+	exposed_table_names: &HashSet<TableName>,
+	relation_table_fds: &HashMap<TableName, Arc<[FieldDefinition]>>,
 	types: &mut Vec<Type>,
 ) -> Result<TableGraphQLTypes, GqlError> {
 	let tb_name = &tb.name;
-	let tb_name_str = tb_name.clone().into_string();
+	let tb_name_str = tb_name.as_str().to_string();
 
 	// --- Create initial types ---
 
@@ -1021,15 +1021,17 @@ fn build_table_type(
 	// --- Add relation fields ---
 
 	for rel in relations.iter() {
-		let rel_table_str = rel.table_name.clone().into_string();
-		if !exposed_table_names.contains(&rel_table_str) {
+		if !exposed_table_names.contains(&rel.table_name) {
 			continue;
 		}
+		// Only allocate the `String` form once we know we'll use
+		// it for the GraphQL field/type names below.
+		let rel_table_str = rel.table_name.as_str().to_owned();
 
-		let rel_fds = relation_table_fds.get(&rel_table_str).cloned();
+		let rel_fds = relation_table_fds.get(&rel.table_name).cloned();
 
 		// Outgoing: this table is in the FROM list
-		if rel.from_tables.contains(&tb_name_str) {
+		if rel.from_tables.iter().any(|n| n.as_str() == tb_name_str.as_str()) {
 			let field_name = rel_table_str.clone();
 			if !existing_field_names.contains(&field_name) {
 				existing_field_names.insert(field_name.clone());
@@ -1050,7 +1052,7 @@ fn build_table_type(
 		}
 
 		// Incoming: this table is in the TO list
-		if rel.to_tables.contains(&tb_name_str) {
+		if rel.to_tables.iter().any(|n| n.as_str() == tb_name_str.as_str()) {
 			let field_name = format!("{}_in", rel_table_str);
 			if !existing_field_names.contains(&field_name) {
 				existing_field_names.insert(field_name.clone());
@@ -1089,27 +1091,34 @@ pub async fn process_tbs(
 	types: &mut Vec<Type>,
 	ctx: &SchemaContext<'_>,
 	relations: &[RelationInfo],
-	table_fields: &mut HashMap<String, Arc<[FieldDefinition]>>,
+	table_fields: &mut HashMap<TableName, Arc<[FieldDefinition]>>,
 ) -> Result<Object, GqlError> {
 	// Pre-fetch field definitions for relation tables (needed for filter support
 	// in relation field resolvers). These are captured by the resolver closures.
-	let mut relation_table_fds: HashMap<String, Arc<[FieldDefinition]>> = HashMap::new();
+	// Keyed by `TableName` (Strand wrapper) so insert/lookup avoid the
+	// per-key `String` allocation the previous `HashMap<String, _>`
+	// form forced on every hit.
+	let mut relation_table_fds: HashMap<TableName, Arc<[FieldDefinition]>> = HashMap::new();
 	for rel in relations.iter() {
-		let rel_name = rel.table_name.clone().into_string();
-		if let std::collections::hash_map::Entry::Vacant(e) = relation_table_fds.entry(rel_name) {
+		if let std::collections::hash_map::Entry::Vacant(e) =
+			relation_table_fds.entry(rel.table_name.clone())
+		{
 			let fds = ctx.tx.all_tb_fields(ctx.ns, ctx.db, &rel.table_name, None).await?;
 			e.insert(fds);
 		}
 	}
 
-	// Set of exposed table names for checking that relation targets are visible
-	let exposed_table_names: HashSet<String> =
-		tbs.iter().map(|t| t.name.clone().into_string()).collect();
+	// Set of exposed table names for checking that relation targets are
+	// visible. `TableName::clone` is a cheap `Strand` clone (inline
+	// copy or `Arc` refcount bump), so building the set is free vs.
+	// the previous `.into_string()` path that allocated a `String`
+	// per table.
+	let exposed_table_names: HashSet<TableName> = tbs.iter().map(|t| t.name.clone()).collect();
 
 	for tb in tbs.iter() {
 		trace!("Adding table: {}", tb.name);
 		let fds = ctx.tx.all_tb_fields(ctx.ns, ctx.db, &tb.name, None).await?;
-		table_fields.insert(tb.name.clone().into_string(), fds.clone());
+		table_fields.insert(tb.name.clone(), fds.clone());
 
 		// Add query root fields for this table
 		query = query.field(make_table_list_field(tb, fds.clone(), ctx.datastore.clone()));

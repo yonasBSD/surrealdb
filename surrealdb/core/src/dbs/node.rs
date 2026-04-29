@@ -72,11 +72,12 @@ impl ToSql for Node {
 
 impl InfoStructure for Node {
 	fn structure(self) -> Value {
-		Value::Object(Object(map! {
-			"id".to_string() => Value::Uuid(self.id.into()),
-			"seen".to_string() => self.heartbeat.structure(),
-			"active".to_string() => Value::Bool(!self.gc),
-		}))
+		let object = map! {
+			"id" => Value::Uuid(self.id.into()),
+			"seen" => self.heartbeat.structure(),
+			"active" => Value::Bool(!self.gc),
+		};
+		Value::Object(Object::from(object))
 	}
 }
 

@@ -110,7 +110,7 @@ impl ExplainItem {
 			},
 			Iterable::GenerateRecordId(_doc_ctx, t) => Self {
 				name: "Iterate Yield".into(),
-				details: vec![("table", Value::String(t.clone().into_string()))],
+				details: vec![("table", Value::String(t.clone().into()))],
 			},
 			Iterable::RecordId(_doc_ctx, t) => Self {
 				name: "Iterate Record".into(),
@@ -142,7 +142,7 @@ impl ExplainItem {
 				}
 				.into(),
 				details: vec![
-					("table", Value::String(t.clone().into_string())),
+					("table", Value::String(t.clone().into())),
 					("direction", sc.to_string().into()),
 				],
 			},
@@ -154,17 +154,14 @@ impl ExplainItem {
 				}
 				.into(),
 				details: vec![
-					("table", Value::String(tb.clone().into_string())),
+					("table", Value::String(tb.clone().into())),
 					("range", Value::Range(Box::new(r.clone().into_value_range()))),
 					("direction", sc.to_string().into()),
 				],
 			},
 			Iterable::Mergeable(_doc_ctx, tb, None, v) => Self {
 				name: "Iterate Mergeable".into(),
-				details: vec![
-					("table", Value::String(tb.clone().into_string())),
-					("value", v.to_owned()),
-				],
+				details: vec![("table", Value::String(tb.clone().into())), ("value", v.to_owned())],
 			},
 			Iterable::Mergeable(_doc_ctx, tb, Some(id), v) => Self {
 				name: "Iterate Mergeable".into(),
@@ -191,7 +188,7 @@ impl ExplainItem {
 				],
 			},
 			Iterable::Index(_doc_ctx, t, ir, rs) => {
-				let mut details = vec![("table", Value::String(t.clone().into_string()))];
+				let mut details = vec![("table", Value::String(t.clone().into()))];
 				if let Some(qp) = ctx.get_query_planner()
 					&& let Some(exe) = qp.get_query_executor(t)
 				{

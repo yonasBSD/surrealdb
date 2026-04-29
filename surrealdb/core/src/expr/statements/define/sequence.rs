@@ -100,7 +100,7 @@ impl DefineSequenceStatement {
 		};
 
 		let sq = SequenceDefinition {
-			name: name.clone(),
+			name: name.clone().into(),
 			batch,
 			start: stk
 				.run(|stk| self.start.compute(stk, ctx, opt, doc))

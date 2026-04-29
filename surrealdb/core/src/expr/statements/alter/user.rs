@@ -2,6 +2,7 @@ use std::ops::Deref;
 use std::time::Duration;
 
 use anyhow::Result;
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql};
 use tracing::instrument;
 
@@ -17,7 +18,7 @@ use crate::val::Value;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub(crate) struct AlterUserStatement {
-	pub name: String,
+	pub name: Strand,
 	pub base: Base,
 	pub if_exists: bool,
 	pub hash: Option<String>,
@@ -74,7 +75,7 @@ impl AlterUserStatement {
 					return Ok(Value::None);
 				}
 				return Err(Error::UserRootNotFound {
-					name: self.name.clone(),
+					name: self.name.to_string(),
 				}
 				.into());
 			}
@@ -96,7 +97,7 @@ impl AlterUserStatement {
 					return Ok(Value::None);
 				}
 				return Err(Error::UserNsNotFound {
-					name: self.name.clone(),
+					name: self.name.to_string(),
 					ns: ns_name.to_string(),
 				}
 				.into());
@@ -119,7 +120,7 @@ impl AlterUserStatement {
 					return Ok(Value::None);
 				}
 				return Err(Error::UserDbNotFound {
-					name: self.name.clone(),
+					name: self.name.to_string(),
 					ns: ns_name.to_string(),
 					db: db_name.to_string(),
 				}

@@ -26,7 +26,7 @@ pub(crate) fn value_to_record_id_key(val: Value) -> RecordIdKey {
 		Value::Array(a) => RecordIdKey::Array(a),
 		Value::Object(o) => RecordIdKey::Object(o),
 		// For other types, convert to string representation
-		other => RecordIdKey::String(other.to_raw_string()),
+		other => RecordIdKey::String(other.to_raw_string().into()),
 	}
 }
 

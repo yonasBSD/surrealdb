@@ -77,7 +77,7 @@ pub(crate) trait NamespaceProvider {
 			None => {
 				let ns = NamespaceDefinition {
 					namespace_id: self.get_next_ns_id(ctx).await?,
-					name: ns.to_owned(),
+					name: ns.into(),
 					comment: None,
 				};
 				self.put_ns(ns).await

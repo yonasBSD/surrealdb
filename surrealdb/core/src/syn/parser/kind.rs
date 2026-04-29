@@ -77,7 +77,7 @@ impl Parser<'_> {
 			t!("false") => Ok(Kind::Literal(KindLiteral::Bool(false))),
 			t!("'") | t!("\"") => {
 				let str = this.unescape_string_span(next.span)?;
-				Ok(Kind::Literal(KindLiteral::String(str.to_owned())))
+				Ok(Kind::Literal(KindLiteral::String(str.into())))
 			}
 			TokenKind::NaN => Ok(Kind::Literal(KindLiteral::Float(f64::NAN))),
 			TokenKind::Infinity => Ok(Kind::Literal(KindLiteral::Float(f64::INFINITY))),
@@ -113,7 +113,7 @@ impl Parser<'_> {
 					let key = this.parse_object_key()?;
 					expected!(this, t!(":"));
 					let kind = stk.run(|ctx| this.parse_inner_kind(ctx)).await?;
-					obj.insert(key, kind);
+					obj.insert(key.into(), kind);
 					this.eat(t!(","));
 				}
 				Ok(Kind::Literal(KindLiteral::Object(obj)))
@@ -147,9 +147,9 @@ impl Parser<'_> {
 			t!("RECORD") => {
 				let span = this.peek().span;
 				if this.eat(t!("<")) {
-					let mut tables = vec![this.parse_ident()?];
+					let mut tables = vec![this.parse_ident_str()?.into()];
 					while this.eat(t!("|")) {
-						tables.push(this.parse_ident()?);
+						tables.push(this.parse_ident_str()?.into());
 					}
 					this.expect_closing_delimiter(t!(">"), span)?;
 					Ok(Kind::Record(tables))
@@ -160,9 +160,9 @@ impl Parser<'_> {
 			t!("TABLE") => {
 				let span = this.peek().span;
 				if this.eat(t!("<")) {
-					let mut tables = vec![this.parse_ident()?];
+					let mut tables = vec![this.parse_ident_str()?.into()];
 					while this.eat(t!("|")) {
-						tables.push(this.parse_ident()?);
+						tables.push(this.parse_ident_str()?.into());
 					}
 					this.expect_closing_delimiter(t!(">"), span)?;
 					Ok(Kind::Table(tables))
@@ -208,9 +208,9 @@ impl Parser<'_> {
 			t!("FILE") => {
 				let span = this.peek().span;
 				if this.eat(t!("<")) {
-					let mut buckets = vec![this.parse_ident()?];
+					let mut buckets = vec![this.parse_ident()?.into_string()];
 					while this.eat(t!("|")) {
-						buckets.push(this.parse_ident()?);
+						buckets.push(this.parse_ident()?.into_string());
 					}
 					this.expect_closing_delimiter(t!(">"), span)?;
 					Ok(Kind::File(buckets))
@@ -273,11 +273,11 @@ mod tests {
 	#[case::uuid("uuid", "uuid", Kind::Uuid)]
 	#[case::either("int | float", "int | float", Kind::Either(vec![Kind::Int, Kind::Float]))]
 	#[case::record("record", "record", Kind::Record(vec![]))]
-	#[case::record_one("record<person>", "record<person>", Kind::Record(vec!["person".to_owned()]))]
-	#[case::record_many("record<person | animal>", "record<person | animal>", Kind::Record(vec!["person".to_owned(), "animal".to_owned()]))]
+	#[case::record_one("record<person>", "record<person>", Kind::Record(vec!["person".into()]))]
+	#[case::record_many("record<person | animal>", "record<person | animal>", Kind::Record(vec!["person".into(), "animal".into()]))]
 	#[case::table("table", "table", Kind::Table(vec![]))]
-	#[case::table_one("table<person>", "table<person>", Kind::Table(vec!["person".to_owned()]))]
-	#[case::table_many("table<person | animal>", "table<person | animal>", Kind::Table(vec!["person".to_owned(), "animal".to_owned()]))]
+	#[case::table_one("table<person>", "table<person>", Kind::Table(vec!["person".into()]))]
+	#[case::table_many("table<person | animal>", "table<person | animal>", Kind::Table(vec!["person".into(), "animal".into()]))]
 	#[case::geometry("geometry", "geometry", Kind::Geometry(vec![]))]
 	#[case::geometry_one("geometry<point>", "geometry<point>", Kind::Geometry(vec![GeometryKind::Point]))]
 	#[case::geometry_many("geometry<point | multipoint>", "geometry<point | multipoint>", Kind::Geometry(vec![GeometryKind::Point, GeometryKind::MultiPoint]))]

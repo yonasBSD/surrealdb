@@ -1,4 +1,5 @@
 use anyhow::Result;
+use surrealdb_strand::Strand;
 
 use crate::catalog::providers::DatabaseProvider;
 use crate::ctx::FrozenContext;
@@ -9,8 +10,8 @@ use crate::iam::{Action, ResourceKind};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub(crate) struct RemoveModelStatement {
-	pub name: String,
-	pub version: String,
+	pub name: Strand,
+	pub version: Strand,
 	pub if_exists: bool,
 }
 
@@ -30,7 +31,7 @@ impl RemoveModelStatement {
 					return Ok(Value::None);
 				}
 				return Err(Error::MlNotFound {
-					name: format!("{}<{}>", self.name, self.version),
+					name: format!("{}<{}>", self.name.as_str(), self.version.as_str()),
 				}
 				.into());
 			}

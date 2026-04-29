@@ -139,7 +139,7 @@ pub(crate) async fn evaluate_body_expr(
 			if let Expr::Let(set_stmt) = expr {
 				if set_stmt.is_protected_set() {
 					return Err(Error::InvalidParam {
-						name: set_stmt.name.clone(),
+						name: set_stmt.name.to_string(),
 					}
 					.into());
 				}
@@ -148,7 +148,7 @@ pub(crate) async fn evaluate_body_expr(
 
 				let value = if let Some(kind) = &set_stmt.kind {
 					value.coerce_to_kind(kind).map_err(|e| Error::SetCoerce {
-						name: set_stmt.name.clone(),
+						name: set_stmt.name.to_string(),
 						error: Box::new(e),
 					})?
 				} else {

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql};
 
 use super::helpers::{args_access_mode, args_required_context, evaluate_args, validate_return};
@@ -147,7 +148,7 @@ impl PhysicalExpr for ClosureCallExec {
 				}
 
 				// Bind arguments to parameter names with type coercion
-				let mut local_params: HashMap<String, Value> = HashMap::new();
+				let mut local_params: HashMap<Strand, Value> = HashMap::new();
 				for ((param, kind), arg_value) in arg_spec.iter().zip(evaluated_args.into_iter()) {
 					let coerced = arg_value.coerce_to_kind(kind).map_err(|_| {
 						Error::InvalidFunctionArguments {
@@ -159,7 +160,7 @@ impl PhysicalExpr for ClosureCallExec {
 							),
 						}
 					})?;
-					local_params.insert(param.clone().into_string(), coerced);
+					local_params.insert(param.clone().into_strand(), coerced);
 				}
 
 				// Add parameters to the execution context

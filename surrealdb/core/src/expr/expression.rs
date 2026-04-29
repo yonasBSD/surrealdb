@@ -153,7 +153,7 @@ impl Expr {
 				surrealdb_types::Number::Float(f) => Expr::Literal(Literal::Float(f)),
 				surrealdb_types::Number::Decimal(d) => Expr::Literal(Literal::Decimal(d)),
 			},
-			surrealdb_types::Value::String(s) => Expr::Literal(Literal::String(s)),
+			surrealdb_types::Value::String(s) => Expr::Literal(Literal::String(s.into())),
 			surrealdb_types::Value::Bytes(b) => {
 				Expr::Literal(Literal::Bytes(crate::val::Bytes(b.into_inner())))
 			}
@@ -175,7 +175,7 @@ impl Expr {
 			surrealdb_types::Value::Object(o) => Expr::Literal(Literal::Object(
 				o.into_iter()
 					.map(|(k, v)| ObjectEntry {
-						key: k,
+						key: k.into(),
 						value: Expr::from_public_value(v),
 					})
 					.collect(),
@@ -187,7 +187,7 @@ impl Expr {
 			}) => {
 				let key_lit = match key {
 					surrealdb_types::RecordIdKey::Number(n) => RecordIdKeyLit::Number(n),
-					surrealdb_types::RecordIdKey::String(s) => RecordIdKeyLit::String(s),
+					surrealdb_types::RecordIdKey::String(s) => RecordIdKeyLit::String(s.into()),
 					surrealdb_types::RecordIdKey::Uuid(u) => {
 						RecordIdKeyLit::Uuid(crate::val::Uuid(u.into_inner()))
 					}
@@ -197,7 +197,7 @@ impl Expr {
 					surrealdb_types::RecordIdKey::Object(o) => RecordIdKeyLit::Object(
 						o.into_iter()
 							.map(|(k, v)| ObjectEntry {
-								key: k,
+								key: k.into(),
 								value: Expr::from_public_value(v),
 							})
 							.collect(),
@@ -328,7 +328,7 @@ impl Expr {
 	pub(crate) fn to_idiom(&self) -> Idiom {
 		match self {
 			Expr::Idiom(i) => i.simplify(),
-			Expr::Param(i) => Idiom::field(i.as_str().to_owned()),
+			Expr::Param(i) => Idiom::field(i.clone().into_strand()),
 			Expr::FunctionCall(x) => x.receiver.to_idiom(),
 			Expr::Literal(l) => match l {
 				Literal::String(s) => Idiom::field(s.clone()),
@@ -734,7 +734,7 @@ impl Expr {
 	pub(crate) fn to_raw_string(&self) -> String {
 		match self {
 			Expr::Idiom(idiom) => idiom.to_raw_string(),
-			Expr::Table(ident) => ident.clone().into_string(),
+			Expr::Table(ident) => ident.as_str().to_string(),
 			_ => self.to_sql(),
 		}
 	}

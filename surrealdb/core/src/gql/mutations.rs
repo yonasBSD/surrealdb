@@ -16,6 +16,7 @@ use async_graphql::dynamic::{
 	Field, FieldFuture, FieldValue, InputObject, InputValue, Object, Type, TypeRef,
 };
 use async_graphql::{Name, Value as GqlValue};
+use surrealdb_strand::Strand;
 use surrealdb_types::ToSql;
 
 use super::error::{GqlError, resolver_error};
@@ -73,7 +74,14 @@ fn gql_input_to_sql_object(
 	skip_fields: &[&str],
 	tb_name: &str,
 ) -> Result<SurObject, GqlError> {
-	let mut map = BTreeMap::new();
+	// Collect into `BTreeMap<Strand, _>` rather than
+	// `BTreeMap<String, _>` so the final `SurObject::from(map)`
+	// resolves to the zero-cost `From<BTreeMap<Strand, Value>> for
+	// Object` impl (`Self(v)`). Going via `String` would allocate a
+	// `String` per key here and then reallocate each into a `Strand`
+	// again inside `From<BTreeMap<String, Value>>`. See the sibling
+	// converters in `gql/schema.rs` for the same pattern.
+	let mut map: BTreeMap<Strand, Value> = BTreeMap::new();
 	for (key, val) in input {
 		let key_str = key.as_str();
 		if skip_fields.contains(&key_str) {
@@ -91,9 +99,9 @@ fn gql_input_to_sql_object(
 			.unwrap_or(Kind::Any);
 		let enum_scope = format!("{tb_name}_{key_str}");
 		let sql_val = gql_to_sql_kind_with_scope(val, kind, Some(&enum_scope))?;
-		map.insert(key_str.to_string(), sql_val);
+		map.insert(key_str.into(), sql_val);
 	}
-	Ok(SurObject(map))
+	Ok(SurObject::from(map))
 }
 
 /// Map a field's `Kind` to a GraphQL `TypeRef` suitable for mutation input types.
@@ -239,7 +247,7 @@ pub async fn process_mutations(
 
 	for tb in tbs.iter() {
 		let tb_name = tb.name.clone();
-		let tb_name_str = tb_name.clone().into_string();
+		let tb_name_str = tb_name.as_str().to_string();
 		let is_relation = matches!(tb.table_type, TableType::Relation(_));
 
 		let fds = schema_ctx.tx.all_tb_fields(schema_ctx.ns, schema_ctx.db, &tb.name, None).await?;

@@ -109,7 +109,7 @@ impl ExecOperator for KnnScan {
 
 	fn attrs(&self) -> Vec<(String, String)> {
 		vec![
-			("index".to_string(), self.index_ref.name.clone()),
+			("index".to_string(), self.index_ref.name.to_string()),
 			("k".to_string(), self.k.to_string()),
 			("ef".to_string(), self.ef.to_string()),
 			("dimension".to_string(), self.vector.len().to_string()),

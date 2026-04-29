@@ -1114,13 +1114,13 @@ impl Visitor for MatchesCollector<'_> {
 			// Extract the query string from the right-hand side.
 			// Supports both literal strings and bind parameters.
 			let query_str = match right.as_ref() {
-				Expr::Literal(Literal::String(s)) => Some(s.clone()),
+				Expr::Literal(Literal::String(s)) => Some(s.as_str().to_owned()),
 				Expr::Param(param) => {
 					// Resolve the bind parameter from the frozen context
 					self.1.and_then(|ctx| {
 						ctx.value(param.as_str()).and_then(|v| {
 							if let crate::val::Value::String(s) = v {
-								Some(s.clone())
+								Some(s.as_str().to_owned())
 							} else {
 								None
 							}
@@ -1452,7 +1452,7 @@ pub(super) fn idiom_to_field_name(idiom: &crate::expr::idiom::Idiom) -> String {
 	if simplified.len() == 1
 		&& let Some(Part::Field(name)) = simplified.first()
 	{
-		return name.clone();
+		return name.as_str().to_owned();
 	}
 	simplified.to_sql()
 }
@@ -1493,7 +1493,7 @@ pub(super) fn idiom_to_field_path(idiom: &crate::expr::idiom::Idiom) -> FieldPat
 	let mut parts = Vec::with_capacity(simplified.0.len());
 	for part in simplified.0.iter() {
 		match part {
-			Part::Field(name) => parts.push(FieldPathPart::Field(name.clone())),
+			Part::Field(name) => parts.push(FieldPathPart::Field(name.as_str().to_owned())),
 			Part::Lookup(lookup) => parts.push(FieldPathPart::Lookup(lookup.to_sql())),
 			// Unsupported part kinds (e.g. `Part::Start` for parameter
 			// starts) fall back to a single flat field derived from the

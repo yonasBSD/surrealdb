@@ -109,7 +109,7 @@ pub async fn basic(
 				debug!("Authenticated as database user '{}'", user);
 				session.exp = expiration(u.session_duration)?;
 				let au = Auth::new(Actor::from_role_names(
-					u.name.clone(),
+					u.name.to_string(),
 					&u.roles,
 					Level::Database(ns.to_owned(), db.to_owned()),
 				)?);
@@ -125,7 +125,7 @@ pub async fn basic(
 				debug!("Authenticated as namespace user '{}'", user);
 				session.exp = expiration(u.session_duration)?;
 				let au = Auth::new(Actor::from_role_names(
-					u.name.clone(),
+					u.name.to_string(),
 					&u.roles,
 					Level::Namespace(ns.to_owned()),
 				)?);
@@ -140,7 +140,8 @@ pub async fn basic(
 			Ok(u) => {
 				debug!("Authenticated as root user '{}'", user);
 				session.exp = expiration(u.session_duration)?;
-				let au = Auth::new(Actor::from_role_names(u.name.clone(), &u.roles, Level::Root)?);
+				let au =
+					Auth::new(Actor::from_role_names(u.name.to_string(), &u.roles, Level::Root)?);
 
 				session.au = Arc::new(au);
 				Ok(())
@@ -400,7 +401,7 @@ pub async fn token(kvs: &Datastore, session: &mut Session, token: &str) -> Resul
 					session.ac = Some(ac.to_owned());
 					session.exp = expiration(de.session_duration)?;
 					session.au = Arc::new(Auth::new(Actor::new(
-						de.name.clone(),
+						de.name.to_string(),
 						roles,
 						Level::Database(ns.clone(), db.clone()),
 					)));
@@ -636,7 +637,7 @@ pub async fn token(kvs: &Datastore, session: &mut Session, token: &str) -> Resul
 			session.ac = Some(ac.to_owned());
 			session.exp = expiration(de.session_duration)?;
 			session.au = Arc::new(Auth::new(Actor::new(
-				de.name.clone(),
+				de.name.to_string(),
 				roles,
 				Level::Namespace(ns.clone()),
 			)));
@@ -786,7 +787,7 @@ pub async fn token(kvs: &Datastore, session: &mut Session, token: &str) -> Resul
 			);
 			session.ac = Some(ac.to_owned());
 			session.exp = expiration(de.session_duration)?;
-			session.au = Arc::new(Auth::new(Actor::new(de.name.clone(), roles, Level::Root)));
+			session.au = Arc::new(Auth::new(Actor::new(de.name.to_string(), roles, Level::Root)));
 			Ok(())
 		}
 		// Check if this is root authentication with user credentials

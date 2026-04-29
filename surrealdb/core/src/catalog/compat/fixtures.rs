@@ -54,7 +54,7 @@ use crate::val::{
 pub fn namespace_basic() -> NamespaceDefinition {
 	NamespaceDefinition {
 		namespace_id: NamespaceId(1),
-		name: "test".to_string(),
+		name: "test".into(),
 		comment: None,
 	}
 }
@@ -63,7 +63,7 @@ pub fn namespace_basic() -> NamespaceDefinition {
 pub fn namespace_with_comment() -> NamespaceDefinition {
 	NamespaceDefinition {
 		namespace_id: NamespaceId(123),
-		name: "production".to_string(),
+		name: "production".into(),
 		comment: Some("Production namespace".to_string()),
 	}
 }
@@ -77,7 +77,7 @@ pub fn database_basic() -> DatabaseDefinition {
 	DatabaseDefinition {
 		namespace_id: NamespaceId(1),
 		database_id: DatabaseId(1),
-		name: "test".to_string(),
+		name: "test".into(),
 		strict: false,
 		comment: None,
 		changefeed: None,
@@ -89,7 +89,7 @@ pub fn database_with_changefeed() -> DatabaseDefinition {
 	DatabaseDefinition {
 		namespace_id: NamespaceId(123),
 		database_id: DatabaseId(456),
-		name: "events".to_string(),
+		name: "events".into(),
 		strict: false,
 		comment: Some("Event store".to_string()),
 		changefeed: Some(ChangeFeed {
@@ -104,7 +104,7 @@ pub fn database_strict() -> DatabaseDefinition {
 	DatabaseDefinition {
 		namespace_id: NamespaceId(1),
 		database_id: DatabaseId(2),
-		name: "strict_db".to_string(),
+		name: "strict_db".into(),
 		strict: true,
 		comment: Some("Strict mode database".to_string()),
 		changefeed: None,
@@ -149,12 +149,12 @@ pub fn table_with_view() -> TableDefinition {
 			fields: Fields::Select(vec![
 				Field::All,
 				Field::Single(Selector {
-					expr: Expr::Literal(Literal::String("count".to_string())),
+					expr: Expr::Literal(Literal::String("count".into())),
 					alias: Some(Idiom::from_str("total").unwrap()),
 				}),
 			]),
 			tables: vec![TableName::from("users")],
-			condition: Some(Expr::Literal(Literal::String("active = true".to_string()))),
+			condition: Some(Expr::Literal(Literal::String("active = true".into()))),
 			groups: Some(Groups::default()),
 		}),
 		permissions: Permissions::default(),
@@ -205,7 +205,7 @@ pub fn table_relation() -> TableDefinition {
 		permissions: Permissions {
 			select: Permission::Full,
 			create: Permission::Specific(Expr::Literal(Literal::String(
-				"$auth.role = 'admin'".to_string(),
+				"$auth.role = 'admin'".into(),
 			))),
 			update: Permission::None,
 			delete: Permission::None,
@@ -213,8 +213,8 @@ pub fn table_relation() -> TableDefinition {
 		changefeed: None,
 		comment: Some("User likes relation".to_string()),
 		table_type: TableType::Relation(Relation {
-			from: vec!["users".to_string()],
-			to: vec!["posts".to_string(), "comments".to_string()],
+			from: vec![TableName::from("users")],
+			to: vec![TableName::from("posts"), TableName::from("comments")],
 			enforced: true,
 		}),
 		cache_fields_ts: UuidExt::nil(),
@@ -236,7 +236,7 @@ pub fn table_with_materialized_view() -> TableDefinition {
 		view: Some(ViewDefinition::Materialized {
 			fields: Fields::Select(vec![Field::All]),
 			tables: vec![TableName::from("users")],
-			condition: Some(Expr::Literal(Literal::String("active = true".to_string()))),
+			condition: Some(Expr::Literal(Literal::String("active = true".into()))),
 		}),
 		permissions: Permissions::default(),
 		changefeed: None,
@@ -280,7 +280,7 @@ pub fn subscription_basic() -> SubscriptionDefinition {
 		id: UuidExt::nil(),
 		node: UuidExt::nil(),
 		fields: SubscriptionFields::Diff,
-		what: Expr::Literal(Literal::String("users".to_string())),
+		what: Expr::Literal(Literal::String("users".into())),
 		cond: None,
 		fetch: None,
 		auth: None,
@@ -297,15 +297,13 @@ pub fn subscription_with_filters() -> SubscriptionDefinition {
 		fields: SubscriptionFields::Select(Fields::Select(vec![
 			Field::All,
 			Field::Single(Selector {
-				expr: Expr::Literal(Literal::String("name".to_string())),
+				expr: Expr::Literal(Literal::String("name".into())),
 				alias: None,
 			}),
 		])),
-		what: Expr::Literal(Literal::String("users".to_string())),
-		cond: Some(Expr::Literal(Literal::String("active = true".to_string()))),
-		fetch: Some(Fetchs::new(vec![Fetch(Expr::Literal(Literal::String(
-			"profile".to_string(),
-		)))])),
+		what: Expr::Literal(Literal::String("users".into())),
+		cond: Some(Expr::Literal(Literal::String("active = true".into()))),
+		fetch: Some(Fetchs::new(vec![Fetch(Expr::Literal(Literal::String("profile".into())))])),
 		auth: Some(Auth::default()),
 		session: Some(Value::default()),
 		vars: BTreeMap::new(),
@@ -315,14 +313,14 @@ pub fn subscription_with_filters() -> SubscriptionDefinition {
 /// Subscription with non-empty vars
 pub fn subscription_with_vars() -> SubscriptionDefinition {
 	let mut vars = BTreeMap::new();
-	vars.insert("user_id".to_string(), Value::String("user:123".to_string()));
+	vars.insert("user_id".to_string(), Value::String("user:123".into()));
 	vars.insert("threshold".to_string(), Value::Number(Number::Int(50)));
 	SubscriptionDefinition {
 		id: UuidExt::nil(),
 		node: UuidExt::nil(),
 		fields: SubscriptionFields::Diff,
-		what: Expr::Literal(Literal::String("orders".to_string())),
-		cond: Some(Expr::Literal(Literal::String("amount > $threshold".to_string()))),
+		what: Expr::Literal(Literal::String("orders".into())),
+		cond: Some(Expr::Literal(Literal::String("amount > $threshold".into()))),
 		fetch: None,
 		auth: Some(Auth::default()),
 		session: Some(Value::default()),
@@ -337,7 +335,7 @@ pub fn subscription_with_vars() -> SubscriptionDefinition {
 /// Bearer access with JWT
 pub fn access_bearer() -> AccessDefinition {
 	AccessDefinition {
-		name: "api_access".to_string(),
+		name: "api_access".into(),
 		access_type: AccessType::Bearer(BearerAccess {
 			kind: BearerAccessType::Bearer,
 			subject: BearerAccessSubject::Record,
@@ -364,7 +362,7 @@ pub fn access_bearer() -> AccessDefinition {
 /// Access with custom authenticate expression
 pub fn access_with_authenticate() -> AccessDefinition {
 	AccessDefinition {
-		name: "custom_auth".to_string(),
+		name: "custom_auth".into(),
 		access_type: AccessType::Bearer(BearerAccess {
 			kind: BearerAccessType::Bearer,
 			subject: BearerAccessSubject::User,
@@ -378,7 +376,7 @@ pub fn access_with_authenticate() -> AccessDefinition {
 		}),
 		base: Base::Db,
 		authenticate: Some(Expr::Literal(Literal::String(
-			"SELECT * FROM user WHERE id = $auth.id".to_string(),
+			"SELECT * FROM user WHERE id = $auth.id".into(),
 		))),
 		grant_duration: None,
 		token_duration: Some(Duration::from_secs(3600)),
@@ -390,15 +388,14 @@ pub fn access_with_authenticate() -> AccessDefinition {
 /// Record-based access with signup/signin
 pub fn access_record() -> AccessDefinition {
 	AccessDefinition {
-		name: "user_access".to_string(),
+		name: "user_access".into(),
 		access_type: AccessType::Record(RecordAccess {
 			signup: Some(Expr::Literal(Literal::String(
-				"CREATE user SET email = $email, pass = crypto::argon2::generate($pass)"
-					.to_string(),
+				"CREATE user SET email = $email, pass = crypto::argon2::generate($pass)".into(),
 			))),
 			signin: Some(Expr::Literal(Literal::String(
 				"SELECT * FROM user WHERE email = $email AND crypto::argon2::compare(pass, $pass)"
-					.to_string(),
+					.into(),
 			))),
 			jwt: JwtAccess {
 				verify: JwtAccessVerify::Key(JwtAccessVerifyKey {
@@ -424,7 +421,7 @@ pub fn access_record() -> AccessDefinition {
 		}),
 		base: Base::Db,
 		authenticate: Some(Expr::Literal(Literal::String(
-			"SELECT * FROM user WHERE id = $auth.id".to_string(),
+			"SELECT * FROM user WHERE id = $auth.id".into(),
 		))),
 		grant_duration: Some(Duration::from_secs(604800)),
 		token_duration: Some(Duration::from_secs(900)),
@@ -436,7 +433,7 @@ pub fn access_record() -> AccessDefinition {
 /// JWT access with JWKS verification
 pub fn access_jwt_jwks() -> AccessDefinition {
 	AccessDefinition {
-		name: "external_jwt".to_string(),
+		name: "external_jwt".into(),
 		access_type: AccessType::Jwt(JwtAccess {
 			verify: JwtAccessVerify::Jwks(JwtAccessVerifyJwks {
 				url: "https://auth.example.com/.well-known/jwks.json".to_string(),
@@ -455,7 +452,7 @@ pub fn access_jwt_jwks() -> AccessDefinition {
 /// Bearer access with refresh type
 pub fn access_bearer_refresh() -> AccessDefinition {
 	AccessDefinition {
-		name: "refresh_access".to_string(),
+		name: "refresh_access".into(),
 		access_type: AccessType::Bearer(BearerAccess {
 			kind: BearerAccessType::Refresh,
 			subject: BearerAccessSubject::Record,
@@ -555,7 +552,7 @@ pub fn grant_bearer() -> AccessGrant {
 /// Minimal analyzer
 pub fn analyzer_basic() -> AnalyzerDefinition {
 	AnalyzerDefinition {
-		name: "simple".to_string(),
+		name: "simple".into(),
 		function: None,
 		tokenizers: None,
 		filters: None,
@@ -566,8 +563,8 @@ pub fn analyzer_basic() -> AnalyzerDefinition {
 /// Analyzer with tokenizers and filters
 pub fn analyzer_with_tokenizers() -> AnalyzerDefinition {
 	AnalyzerDefinition {
-		name: "english".to_string(),
-		function: Some("fn::custom_analyzer".to_string()),
+		name: "english".into(),
+		function: Some("fn::custom_analyzer".into()),
 		tokenizers: Some(vec![Tokenizer::Camel, Tokenizer::Class]),
 		filters: Some(vec![Filter::Ascii, Filter::Lowercase]),
 		comment: Some("English text analyzer".to_string()),
@@ -584,7 +581,7 @@ pub fn api_basic() -> ApiDefinition {
 		path: "/api/v1/users".parse().unwrap(),
 		actions: vec![ApiActionDefinition {
 			methods: vec![ApiMethod::Get],
-			action: Expr::Literal(Literal::String("SELECT * FROM users".to_string())),
+			action: Expr::Literal(Literal::String("SELECT * FROM users".into())),
 			config: ApiConfigDefinition::default(),
 		}],
 		fallback: None,
@@ -602,24 +599,24 @@ pub fn api_with_middleware() -> ApiDefinition {
 		actions: vec![
 			ApiActionDefinition {
 				methods: vec![ApiMethod::Get, ApiMethod::Post],
-				action: Expr::Literal(Literal::String("SELECT * FROM orders".to_string())),
+				action: Expr::Literal(Literal::String("SELECT * FROM orders".into())),
 				config: ApiConfigDefinition::default(),
 			},
 			ApiActionDefinition {
 				methods: vec![ApiMethod::Delete],
-				action: Expr::Literal(Literal::String("DELETE FROM orders".to_string())),
+				action: Expr::Literal(Literal::String("DELETE FROM orders".into())),
 				config: ApiConfigDefinition::default(),
 			},
 		],
-		fallback: Some(Expr::Literal(Literal::String("RETURN 404".to_string()))),
+		fallback: Some(Expr::Literal(Literal::String("RETURN 404".into()))),
 		config: ApiConfigDefinition {
 			middleware: vec![
 				MiddlewareDefinition {
-					name: "auth".to_string(),
+					name: "auth".into(),
 					args: vec![],
 				},
 				MiddlewareDefinition {
-					name: "rate_limit".to_string(),
+					name: "rate_limit".into(),
 					args: vec![Value::from(100)],
 				},
 			],
@@ -636,17 +633,17 @@ pub fn api_with_auth_limit() -> ApiDefinition {
 		actions: vec![
 			ApiActionDefinition {
 				methods: vec![ApiMethod::Get, ApiMethod::Put, ApiMethod::Patch],
-				action: Expr::Literal(Literal::String("SELECT * FROM admin_data".to_string())),
+				action: Expr::Literal(Literal::String("SELECT * FROM admin_data".into())),
 				config: ApiConfigDefinition {
 					middleware: vec![],
 					permissions: Permission::Specific(Expr::Literal(Literal::String(
-						"$auth.role = 'admin'".to_string(),
+						"$auth.role = 'admin'".into(),
 					))),
 				},
 			},
 			ApiActionDefinition {
 				methods: vec![ApiMethod::Delete, ApiMethod::Trace],
-				action: Expr::Literal(Literal::String("RETURN { status: 'ok' }".to_string())),
+				action: Expr::Literal(Literal::String("RETURN { status: 'ok' }".into())),
 				config: ApiConfigDefinition::default(),
 			},
 		],
@@ -669,7 +666,7 @@ pub fn bucket_basic() -> BucketDefinition {
 	BucketDefinition {
 		id: None,
 		readonly: false,
-		name: "uploads".to_string(),
+		name: "uploads".into(),
 		backend: None,
 		comment: None,
 		permissions: Permission::Full,
@@ -681,8 +678,8 @@ pub fn bucket_readonly() -> BucketDefinition {
 	BucketDefinition {
 		id: Some(BucketId(123)),
 		readonly: true,
-		name: "archives".to_string(),
-		backend: Some("s3://bucket/archives".to_string()),
+		name: "archives".into(),
+		backend: Some("s3://bucket/archives".into()),
 		comment: Some("Read-only archive storage".to_string()),
 		permissions: Permission::None,
 	}
@@ -709,11 +706,11 @@ pub fn config_default() -> ConfigDefinition {
 pub fn config_api() -> ConfigDefinition {
 	ConfigDefinition::Api(ApiConfigDefinition {
 		middleware: vec![MiddlewareDefinition {
-			name: "cors".to_string(),
-			args: vec![Value::String("*".to_string())],
+			name: "cors".into(),
+			args: vec![Value::String("*".into())],
 		}],
 		permissions: Permission::Specific(Expr::Literal(Literal::String(
-			"$auth.role = 'admin'".to_string(),
+			"$auth.role = 'admin'".into(),
 		))),
 	})
 }
@@ -739,12 +736,10 @@ pub fn config_graphql_full() -> ConfigDefinition {
 /// Table event trigger
 pub fn event_basic() -> EventDefinition {
 	EventDefinition {
-		name: "on_create".to_string(),
+		name: "on_create".into(),
 		target_table: TableName::from("users"),
-		when: Expr::Literal(Literal::String("$event = 'CREATE'".to_string())),
-		then: vec![Expr::Literal(Literal::String(
-			"CREATE audit SET action = 'create'".to_string(),
-		))],
+		when: Expr::Literal(Literal::String("$event = 'CREATE'".into())),
+		then: vec![Expr::Literal(Literal::String("CREATE audit SET action = 'create'".into()))],
 		comment: Some("Audit log on create".to_string()),
 		auth_limit: AuthLimit::new_no_limit(),
 		kind: EventKind::Sync,
@@ -754,11 +749,11 @@ pub fn event_basic() -> EventDefinition {
 /// Async event with retry and max_depth
 pub fn event_async() -> EventDefinition {
 	EventDefinition {
-		name: "on_update_async".to_string(),
+		name: "on_update_async".into(),
 		target_table: TableName::from("orders"),
-		when: Expr::Literal(Literal::String("$event = 'UPDATE'".to_string())),
+		when: Expr::Literal(Literal::String("$event = 'UPDATE'".into())),
 		then: vec![Expr::Literal(Literal::String(
-			"CREATE notification SET order = $after.id, type = 'updated'".to_string(),
+			"CREATE notification SET order = $after.id, type = 'updated'".into(),
 		))],
 		comment: Some("Async notification on order update".to_string()),
 		auth_limit: AuthLimit::new_no_limit(),
@@ -803,10 +798,10 @@ pub fn field_with_type() -> FieldDefinition {
 		field_kind: Some(Kind::String),
 		readonly: false,
 		flexible: false,
-		value: Some(Expr::Literal(Literal::String("string::lowercase($value)".to_string()))),
-		assert: Some(Expr::Literal(Literal::String("string::is::email($value)".to_string()))),
+		value: Some(Expr::Literal(Literal::String("string::lowercase($value)".into()))),
+		assert: Some(Expr::Literal(Literal::String("string::is::email($value)".into()))),
 		computed: None,
-		default: DefineDefault::Always(Expr::Literal(Literal::String("".to_string()))),
+		default: DefineDefault::Always(Expr::Literal(Literal::String("".into()))),
 		select_permission: Permission::Full,
 		create_permission: Permission::Full,
 		update_permission: Permission::Full,
@@ -827,7 +822,7 @@ pub fn field_readonly() -> FieldDefinition {
 		flexible: false,
 		value: None,
 		assert: None,
-		computed: Some(Expr::Literal(Literal::String("time::now()".to_string()))),
+		computed: Some(Expr::Literal(Literal::String("time::now()".into()))),
 		default: DefineDefault::None,
 		select_permission: Permission::Full,
 		create_permission: Permission::None,
@@ -847,14 +842,14 @@ pub fn field_flexible_with_reference() -> FieldDefinition {
 		field_kind: Some(Kind::Number),
 		readonly: false,
 		flexible: true,
-		value: Some(Expr::Literal(Literal::String("$price * $quantity".to_string()))),
+		value: Some(Expr::Literal(Literal::String("$price * $quantity".into()))),
 		assert: None,
 		computed: None,
 		default: DefineDefault::None,
 		select_permission: Permission::Full,
 		create_permission: Permission::Full,
 		update_permission: Permission::Specific(Expr::Literal(Literal::String(
-			"$auth.role = 'admin'".to_string(),
+			"$auth.role = 'admin'".into(),
 		))),
 		comment: Some("Calculated total price".to_string()),
 		reference: Some(Reference {
@@ -878,14 +873,14 @@ pub fn field_with_default_set() -> FieldDefinition {
 		flexible: false,
 		value: None,
 		assert: Some(Expr::Literal(Literal::String(
-			"$value INSIDE ['pending', 'active', 'closed']".to_string(),
+			"$value INSIDE ['pending', 'active', 'closed']".into(),
 		))),
 		computed: None,
-		default: DefineDefault::Set(Expr::Literal(Literal::String("'pending'".to_string()))),
+		default: DefineDefault::Set(Expr::Literal(Literal::String("'pending'".into()))),
 		select_permission: Permission::Full,
 		create_permission: Permission::Full,
 		update_permission: Permission::Specific(Expr::Literal(Literal::String(
-			"$auth.role = 'manager'".to_string(),
+			"$auth.role = 'manager'".into(),
 		))),
 		comment: None,
 		reference: Some(Reference {
@@ -917,7 +912,7 @@ pub fn field_record_type() -> FieldDefinition {
 		comment: Some("Author reference".to_string()),
 		reference: Some(Reference {
 			on_delete: ReferenceDeleteStrategy::Custom(Expr::Literal(Literal::String(
-				"DELETE $parent".to_string(),
+				"DELETE $parent".into(),
 			))),
 		}),
 		auth_limit: AuthLimit::new(
@@ -935,9 +930,9 @@ pub fn field_record_type() -> FieldDefinition {
 /// Simple function
 pub fn function_basic() -> FunctionDefinition {
 	FunctionDefinition {
-		name: "greet".to_string(),
+		name: "greet".into(),
 		args: vec![],
-		block: Block(vec![Expr::Literal(Literal::String("RETURN 'Hello, World!'".to_string()))]),
+		block: Block(vec![Expr::Literal(Literal::String("RETURN 'Hello, World!'".into()))]),
 		comment: None,
 		permissions: Permission::Full,
 		returns: None,
@@ -948,9 +943,9 @@ pub fn function_basic() -> FunctionDefinition {
 /// Function with arguments and return type
 pub fn function_with_args() -> FunctionDefinition {
 	FunctionDefinition {
-		name: "add_numbers".to_string(),
+		name: "add_numbers".into(),
 		args: vec![("a".to_string(), Kind::Number), ("b".to_string(), Kind::Number)],
-		block: Block(vec![Expr::Literal(Literal::String("RETURN $a + $b".to_string()))]),
+		block: Block(vec![Expr::Literal(Literal::String("RETURN $a + $b".into()))]),
 		comment: Some("Add two numbers".to_string()),
 		permissions: Permission::Full,
 		returns: Some(Kind::Number),
@@ -966,7 +961,7 @@ pub fn function_with_args() -> FunctionDefinition {
 pub fn index_basic() -> IndexDefinition {
 	IndexDefinition {
 		index_id: IndexId(1),
-		name: "idx_name".to_string(),
+		name: "idx_name".into(),
 		table_name: TableName::from("users"),
 		cols: vec![Idiom::from_str("name").unwrap()],
 		index: Index::Idx,
@@ -979,7 +974,7 @@ pub fn index_basic() -> IndexDefinition {
 pub fn index_unique() -> IndexDefinition {
 	IndexDefinition {
 		index_id: IndexId(2),
-		name: "idx_email_unique".to_string(),
+		name: "idx_email_unique".into(),
 		table_name: TableName::from("users"),
 		cols: vec![Idiom::from_str("email").unwrap()],
 		index: Index::Uniq,
@@ -992,7 +987,7 @@ pub fn index_unique() -> IndexDefinition {
 pub fn index_hnsw() -> IndexDefinition {
 	IndexDefinition {
 		index_id: IndexId(3),
-		name: "idx_embedding_hnsw".to_string(),
+		name: "idx_embedding_hnsw".into(),
 		table_name: TableName::from("documents"),
 		cols: vec![Idiom::from_str("embedding").unwrap()],
 		index: Index::Hnsw(HnswParams {
@@ -1016,11 +1011,11 @@ pub fn index_hnsw() -> IndexDefinition {
 pub fn index_fulltext() -> IndexDefinition {
 	IndexDefinition {
 		index_id: IndexId(4),
-		name: "idx_content_search".to_string(),
+		name: "idx_content_search".into(),
 		table_name: TableName::from("articles"),
 		cols: vec![Idiom::from_str("title").unwrap(), Idiom::from_str("body").unwrap()],
 		index: Index::FullText(FullTextParams {
-			analyzer: "english".to_string(),
+			analyzer: "english".into(),
 			highlight: true,
 			scoring: Scoring::Bm {
 				k1: 1.2,
@@ -1036,12 +1031,10 @@ pub fn index_fulltext() -> IndexDefinition {
 pub fn index_count() -> IndexDefinition {
 	IndexDefinition {
 		index_id: IndexId(5),
-		name: "idx_status_count".to_string(),
+		name: "idx_status_count".into(),
 		table_name: TableName::from("orders"),
 		cols: vec![Idiom::from_str("status").unwrap()],
-		index: Index::Count(Some(Cond(Expr::Literal(Literal::String(
-			"status = 'active'".to_string(),
-		))))),
+		index: Index::Count(Some(Cond(Expr::Literal(Literal::String("status = 'active'".into()))))),
 		comment: None,
 		prepare_remove: true,
 	}
@@ -1054,9 +1047,9 @@ pub fn index_count() -> IndexDefinition {
 /// ML model definition
 pub fn model_basic() -> MlModelDefinition {
 	MlModelDefinition {
-		name: "sentiment".to_string(),
-		hash: "sha256:abc123def456".to_string(),
-		version: "1.0.0".to_string(),
+		name: "sentiment".into(),
+		hash: "sha256:abc123def456".into(),
+		version: "1.0.0".into(),
 		comment: Some("Sentiment analysis model".to_string()),
 		permissions: Permission::Full,
 	}
@@ -1069,7 +1062,7 @@ pub fn model_basic() -> MlModelDefinition {
 /// Boolean parameter
 pub fn param_bool() -> ParamDefinition {
 	ParamDefinition {
-		name: "debug".to_string(),
+		name: "debug".into(),
 		value: Value::Bool(true),
 		comment: Some("Debug mode flag".to_string()),
 		permissions: Permission::Full,
@@ -1079,8 +1072,8 @@ pub fn param_bool() -> ParamDefinition {
 /// String parameter
 pub fn param_string() -> ParamDefinition {
 	ParamDefinition {
-		name: "app_name".to_string(),
-		value: Value::String("MyApp".to_string()),
+		name: "app_name".into(),
+		value: Value::String("MyApp".into()),
 		comment: None,
 		permissions: Permission::Full,
 	}
@@ -1093,7 +1086,7 @@ pub fn param_string() -> ParamDefinition {
 /// Minimal sequence
 pub fn sequence_basic() -> SequenceDefinition {
 	SequenceDefinition {
-		name: "order_id".to_string(),
+		name: "order_id".into(),
 		batch: 1,
 		start: 1,
 		timeout: None,
@@ -1103,7 +1096,7 @@ pub fn sequence_basic() -> SequenceDefinition {
 /// Sequence with custom options
 pub fn sequence_with_options() -> SequenceDefinition {
 	SequenceDefinition {
-		name: "invoice_number".to_string(),
+		name: "invoice_number".into(),
 		batch: 100,
 		start: 1000,
 		timeout: Some(Duration::from_secs(30)),
@@ -1117,7 +1110,7 @@ pub fn sequence_with_options() -> SequenceDefinition {
 /// Minimal user
 pub fn user_basic() -> UserDefinition {
 	UserDefinition {
-		name: "admin".to_string(),
+		name: "admin".into(),
 		hash: "$argon2id$v=19$m=65536,t=3,p=4$hash".to_string(),
 		code: "TOTP_CODE".to_string(),
 		roles: vec!["owner".to_string()],
@@ -1131,7 +1124,7 @@ pub fn user_basic() -> UserDefinition {
 /// User with custom token/session durations
 pub fn user_with_durations() -> UserDefinition {
 	UserDefinition {
-		name: "api_user".to_string(),
+		name: "api_user".into(),
 		hash: "$argon2id$v=19$m=65536,t=3,p=4$hash".to_string(),
 		code: "".to_string(),
 		roles: vec!["viewer".to_string(), "editor".to_string()],
@@ -1145,7 +1138,7 @@ pub fn user_with_durations() -> UserDefinition {
 /// User with database-level base
 pub fn user_db_base() -> UserDefinition {
 	UserDefinition {
-		name: "db_user".to_string(),
+		name: "db_user".into(),
 		hash: "$argon2id$v=19$m=65536,t=3,p=4$hash".to_string(),
 		code: "".to_string(),
 		roles: vec!["editor".to_string()],
@@ -1192,7 +1185,7 @@ pub fn record_number_decimal() -> Record {
 
 /// Record with string data
 pub fn record_string() -> Record {
-	Record::new(Value::String("test data".to_string()))
+	Record::new(Value::String("test data".into()))
 }
 
 /// Record with bytes data
@@ -1336,7 +1329,7 @@ pub fn record_regex() -> Record {
 /// Record with array data
 pub fn record_array() -> Record {
 	Record::new(Value::Array(Array::from(vec![
-		Value::String("item1".to_string()),
+		Value::String("item1".into()),
 		Value::Number(Number::Int(123)),
 		Value::Bool(true),
 	])))
@@ -1345,7 +1338,7 @@ pub fn record_array() -> Record {
 /// Record with object data
 pub fn record_object() -> Record {
 	let mut obj = Object::default();
-	obj.insert("name".to_string(), Value::String("Alice".to_string()));
+	obj.insert("name".to_string(), Value::String("Alice".into()));
 	obj.insert("age".to_string(), Value::Number(Number::Int(30)));
 	obj.insert("active".to_string(), Value::Bool(true));
 	Record::new(Value::Object(obj))
@@ -1354,9 +1347,9 @@ pub fn record_object() -> Record {
 /// Record with set data
 pub fn record_set() -> Record {
 	Record::new(Value::Set(Set::from(vec![
-		Value::String("tag1".to_string()),
-		Value::String("tag2".to_string()),
-		Value::String("tag3".to_string()),
+		Value::String("tag1".into()),
+		Value::String("tag2".into()),
+		Value::String("tag3".into()),
 	])))
 }
 
@@ -1370,7 +1363,7 @@ pub fn record_with_metadata() -> Record {
 /// Record with explicit Table metadata type
 pub fn record_with_table_metadata() -> Record {
 	let mut obj = Object::default();
-	obj.insert("name".to_string(), Value::String("Test Record".to_string()));
+	obj.insert("name".to_string(), Value::String("Test Record".into()));
 	let mut record = Record::new(Value::Object(obj));
 	record.set_record_type(RecordType::Table);
 	record
@@ -1398,7 +1391,7 @@ pub fn version_3() -> MajorVersion {
 pub fn api_action_basic() -> ApiActionDefinition {
 	ApiActionDefinition {
 		methods: vec![ApiMethod::Get],
-		action: Expr::Literal(Literal::String("SELECT * FROM users".to_string())),
+		action: Expr::Literal(Literal::String("SELECT * FROM users".into())),
 		config: ApiConfigDefinition::default(),
 	}
 }
@@ -1407,7 +1400,7 @@ pub fn api_action_basic() -> ApiActionDefinition {
 pub fn api_action_multi_method() -> ApiActionDefinition {
 	ApiActionDefinition {
 		methods: vec![ApiMethod::Get, ApiMethod::Post, ApiMethod::Put],
-		action: Expr::Literal(Literal::String("CREATE users CONTENT $body".to_string())),
+		action: Expr::Literal(Literal::String("CREATE users CONTENT $body".into())),
 		config: ApiConfigDefinition::default(),
 	}
 }
@@ -1503,7 +1496,7 @@ pub fn node_live_query_basic() -> NodeLiveQuery {
 pub fn table_mutations_set() -> TableMutations {
 	let mut mutations = TableMutations::new(TableName::from("users"));
 	let mut obj = Object::default();
-	obj.insert("name".to_string(), Value::String("Alice".to_string()));
+	obj.insert("name".to_string(), Value::String("Alice".into()));
 	mutations
 		.1
 		.push(TableMutation::Set(RecordId::new(TableName::from("users"), 1), Value::Object(obj)));
@@ -1528,14 +1521,14 @@ pub fn table_mutations_def() -> TableMutations {
 pub fn table_mutations_set_with_diff() -> TableMutations {
 	let mut mutations = TableMutations::new(TableName::from("users"));
 	let mut obj = Object::default();
-	obj.insert("name".to_string(), Value::String("Bob".to_string()));
+	obj.insert("name".to_string(), Value::String("Bob".into()));
 	obj.insert("age".to_string(), Value::Number(Number::Int(30)));
 	mutations.1.push(TableMutation::SetWithDiff(
 		RecordId::new(TableName::from("users"), 1),
 		Value::Object(obj),
 		vec![Operation::Replace {
-			path: vec!["name".to_string()],
-			value: Value::String("Alice".to_string()),
+			path: vec!["name".into()],
+			value: Value::String("Alice".into()),
 		}],
 	));
 	mutations
@@ -1545,7 +1538,7 @@ pub fn table_mutations_set_with_diff() -> TableMutations {
 pub fn table_mutations_del_with_original() -> TableMutations {
 	let mut mutations = TableMutations::new(TableName::from("users"));
 	let mut obj = Object::default();
-	obj.insert("name".to_string(), Value::String("Charlie".to_string()));
+	obj.insert("name".to_string(), Value::String("Charlie".into()));
 	mutations.1.push(TableMutation::DelWithOriginal(
 		RecordId::new(TableName::from("users"), 2),
 		Value::Object(obj),
@@ -1606,25 +1599,17 @@ pub fn appending_none() -> Appending {
 }
 
 pub fn appending_old_values() -> Appending {
-	Appending::new(
-		Some(vec![Value::String("old value".to_string())]),
-		None,
-		RecordIdKey::Number(123),
-	)
+	Appending::new(Some(vec![Value::String("old value".into())]), None, RecordIdKey::Number(123))
 }
 
 pub fn appending_new_values() -> Appending {
-	Appending::new(
-		None,
-		Some(vec![Value::String("new value".to_string())]),
-		RecordIdKey::Number(123),
-	)
+	Appending::new(None, Some(vec![Value::String("new value".into())]), RecordIdKey::Number(123))
 }
 
 pub fn appending_both() -> Appending {
 	Appending::new(
-		Some(vec![Value::String("old value".to_string())]),
-		Some(vec![Value::String("new value".to_string())]),
+		Some(vec![Value::String("old value".into())]),
+		Some(vec![Value::String("new value".into())]),
 		RecordIdKey::Number(123),
 	)
 }
@@ -1694,7 +1679,7 @@ pub fn recordid_key_number() -> RecordIdKey {
 
 /// RecordIdKey with string
 pub fn recordid_key_string() -> RecordIdKey {
-	RecordIdKey::String("test_key".to_string())
+	RecordIdKey::String("test_key".into())
 }
 
 /// RecordIdKey with UUID
@@ -1704,10 +1689,7 @@ pub fn recordid_key_uuid() -> RecordIdKey {
 
 /// RecordIdKey with array
 pub fn recordid_key_array() -> RecordIdKey {
-	RecordIdKey::Array(Array::from(vec![
-		Value::Number(Number::Int(1)),
-		Value::String("a".to_string()),
-	]))
+	RecordIdKey::Array(Array::from(vec![Value::Number(Number::Int(1)), Value::String("a".into())]))
 }
 
 /// RecordIdKey with object

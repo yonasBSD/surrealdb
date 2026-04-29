@@ -146,7 +146,7 @@ impl Document {
 							!tb.schemafull,
 							// If strict, then throw an error on an undefined field
 							Error::FieldUndefined {
-								table: tb.name.clone().into_string(),
+								table: tb.name.as_str().to_string(),
 								field: current_doc_field_idiom.clone(),
 							}
 						);
@@ -162,7 +162,7 @@ impl Document {
 							!tb.schemafull,
 							// If strict, then throw an error on an undefined field
 							Error::FieldUndefined {
-								table: tb.name.clone().into_string(),
+								table: tb.name.as_str().to_string(),
 								field: current_doc_field_idiom.clone(),
 							}
 						);

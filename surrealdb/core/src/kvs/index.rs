@@ -104,13 +104,13 @@ impl From<BuildingStatus> for Value {
 				updated,
 			} => {
 				if let Some(c) = initial {
-					o.insert("initial".to_string(), c.into());
+					o.insert("initial", c.into());
 				}
 				if let Some(c) = pending {
-					o.insert("pending".to_string(), c.into());
+					o.insert("pending", c.into());
 				}
 				if let Some(c) = updated {
-					o.insert("updated".to_string(), c.into());
+					o.insert("updated", c.into());
 				}
 				"indexing"
 			}
@@ -120,23 +120,23 @@ impl From<BuildingStatus> for Value {
 				updated,
 			} => {
 				if let Some(c) = initial {
-					o.insert("initial".to_string(), c.into());
+					o.insert("initial", c.into());
 				}
 				if let Some(c) = pending {
-					o.insert("pending".to_string(), c.into());
+					o.insert("pending", c.into());
 				}
 				if let Some(c) = updated {
-					o.insert("updated".to_string(), c.into());
+					o.insert("updated", c.into());
 				}
 				"ready"
 			}
 			BuildingStatus::Aborted => "aborted",
 			BuildingStatus::Error(error) => {
-				o.insert("error".to_string(), error.into());
+				o.insert("error", error.into());
 				"error"
 			}
 		};
-		o.insert("status".to_string(), s.into());
+		o.insert("status", s.into());
 		o.into()
 	}
 }
@@ -229,7 +229,7 @@ impl IndexBuilder {
 				ensure!(
 					e.get().is_finished(),
 					Error::IndexAlreadyBuilding {
-						name: ix.name.clone(),
+						name: ix.name.to_string(),
 					}
 				);
 				let ib = self.start_building(ctx, opt, tb, ix, key, sdr)?;

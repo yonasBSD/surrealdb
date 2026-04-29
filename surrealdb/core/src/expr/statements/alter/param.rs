@@ -2,6 +2,7 @@ use std::ops::Deref;
 
 use anyhow::Result;
 use reblessive::tree::Stk;
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql};
 
 use super::AlterKind;
@@ -16,7 +17,7 @@ use crate::val::Value;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub(crate) struct AlterParamStatement {
-	pub name: String,
+	pub name: Strand,
 	pub if_exists: bool,
 	pub value: Option<Expr>,
 	pub comment: AlterKind<String>,

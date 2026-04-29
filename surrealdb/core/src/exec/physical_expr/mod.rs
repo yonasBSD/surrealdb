@@ -3,6 +3,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use surrealdb_strand::Strand;
 use surrealdb_types::ToSql;
 
 use crate::dbs::Capabilities;
@@ -87,7 +88,7 @@ pub struct EvalContext<'a> {
 
 	/// Block-local parameters (LET bindings within current block scope).
 	/// These shadow global parameters with the same name.
-	pub local_params: Option<&'a HashMap<String, Value>>,
+	pub local_params: Option<&'a HashMap<Strand, Value>>,
 
 	/// Active recursion context for RepeatRecurse evaluation.
 	/// Set by evaluate_recurse_iterative when the inner path contains .@ markers.
@@ -432,11 +433,11 @@ mod tests {
 
 		let obj = Value::Object(Object::from_iter([(
 			"key1".to_string(),
-			Value::String("value1".to_string()),
+			Value::String("value1".into()),
 		)]));
 
-		let result = evaluate_index(&obj, &Value::String("key1".to_string())).unwrap();
-		assert_eq!(result, Value::String("value1".to_string()));
+		let result = evaluate_index(&obj, &Value::String("key1".into())).unwrap();
+		assert_eq!(result, Value::String("value1".into()));
 	}
 
 	// =========================================================================

@@ -1209,7 +1209,7 @@ impl Iterator {
 				return Ok(count.into());
 			}
 			if matches!(pro.record_strategy, RecordStrategy::KeysOnly) {
-				return Ok(map! { "count".to_string() => Value::from(1) }.into());
+				return Ok(map! { "count" => Value::from(1) }.into());
 			}
 		}
 		// Otherwise, we process the document

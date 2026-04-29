@@ -1,6 +1,7 @@
 use std::ops::Deref;
 
 use anyhow::Result;
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 use uuid::Uuid;
 
@@ -26,7 +27,7 @@ use crate::val::TableName;
 /// This allows administrators to verify query performance before permanently removing an index.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub(crate) struct AlterIndexStatement {
-	pub name: String,
+	pub name: Strand,
 	pub table: TableName,
 	pub if_exists: bool,
 	/// If true, marks the index as decommissioned
@@ -52,7 +53,7 @@ impl AlterIndexStatement {
 					return Ok(Value::None);
 				} else {
 					return Err(Error::IxNotFound {
-						name: self.name.clone(),
+						name: self.name.to_string(),
 					}
 					.into());
 				}
@@ -105,8 +106,8 @@ impl ToSql for AlterIndexStatement {
 			f,
 			fmt,
 			" {} ON {}",
-			EscapeKwIdent(&self.name, &["IF"]),
-			EscapeKwFreeIdent(&self.table)
+			EscapeKwIdent(self.name.as_str(), &["IF"]),
+			EscapeKwFreeIdent(self.table.as_str())
 		);
 
 		if self.prepare_remove {

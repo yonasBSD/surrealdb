@@ -427,7 +427,7 @@ pub(crate) fn omit_field_sync(value: &mut Value, idiom: &Idiom) {
 		if let Some(Part::Field(field_name)) = idiom.first()
 			&& let Value::Object(obj) = value
 		{
-			obj.remove(&**field_name);
+			obj.remove(field_name);
 		}
 	} else {
 		// For nested paths, traverse and remove
@@ -446,8 +446,8 @@ fn omit_nested_field(value: &mut Value, idiom: &Idiom, depth: usize) {
 		Part::Field(field_name) => {
 			if let Value::Object(obj) = value {
 				if is_last {
-					obj.remove(&**field_name);
-				} else if let Some(nested) = obj.get_mut(&**field_name) {
+					obj.remove(field_name);
+				} else if let Some(nested) = obj.get_mut(field_name) {
 					omit_nested_field(nested, idiom, depth + 1);
 				}
 			}

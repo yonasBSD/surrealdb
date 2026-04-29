@@ -131,7 +131,7 @@ impl DefineIndexStatement {
 				// Sub-fields of computed fields cannot be indexed
 				if f.computed.is_some() {
 					bail!(Error::ComputedFieldCannotBeIndexed {
-						field: first.clone(),
+						field: first.as_str().to_owned(),
 						index: name
 					});
 				}
@@ -153,7 +153,7 @@ impl DefineIndexStatement {
 		// Process the statement
 		let index_def = IndexDefinition {
 			index_id,
-			name,
+			name: name.into(),
 			table_name,
 			cols: cols.clone(),
 			index: self.index.clone(),

@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql};
 
 use crate::err::Error;
@@ -29,7 +30,7 @@ use crate::val::{Array, Value};
 #[derive(Debug)]
 pub struct LetPlan {
 	/// Parameter name to bind (without $)
-	pub name: String,
+	pub name: Strand,
 	/// Metrics for EXPLAIN ANALYZE
 	pub(crate) metrics: Arc<OperatorMetrics>,
 	/// Value to bind - either an ExprPlan for scalars or a query plan
@@ -37,7 +38,7 @@ pub struct LetPlan {
 }
 
 impl LetPlan {
-	pub(crate) fn new(name: String, value: Arc<dyn ExecOperator>) -> Self {
+	pub(crate) fn new(name: Strand, value: Arc<dyn ExecOperator>) -> Self {
 		Self {
 			name,
 			value,
@@ -54,7 +55,7 @@ impl ExecOperator for LetPlan {
 	}
 
 	fn attrs(&self) -> Vec<(String, String)> {
-		vec![("name".to_string(), format!("${}", self.name))]
+		vec![("name".to_string(), format!("${}", self.name.as_str()))]
 	}
 
 	fn required_context(&self) -> ContextLevel {
@@ -158,7 +159,7 @@ async fn collect_stream(stream: ValueBatchStream) -> anyhow::Result<Vec<Value>> 
 impl ToSql for LetPlan {
 	fn fmt_sql(&self, f: &mut String, _fmt: SqlFormat) {
 		f.push_str("LET $");
-		f.push_str(&self.name);
+		f.push_str(self.name.as_str());
 		f.push_str(" = ");
 		if self.value.is_scalar() {
 			f.push_str("<expr>");

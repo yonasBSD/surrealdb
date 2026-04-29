@@ -126,11 +126,11 @@ impl Default for JwtAccess {
 		Self {
 			verify: JwtAccessVerify::Key(JwtAccessVerifyKey {
 				alg,
-				key: Expr::Literal(Literal::String(key.clone())),
+				key: Expr::Literal(Literal::String(key.as_str().into())),
 			}),
 			issue: Some(JwtAccessIssue {
 				alg,
-				key: Expr::Literal(Literal::String(key)),
+				key: Expr::Literal(Literal::String(key.into())),
 			}),
 		}
 	}
@@ -184,7 +184,7 @@ impl Default for JwtAccessIssue {
 			// Defaults to HS512
 			alg: Algorithm::Hs512,
 			// Avoid defaulting to empty key
-			key: Expr::Literal(Literal::String(random_key())),
+			key: Expr::Literal(Literal::String(random_key().into())),
 		}
 	}
 }

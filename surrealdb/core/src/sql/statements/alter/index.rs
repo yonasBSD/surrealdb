@@ -1,12 +1,14 @@
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use crate::fmt::{EscapeKwFreeIdent, EscapeKwIdent, QuoteStr};
 use crate::sql::statements::alter::AlterKind;
+use crate::val::TableName;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AlterIndexStatement {
-	pub name: String,
-	pub table: String,
+	pub name: Strand,
+	pub table: TableName,
 	pub if_exists: bool,
 	pub prepare_remove: bool,
 	pub comment: AlterKind<String>,
@@ -22,8 +24,8 @@ impl ToSql for AlterIndexStatement {
 			f,
 			fmt,
 			" {} ON {}",
-			EscapeKwIdent(&self.name, &["IF"]),
-			EscapeKwFreeIdent(&self.table)
+			EscapeKwIdent(self.name.as_str(), &["IF"]),
+			EscapeKwFreeIdent(self.table.as_str())
 		);
 
 		if self.prepare_remove {
@@ -41,7 +43,7 @@ impl From<AlterIndexStatement> for crate::expr::statements::alter::AlterIndexSta
 	fn from(v: AlterIndexStatement) -> Self {
 		crate::expr::statements::alter::AlterIndexStatement {
 			name: v.name,
-			table: v.table.into(),
+			table: v.table,
 			if_exists: v.if_exists,
 			prepare_remove: v.prepare_remove,
 			comment: v.comment.into(),
@@ -52,7 +54,7 @@ impl From<crate::expr::statements::alter::AlterIndexStatement> for AlterIndexSta
 	fn from(v: crate::expr::statements::alter::AlterIndexStatement) -> Self {
 		AlterIndexStatement {
 			name: v.name,
-			table: v.table.into_string(),
+			table: v.table,
 			if_exists: v.if_exists,
 			prepare_remove: v.prepare_remove,
 			comment: v.comment.into(),

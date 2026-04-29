@@ -137,28 +137,28 @@ async fn execute_namespace_info(
 
 	if structured {
 		let object = map! {
-			"accesses".to_string() => process(txn.all_ns_accesses(ns, version).await?),
-			"databases".to_string() => process(txn.all_db(ns, version).await?),
-			"users".to_string() => process(txn.all_ns_users(ns, version).await?),
+			"accesses" => process(txn.all_ns_accesses(ns, version).await?),
+			"databases" => process(txn.all_db(ns, version).await?),
+			"users" => process(txn.all_ns_users(ns, version).await?),
 		};
-		Ok(Value::Object(Object(object)))
+		Ok(Value::Object(Object::from(object)))
 	} else {
 		let object = map! {
-			"accesses".to_string() => {
+			"accesses" => {
 				let mut out = Object::default();
 				for v in txn.all_ns_accesses(ns, version).await?.iter() {
 					out.insert(v.name.clone(), v.to_sql().into());
 				}
 				out.into()
 			},
-			"databases".to_string() => {
+			"databases" => {
 				let mut out = Object::default();
 				for v in txn.all_db(ns, version).await?.iter() {
 					out.insert(v.name.clone(), v.to_sql().into());
 				}
 				out.into()
 			},
-			"users".to_string() => {
+			"users" => {
 				let mut out = Object::default();
 				for v in txn.all_ns_users(ns, version).await?.iter() {
 					out.insert(v.name.clone(), v.to_sql().into());
@@ -166,7 +166,7 @@ async fn execute_namespace_info(
 				out.into()
 			},
 		};
-		Ok(Value::Object(Object(object)))
+		Ok(Value::Object(Object::from(object)))
 	}
 }
 

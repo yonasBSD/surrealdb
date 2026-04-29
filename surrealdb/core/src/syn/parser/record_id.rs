@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::ops::Bound;
 
 use reblessive::Stk;
+use surrealdb_strand::Strand;
 use surrealdb_types::ToSql;
 
 use super::{ParseResult, Parser};
@@ -16,8 +17,9 @@ impl Parser<'_> {
 	pub(crate) async fn parse_record_id_or_range(
 		&mut self,
 		stk: &mut Stk,
-		ident: String,
+		ident: Strand,
 	) -> ParseResult<RecordIdLit> {
+		let ident: crate::val::TableName = ident.into();
 		expected_whitespace!(self, t!(":"));
 
 		// If self starts with a range operator self is a range with no start bound
@@ -152,7 +154,7 @@ impl Parser<'_> {
 		stk: &mut Stk,
 		supports_referencing_field: bool,
 	) -> ParseResult<LookupSubject> {
-		let table = self.parse_ident()?;
+		let table: crate::val::TableName = self.parse_ident_str()?.into();
 		if self.eat_whitespace(t!(":")) {
 			let range = self.parse_id_range(stk).await?;
 			let referencing_field =
@@ -176,7 +178,7 @@ impl Parser<'_> {
 		supports_referencing_field: bool,
 	) -> ParseResult<Option<String>> {
 		if supports_referencing_field && self.eat(t!("FIELD")) {
-			Ok(Some(self.parse_ident()?))
+			Ok(Some(self.parse_ident()?.into_string()))
 		} else {
 			Ok(None)
 		}
@@ -190,14 +192,14 @@ impl Parser<'_> {
 	pub(crate) async fn parse_record_id_from_ident(
 		&mut self,
 		stk: &mut Stk,
-		ident: String,
+		ident: Strand,
 	) -> ParseResult<RecordIdLit> {
 		expected!(self, t!(":"));
 
 		let id = stk.run(|ctx| self.parse_record_id_key(ctx)).await?;
 
 		Ok(RecordIdLit {
-			table: ident,
+			table: ident.into(),
 			key: id,
 		})
 	}
@@ -256,7 +258,7 @@ impl Parser<'_> {
 					Ok(RecordIdKeyLit::Number(number))
 				} else {
 					// Safety: Parser guarentees no null bytes present in string.
-					Ok(RecordIdKeyLit::String(digits_str.to_owned()))
+					Ok(RecordIdKeyLit::String(digits_str.into()))
 				}
 			}
 			t!("-") => {
@@ -269,13 +271,13 @@ impl Parser<'_> {
 						Ordering::Less => Ok(RecordIdKeyLit::Number(-(number.value as i64))),
 						Ordering::Equal => Ok(RecordIdKeyLit::Number(i64::MIN)),
 						// Safety: Parser guarentees no null bytes present in string.
-						Ordering::Greater => {
-							Ok(RecordIdKeyLit::String(format!("-{}", self.span_str(number.span))))
-						}
+						Ordering::Greater => Ok(RecordIdKeyLit::String(
+							format!("-{}", self.span_str(number.span)).into(),
+						)),
 					}
 				} else {
 					let strand = format!("-{}", self.span_str(token.span));
-					Ok(RecordIdKeyLit::String(strand))
+					Ok(RecordIdKeyLit::String(strand.into()))
 				}
 			}
 			TokenKind::Digits => {
@@ -286,7 +288,7 @@ impl Parser<'_> {
 						|| next.kind == TokenKind::Infinity)
 				{
 					let ident = self.parse_flexible_ident()?;
-					return Ok(RecordIdKeyLit::String(ident));
+					return Ok(RecordIdKeyLit::String(ident.into()));
 				}
 
 				self.pop_peek();
@@ -296,7 +298,7 @@ impl Parser<'_> {
 					Ok(RecordIdKeyLit::Number(number))
 				} else {
 					// Safety: Parser guarentees no null bytes present in string.
-					Ok(RecordIdKeyLit::String(digits_str.to_owned()))
+					Ok(RecordIdKeyLit::String(digits_str.into()))
 				}
 			}
 			t!("ULID") => {
@@ -306,7 +308,7 @@ impl Parser<'_> {
 					Ok(RecordIdKeyLit::Generate(RecordIdKeyGen::Ulid))
 				} else {
 					let slice = self.span_str(token.span);
-					Ok(RecordIdKeyLit::String(slice.to_owned()))
+					Ok(RecordIdKeyLit::String(slice.into()))
 				}
 			}
 			t!("UUID") => {
@@ -316,7 +318,7 @@ impl Parser<'_> {
 					Ok(RecordIdKeyLit::Generate(RecordIdKeyGen::Uuid))
 				} else {
 					let slice = self.span_str(token.span);
-					Ok(RecordIdKeyLit::String(slice.to_owned()))
+					Ok(RecordIdKeyLit::String(slice.into()))
 				}
 			}
 			t!("RAND") => {
@@ -326,12 +328,12 @@ impl Parser<'_> {
 					Ok(RecordIdKeyLit::Generate(RecordIdKeyGen::Rand))
 				} else {
 					let slice = self.span_str(token.span);
-					Ok(RecordIdKeyLit::String(slice.to_owned()))
+					Ok(RecordIdKeyLit::String(slice.into()))
 				}
 			}
 			_ => {
-				let ident = if self.settings.flexible_record_id {
-					self.parse_flexible_ident()?
+				let ident: Strand = if self.settings.flexible_record_id {
+					self.parse_flexible_ident()?.into()
 				} else {
 					self.parse_ident()?
 				};
@@ -366,7 +368,7 @@ mod tests {
 			out,
 			RecordIdLit {
 				table: "test".into(),
-				key: RecordIdKeyLit::String("id".to_owned()),
+				key: RecordIdKeyLit::String("id".into()),
 			}
 		);
 	}
@@ -424,7 +426,7 @@ mod tests {
 			out,
 			RecordIdLit {
 				table: "test".into(),
-				key: RecordIdKeyLit::String(max_str),
+				key: RecordIdKeyLit::String(max_str.into()),
 			}
 		);
 	}
@@ -439,7 +441,7 @@ mod tests {
 			out,
 			RecordIdLit {
 				table: "test".into(),
-				key: RecordIdKeyLit::String(min_str),
+				key: RecordIdKeyLit::String(min_str.into()),
 			}
 		);
 	}
@@ -485,7 +487,7 @@ mod tests {
 			out,
 			RecordIdLit {
 				table: "test".into(),
-				key: RecordIdKeyLit::String("id".to_owned()),
+				key: RecordIdKeyLit::String("id".into()),
 			}
 		);
 	}
@@ -500,7 +502,7 @@ mod tests {
 			out,
 			RecordIdLit {
 				table: "test".into(),
-				key: RecordIdKeyLit::String("id".to_owned()),
+				key: RecordIdKeyLit::String("id".into()),
 			}
 		);
 	}
@@ -517,11 +519,11 @@ mod tests {
 				table: "test".into(),
 				key: RecordIdKeyLit::Object(vec![
 					sql::literal::ObjectEntry {
-						key: "location".to_string(),
-						value: sql::Expr::Literal(sql::Literal::String("GBR".to_owned()))
+						key: "location".into(),
+						value: sql::Expr::Literal(sql::Literal::String("GBR".into()))
 					},
 					sql::literal::ObjectEntry {
-						key: "year".to_string(),
+						key: "year".into(),
 						value: sql::Expr::Literal(sql::Literal::Integer(2022)),
 					},
 				])
@@ -540,7 +542,7 @@ mod tests {
 			RecordIdLit {
 				table: "test".into(),
 				key: RecordIdKeyLit::Array(vec![
-					sql::Expr::Literal(sql::Literal::String("GBR".to_owned())),
+					sql::Expr::Literal(sql::Literal::String("GBR".into())),
 					sql::Expr::Literal(sql::Literal::Integer(2022)),
 				])
 			}
@@ -566,7 +568,7 @@ mod tests {
 				.finish()
 				.unwrap_or_else(|_| panic!("failed on {}", ident))
 				.key;
-			assert_eq!(r, RecordIdKeyLit::String(ident.to_string()),);
+			assert_eq!(r, RecordIdKeyLit::String(ident.to_string().into()),);
 
 			let mut parser = Parser::new(thing.as_bytes());
 			let r = stack
@@ -577,8 +579,8 @@ mod tests {
 			assert_eq!(
 				r,
 				Expr::Literal(Literal::RecordId(sql::RecordIdLit {
-					table: "t".to_string(),
-					key: RecordIdKeyLit::String(ident.to_string())
+					table: "t".into(),
+					key: RecordIdKeyLit::String(ident.to_string().into())
 				}))
 			)
 		}

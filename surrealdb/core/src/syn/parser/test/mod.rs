@@ -35,9 +35,7 @@ fn ident_is_field() {
 
 	assert_eq!(
 		exprs,
-		sql::TopLevelExpr::Expr(sql::Expr::Idiom(sql::Idiom(vec![sql::Part::Field(
-			"foo".to_string()
-		)])))
+		sql::TopLevelExpr::Expr(sql::Expr::Idiom(sql::Idiom(vec![sql::Part::Field("foo".into())])))
 	);
 }
 

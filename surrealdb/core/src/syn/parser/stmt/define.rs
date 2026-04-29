@@ -241,7 +241,7 @@ impl Parser<'_> {
 
 		let name = if self.eat(t!("mod")) {
 			expected!(self, t!("::"));
-			let name = self.parse_ident()?;
+			let name = self.parse_ident()?.into_string();
 			expected!(self, t!("AS"));
 			Some(name)
 		} else {
@@ -253,9 +253,9 @@ impl Parser<'_> {
 			t!("silo") => {
 				self.pop_peek();
 				expected!(self, t!("::"));
-				let organisation = self.parse_ident()?;
+				let organisation = self.parse_ident()?.into_string();
 				expected!(self, t!("::"));
-				let package = self.parse_ident()?;
+				let package = self.parse_ident()?.into_string();
 				expected!(self, t!("<"));
 				let major = self.next_token_value::<u32>()?;
 				expected!(self, t!("."));
@@ -362,7 +362,7 @@ impl Parser<'_> {
 					let mut roles = Vec::new();
 					loop {
 						let token = self.peek();
-						let role = self.parse_ident()?;
+						let role = self.parse_ident()?.into_string();
 						// NOTE(gguillemas): This hardcoded list is a temporary fix in order
 						// to avoid making breaking changes to the DefineUserStatement structure
 						// while still providing parsing feedback to users referencing unexistent
@@ -591,7 +591,7 @@ impl Parser<'_> {
 		} else {
 			DefineKind::Default
 		};
-		let name = self.next_token_value::<Param>()?.into_string();
+		let name = self.next_token_value::<Param>()?.into_strand();
 
 		let mut res = DefineParamStatement {
 			name,
@@ -1068,7 +1068,7 @@ impl Parser<'_> {
 						match self.peek_kind() {
 							t!("ANALYZER") => {
 								self.pop_peek();
-								analyzer = Some(self.parse_ident()).transpose()?;
+								analyzer = Some(self.parse_ident()?.into_string());
 							}
 							t!("BM25") => {
 								self.pop_peek();
@@ -1094,7 +1094,7 @@ impl Parser<'_> {
 						}
 					}
 					res.index = Index::FullText(crate::sql::index::FullTextParams {
-						az: analyzer.unwrap_or_else(|| "like".to_owned()),
+						az: analyzer.unwrap_or_else(|| "like".to_owned()).into(),
 						sc: scoring.unwrap_or_else(Default::default),
 						hl,
 					});
@@ -1320,13 +1320,13 @@ impl Parser<'_> {
 					self.pop_peek();
 					expected!(self, t!("fn"));
 					expected!(self, t!("::"));
-					let mut ident = self.parse_ident()?;
+					let mut ident = self.parse_ident()?.into_string();
 					while self.eat(t!("::")) {
-						let value = self.parse_ident()?;
+						let value = self.parse_ident()?.into_string();
 						ident.push_str("::");
 						ident.push_str(&value);
 					}
-					res.function = Some(ident);
+					res.function = Some(ident.into());
 				}
 				t!("COMMENT") => {
 					self.pop_peek();
@@ -1495,7 +1495,8 @@ impl Parser<'_> {
 					let mut middleware = Vec::new();
 
 					loop {
-						let name = self.parse_function_name().await?.to_string();
+						let f = self.parse_function_name().await?;
+						let name = f.to_string().into();
 
 						expected!(self, t!("("));
 						let args = self.parse_function_args(stk).await?;
@@ -1619,7 +1620,7 @@ impl Parser<'_> {
 		loop {
 			match self.peek_kind() {
 				x if Self::kind_is_identifier(x) => {
-					let name = self.parse_ident()?;
+					let name = self.parse_ident()?.into();
 					acc.push(TableConfig {
 						name,
 					});
@@ -1658,10 +1659,10 @@ impl Parser<'_> {
 		Ok(res)
 	}
 
-	pub fn parse_tables(&mut self) -> ParseResult<Vec<String>> {
-		let mut names = vec![self.parse_ident()?];
+	pub fn parse_tables(&mut self) -> ParseResult<Vec<crate::val::TableName>> {
+		let mut names = vec![self.parse_ident_str()?.into()];
 		while self.eat(t!("|")) {
-			names.push(self.parse_ident()?);
+			names.push(self.parse_ident_str()?.into());
 		}
 		Ok(names)
 	}

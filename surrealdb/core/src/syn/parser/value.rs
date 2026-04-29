@@ -478,7 +478,7 @@ impl Parser<'_> {
 	}
 
 	async fn parse_value_table(&mut self) -> ParseResult<PublicTable> {
-		let table = self.parse_ident()?;
+		let table = self.parse_ident()?.into_string();
 		Ok(PublicTable::new(table))
 	}
 
@@ -493,7 +493,7 @@ impl Parser<'_> {
 	where
 		VP: ValueParseFunc,
 	{
-		let table = self.parse_ident()?;
+		let table = self.parse_ident()?.into_string();
 		expected!(self, t!(":"));
 		let peek = self.peek();
 		let key = match peek.kind {
@@ -585,7 +585,7 @@ impl Parser<'_> {
 				let ident = if self.settings.flexible_record_id {
 					self.parse_flexible_ident()?
 				} else {
-					self.parse_ident()?
+					self.parse_ident()?.into_string()
 				};
 				PublicRecordIdKey::String(ident)
 			}

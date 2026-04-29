@@ -258,8 +258,14 @@ pub async fn db_access(
 			// Create refresh token if defined for the record access method
 			let refresh = match &at.bearer {
 				Some(_) => Some(
-					create_refresh_token_record(kvs, av.name.clone(), &ns, &db, rid.clone().into())
-						.await?,
+					create_refresh_token_record(
+						kvs,
+						av.name.to_string(),
+						&ns,
+						&db,
+						rid.clone().into(),
+					)
+					.await?,
 				),
 				None => None,
 			};

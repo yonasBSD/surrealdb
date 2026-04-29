@@ -63,7 +63,7 @@ impl<'a> IndexAnalyzer<'a> {
 
 		// Filter out indexes not allowed by WITH hints
 		if let Some(With::Index(names)) = self.with_hints {
-			candidates.retain(|c| names.contains(&c.index_ref.name));
+			candidates.retain(|c| names.iter().any(|n| n.as_str() == c.index_ref.name.as_str()));
 		}
 
 		// Merge half-bounded ranges on the same index into bounded ranges
@@ -184,7 +184,7 @@ impl<'a> IndexAnalyzer<'a> {
 				}
 
 				if let Some(With::Index(names)) = self.with_hints
-					&& !names.contains(&ix_def.name)
+					&& !names.iter().any(|n| n.as_str() == ix_def.name.as_str())
 				{
 					continue;
 				}
@@ -274,7 +274,7 @@ impl<'a> IndexAnalyzer<'a> {
 				}
 
 				if let Some(With::Index(names)) = self.with_hints
-					&& !names.contains(&ix_def.name)
+					&& !names.iter().any(|n| n.as_str() == ix_def.name.as_str())
 				{
 					continue;
 				}
@@ -979,7 +979,7 @@ impl<'a> IndexAnalyzer<'a> {
 				let candidate = IndexCandidate {
 					index_ref,
 					access: BTreeAccess::FullText {
-						query: query.clone(),
+						query: query.as_str().to_owned(),
 						operator: operator.clone(),
 					},
 

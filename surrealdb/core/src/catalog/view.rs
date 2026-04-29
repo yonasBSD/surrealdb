@@ -44,7 +44,7 @@ impl ViewDefinition {
 				condition,
 			} => View {
 				expr: fields.clone().into(),
-				what: tables.clone().into_iter().map(|x| x.into_string()).collect(),
+				what: tables.clone(),
 				cond: condition.clone().map(|x| Cond(x.into())),
 				group: None,
 			},
@@ -56,7 +56,7 @@ impl ViewDefinition {
 				..
 			} => View {
 				expr: fields.clone().into(),
-				what: tables.clone().into_iter().map(|x| x.into_string()).collect(),
+				what: tables.clone(),
 				cond: condition.clone().map(|x| Cond(x.into())),
 				group: Some(groups.clone().into()),
 			},
@@ -67,7 +67,7 @@ impl ViewDefinition {
 				groups,
 			} => View {
 				expr: fields.clone().into(),
-				what: tables.clone().into_iter().map(|x| x.into_string()).collect(),
+				what: tables.clone(),
 				cond: condition.clone().map(|x| Cond(x.into())),
 				group: groups.clone().map(|x| x.into()),
 			},

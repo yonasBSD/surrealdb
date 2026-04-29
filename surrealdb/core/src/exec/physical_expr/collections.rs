@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use crate::exec::physical_expr::{EvalContext, PhysicalExpr};
@@ -59,7 +60,7 @@ impl ToSql for ArrayLiteral {
 /// Object literal - { key1: expr1, key2: expr2, ... }
 #[derive(Debug, Clone)]
 pub struct ObjectLiteral {
-	pub(crate) entries: Vec<(String, Arc<dyn PhysicalExpr>)>,
+	pub(crate) entries: Vec<(Strand, Arc<dyn PhysicalExpr>)>,
 }
 
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
@@ -83,7 +84,7 @@ impl PhysicalExpr for ObjectLiteral {
 			let value = expr.evaluate(ctx.clone()).await?;
 			map.insert(key.clone(), value);
 		}
-		Ok(Value::Object(crate::val::Object(map)))
+		Ok(Value::Object(crate::val::Object::from(map)))
 	}
 
 	fn access_mode(&self) -> AccessMode {
@@ -98,7 +99,7 @@ impl ToSql for ObjectLiteral {
 			if i > 0 {
 				f.push_str(", ");
 			}
-			write_sql!(f, fmt, "{}: {}", key, expr);
+			write_sql!(f, fmt, "{}: {}", key.as_str(), expr);
 		}
 		f.push('}');
 	}

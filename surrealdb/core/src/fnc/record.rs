@@ -25,7 +25,7 @@ pub fn id((arg,): (RecordId,)) -> Result<Value> {
 }
 
 pub fn tb((arg,): (RecordId,)) -> Result<Value> {
-	Ok(arg.table.into_string().into())
+	Ok(Value::String(arg.table.into()))
 }
 
 pub mod is {

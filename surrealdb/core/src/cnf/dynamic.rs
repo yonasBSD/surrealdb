@@ -48,7 +48,7 @@ impl InfoStructure for DynamicConfiguration {
 	/// Expose the dynamic configuration as a value for the `INFO` statement.
 	fn structure(self) -> Value {
 		let object = map! {
-			"QUERY_TIMEOUT".to_string() => match self.get_query_timeout() {
+			"QUERY_TIMEOUT" => match self.get_query_timeout() {
 				None => Value::None,
 				Some(d) => d.into(),
 			}

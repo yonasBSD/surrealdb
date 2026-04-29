@@ -168,46 +168,46 @@ async fn execute_table_info(
 	// Create the result set
 	if structured {
 		Ok(Value::from(map! {
-			"events".to_string() => process(txn.all_tb_events(ns, db, &tb, version).await?),
-			"fields".to_string() => process(txn.all_tb_fields(ns, db, &tb, version).await?),
-			"indexes".to_string() => process(txn.all_tb_indexes(ns, db, &tb, version).await?),
-			"lives".to_string() => process(txn.all_tb_lives(ns, db, &tb, version).await?),
-			"tables".to_string() => process(txn.all_tb_views(ns, db, &tb, version).await?),
+			"events" => process(txn.all_tb_events(ns, db, &tb, version).await?),
+			"fields" => process(txn.all_tb_fields(ns, db, &tb, version).await?),
+			"indexes" => process(txn.all_tb_indexes(ns, db, &tb, version).await?),
+			"lives" => process(txn.all_tb_lives(ns, db, &tb, version).await?),
+			"tables" => process(txn.all_tb_views(ns, db, &tb, version).await?),
 		}))
 	} else {
 		Ok(Value::from(map! {
-			"events".to_string() => {
+			"events" => {
 				let mut out = Object::default();
 				for v in txn.all_tb_events(ns, db, &tb, version).await?.iter() {
 					out.insert(v.name.clone(), v.to_sql().into());
 				}
 				out.into()
 			},
-			"fields".to_string() => {
+			"fields" => {
 				let mut out = Object::default();
 				for v in txn.all_tb_fields(ns, db, &tb, version).await?.iter() {
 					out.insert(v.name.to_raw_string(), v.to_sql().into());
 				}
 				out.into()
 			},
-			"indexes".to_string() => {
+			"indexes" => {
 				let mut out = Object::default();
 				for v in txn.all_tb_indexes(ns, db, &tb, version).await?.iter() {
 					out.insert(v.name.clone(), v.to_sql().into());
 				}
 				out.into()
 			},
-			"lives".to_string() => {
+			"lives" => {
 				let mut out = Object::default();
 				for v in txn.all_tb_lives(ns, db, &tb, version).await?.iter() {
 					out.insert(v.id.to_string(), v.to_sql().into());
 				}
 				out.into()
 			},
-			"tables".to_string() => {
+			"tables" => {
 				let mut out = Object::default();
 				for v in txn.all_tb_views(ns, db, &tb, version).await?.iter() {
-					out.insert(v.name.clone().into_string(), v.to_sql().into());
+					out.insert(v.name.clone(), v.to_sql().into());
 				}
 				out.into()
 			},

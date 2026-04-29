@@ -3,6 +3,7 @@ use std::fmt::{Display, Formatter};
 use revision::{DeserializeRevisioned, Revisioned, SerializeRevisioned, revisioned};
 use serde::{Deserialize, Serialize};
 use storekey::{BorrowDecode, Encode};
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql};
 
 use crate::catalog::NamespaceId;
@@ -72,7 +73,7 @@ impl From<u32> for DatabaseId {
 pub struct DatabaseDefinition {
 	pub(crate) namespace_id: NamespaceId,
 	pub(crate) database_id: DatabaseId,
-	pub(crate) name: String,
+	pub(crate) name: Strand,
 	pub(crate) comment: Option<String>,
 	pub(crate) changefeed: Option<ChangeFeed>,
 	pub(crate) strict: bool,
@@ -86,7 +87,7 @@ impl DatabaseDefinition {
 			comment: self
 				.comment
 				.clone()
-				.map(|v| Expr::Literal(Literal::String(v)))
+				.map(|v| Expr::Literal(Literal::String(v.into())))
 				.unwrap_or(Expr::Literal(Literal::None)),
 			changefeed: self.changefeed.map(|v| v.into()),
 			..Default::default()
@@ -103,9 +104,9 @@ impl ToSql for DatabaseDefinition {
 impl InfoStructure for DatabaseDefinition {
 	fn structure(self) -> Value {
 		Value::from(map! {
-			"name".to_string() => self.name.into(),
-			"comment".to_string(), if let Some(v) = self.comment => v.into(),
-			"id".to_string() => self.database_id.0.into(),
+			"name" => self.name.into(),
+			"comment", if let Some(v) = self.comment => v.into(),
+			"id" => self.database_id.0.into(),
 		})
 	}
 }

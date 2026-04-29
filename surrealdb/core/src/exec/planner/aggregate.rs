@@ -51,7 +51,7 @@ fn alias_output_path(idiom: &Idiom) -> Vec<String> {
 	let mut parts = Vec::with_capacity(simplified.0.len());
 	for part in simplified.0.iter() {
 		match part {
-			Part::Field(name) => parts.push(name.clone()),
+			Part::Field(name) => parts.push(name.as_str().to_owned()),
 			// Unaliased graph traversals become their own output key (e.g.
 			// `->knows` or `<-foo<-bar`), matching `idiom_to_field_path`'s
 			// `Part::Lookup` arm. Without this, `->knows.name` would

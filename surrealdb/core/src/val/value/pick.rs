@@ -96,7 +96,7 @@ mod tests {
 			res,
 			Value::from(RecordId {
 				table: "test".into(),
-				key: RecordIdKey::String("tobie".to_owned())
+				key: RecordIdKey::String("tobie".into())
 			})
 		);
 	}
@@ -118,7 +118,7 @@ mod tests {
 			res,
 			Value::from(RecordId {
 				table: "test".into(),
-				key: RecordIdKey::String("jaime".to_owned())
+				key: RecordIdKey::String("jaime".into())
 			})
 		);
 	}

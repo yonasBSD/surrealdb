@@ -56,7 +56,7 @@ impl Ast {
 		let mut let_var_names = Vec::new();
 		for expr in &self.expressions {
 			if let TopLevelExpr::Expr(Expr::Let(stmt)) = expr {
-				let_var_names.push(stmt.name.clone());
+				let_var_names.push(stmt.name.as_str().to_owned());
 			}
 		}
 		let_var_names

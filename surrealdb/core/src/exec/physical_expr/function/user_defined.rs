@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql};
 
 use super::helpers::{
@@ -89,7 +90,7 @@ impl PhysicalExpr for UserDefinedFunctionExec {
 		validate_arg_count(&func_name, evaluated_args.len(), &func_def.args)?;
 
 		// 8. Create isolated context with function parameters bound
-		let mut local_params: HashMap<String, Value> = HashMap::new();
+		let mut local_params: HashMap<Strand, Value> = HashMap::new();
 		for ((param_name, kind), arg_value) in func_def.args.iter().zip(evaluated_args.into_iter())
 		{
 			let coerced =
@@ -97,7 +98,7 @@ impl PhysicalExpr for UserDefinedFunctionExec {
 					name: func_name.clone(),
 					message: format!("Failed to coerce argument `${param_name}`: {e}"),
 				})?;
-			local_params.insert(param_name.clone(), coerced);
+			local_params.insert(param_name.as_str().into(), coerced);
 		}
 
 		// 9. Create a new execution context with the parameters

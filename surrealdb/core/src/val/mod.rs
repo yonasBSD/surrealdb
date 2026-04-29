@@ -11,6 +11,7 @@ use geo::Point;
 use revision::revisioned;
 use rust_decimal::prelude::*;
 use storekey::{BorrowDecode, Encode};
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use crate::err::Error;
@@ -76,7 +77,7 @@ pub(crate) enum Value {
 	Null,
 	Bool(bool),
 	Number(Number),
-	String(String),
+	String(Strand),
 	Duration(Duration),
 	Datetime(Datetime),
 	Uuid(Uuid),
@@ -214,7 +215,7 @@ impl Value {
 	/// Converts this Value into an unquoted String
 	pub fn into_raw_string(self) -> String {
 		match self {
-			Value::String(v) => v,
+			Value::String(v) => v.into_string(),
 			Value::Uuid(v) => v.to_string(),
 			Value::Datetime(v) => v.to_string(),
 			_ => self.to_sql(),
@@ -224,7 +225,7 @@ impl Value {
 	/// Converts this Value into an unquoted String
 	pub fn to_raw_string(&self) -> String {
 		match self {
-			Value::String(v) => v.clone(),
+			Value::String(v) => v.as_str().to_owned(),
 			Value::Uuid(v) => v.to_string(),
 			Value::Datetime(v) => v.to_string(),
 			_ => self.to_sql(),
@@ -367,7 +368,7 @@ impl Value {
 				_ => false,
 			},
 			Value::Object(v) => match other {
-				Value::String(w) => v.0.contains_key(&**w),
+				Value::String(w) => v.contains_key(w.as_str()),
 				_ => false,
 			},
 			Value::Range(r) => {
@@ -564,7 +565,7 @@ impl ToSql for Value {
 			Value::Null => f.push_str("NULL"),
 			Value::Bool(v) => v.fmt_sql(f, sql_fmt),
 			Value::Number(v) => v.fmt_sql(f, sql_fmt),
-			Value::String(v) => write_sql!(f, sql_fmt, "{}", QuoteStr(v)),
+			Value::String(v) => write_sql!(f, sql_fmt, "{}", QuoteStr(v.as_str())),
 			Value::Duration(v) => v.fmt_sql(f, sql_fmt),
 			Value::Datetime(v) => v.fmt_sql(f, sql_fmt),
 			Value::Uuid(v) => v.fmt_sql(f, sql_fmt),
@@ -603,9 +604,11 @@ impl TryAdd for Value {
 	fn try_add(self, other: Self) -> Result<Self> {
 		Ok(match (self, other) {
 			(Self::Number(v), Self::Number(w)) => Self::Number(v.try_add(w)?),
-			(Self::String(mut v), Self::String(w)) => {
-				v.push_str(&w);
-				Value::String(v)
+			(Self::String(v), Self::String(w)) => {
+				let mut s = String::with_capacity(v.len() + w.len());
+				s.push_str(v.as_str());
+				s.push_str(w.as_str());
+				Value::String(s.into())
 			}
 			(Self::Datetime(v), Self::Duration(w)) => Self::Datetime(w.try_add(v)?),
 			(Self::Duration(v), Self::Datetime(w)) => Self::Datetime(v.try_add(w)?),
@@ -943,7 +946,7 @@ subtypes! {
 	Null => (is_null,_unused,_unused),
 	Bool(bool) => (is_bool,as_bool,into_bool),
 	Number(Number) => (is_number,as_number,into_number),
-	String(String) => (is_strand,as_strand,into_strand),
+	String(Strand) => (is_strand,as_strand,into_strand),
 	Table(TableName) => (is_table,as_table,into_table),
 	Duration(Duration) => (is_duration,as_duration,into_duration),
 	Datetime(Datetime) => (is_datetime,as_datetime,into_datetime),
@@ -1013,7 +1016,19 @@ impl From<usize> for Value {
 
 impl From<&str> for Value {
 	fn from(v: &str) -> Self {
-		Self::String(v.to_owned())
+		Self::String(Strand::from(v))
+	}
+}
+
+impl From<String> for Value {
+	fn from(v: String) -> Self {
+		Self::String(Strand::from(v))
+	}
+}
+
+impl From<::uuid::Uuid> for Value {
+	fn from(v: ::uuid::Uuid) -> Self {
+		Value::Uuid(Uuid::from(v))
 	}
 }
 
@@ -1075,7 +1090,7 @@ impl FromIterator<Value> for Value {
 
 impl FromIterator<(String, Value)> for Value {
 	fn from_iter<I: IntoIterator<Item = (String, Value)>>(iter: I) -> Self {
-		Value::Object(Object(iter.into_iter().collect()))
+		Value::Object(Object::from_iter(iter))
 	}
 }
 
@@ -1091,7 +1106,7 @@ pub(crate) fn convert_value_to_public_value(
 		crate::val::Value::Null => Ok(surrealdb_types::Value::Null),
 		crate::val::Value::Bool(value) => Ok(surrealdb_types::Value::Bool(value)),
 		crate::val::Value::Number(value) => convert_number_to_public(value),
-		crate::val::Value::String(value) => Ok(surrealdb_types::Value::String(value)),
+		crate::val::Value::String(value) => Ok(surrealdb_types::Value::String(value.into())),
 		crate::val::Value::Datetime(value) => convert_datetime_to_public(value),
 		crate::val::Value::Duration(value) => convert_duration_to_public(value),
 		crate::val::Value::Uuid(value) => convert_uuid_to_public(value),
@@ -1191,7 +1206,11 @@ fn convert_object_to_public(value: crate::val::Object) -> Result<surrealdb_types
 pub(crate) fn convert_object_to_public_map(
 	value: crate::val::Object,
 ) -> Result<BTreeMap<String, surrealdb_types::Value>> {
-	value.0.into_iter().map(|(k, v)| convert_value_to_public_value(v).map(|v| (k, v))).collect()
+	value
+		.0
+		.into_iter()
+		.map(|(k, v)| convert_value_to_public_value(v).map(|v| (k.into_string(), v)))
+		.collect()
 }
 
 fn convert_record_id_to_public(value: crate::val::RecordId) -> Result<surrealdb_types::Value> {
@@ -1207,7 +1226,7 @@ fn convert_record_id_key_to_public(
 ) -> Result<surrealdb_types::RecordIdKey> {
 	match key {
 		crate::val::RecordIdKey::Number(n) => Ok(surrealdb_types::RecordIdKey::Number(n)),
-		crate::val::RecordIdKey::String(s) => Ok(surrealdb_types::RecordIdKey::String(s)),
+		crate::val::RecordIdKey::String(s) => Ok(surrealdb_types::RecordIdKey::String(s.into())),
 		crate::val::RecordIdKey::Uuid(u) => {
 			Ok(surrealdb_types::RecordIdKey::Uuid(surrealdb_types::Uuid::from(u.0)))
 		}

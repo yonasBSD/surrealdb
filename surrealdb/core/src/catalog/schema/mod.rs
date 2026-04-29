@@ -113,10 +113,10 @@ impl Permissions {
 impl InfoStructure for Permissions {
 	fn structure(self) -> Value {
 		Value::from(map! {
-			"select".to_string() => self.select.structure(),
-			"create".to_string() => self.create.structure(),
-			"update".to_string() => self.update.structure(),
-			"delete".to_string() => self.delete.structure(),
+			"select" => self.select.structure(),
+			"create" => self.create.structure(),
+			"update" => self.update.structure(),
+			"delete" => self.delete.structure(),
 		})
 	}
 }

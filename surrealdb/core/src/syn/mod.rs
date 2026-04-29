@@ -380,12 +380,12 @@ fn extract_tables_from_kind_impl(kind: &Kind, tables: &mut HashSet<String>) {
 		| Kind::Geometry(_) => {}
 		Kind::Table(ts) => {
 			for table in ts {
-				tables.insert(table.clone());
+				tables.insert(table.as_str().to_owned());
 			}
 		}
 		Kind::Record(ts) => {
 			for table in ts {
-				tables.insert(table.clone());
+				tables.insert(table.as_str().to_owned());
 			}
 		}
 		Kind::Either(kinds) => {
