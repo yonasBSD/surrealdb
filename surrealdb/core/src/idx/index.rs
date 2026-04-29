@@ -29,8 +29,9 @@ use crate::dbs::Options;
 use crate::err::Error;
 use crate::expr::{Cond, Part};
 use crate::idx::IndexKeyBase;
-use crate::idx::ft::fulltext::FullTextIndex;
-use crate::idx::planner::iterators::IndexCountThingIterator;
+use crate::idx::ft::fulltext::{FullTextCompactionPlan, FullTextIndex};
+use crate::idx::planner::iterators::{IndexCountCompactionPlan, IndexCountThingIterator};
+use crate::idx::trees::hnsw::index::{HnswCompactionPlan, HnswIndex};
 use crate::idx::trees::store::IndexStores;
 use crate::key;
 use crate::key::index::iu::IndexCountKey;
@@ -279,37 +280,85 @@ impl<'a> IndexOperation<'a> {
 		Ok(())
 	}
 
-	pub(crate) async fn index_fulltext_compaction(
+	/// Creates the read-phase plan for full-text compaction.
+	///
+	/// The caller owns the transaction split so this can run in a read-only
+	/// transaction and be applied later with a short write transaction.
+	pub(crate) async fn prepare_fulltext_compaction(
 		ixs: &IndexStores,
 		ikb: &IndexKeyBase,
 		tx: &Transaction,
 		p: &FullTextParams,
 		allow_list: &[PathBuf],
-	) -> Result<()> {
+	) -> Result<FullTextCompactionPlan> {
 		let ft = FullTextIndex::new(ixs, tx, ikb.clone(), p, allow_list).await?;
-		ft.compaction(tx).await?;
-		Ok(())
+		ft.prepare_compaction(tx).await
 	}
 
-	pub(crate) async fn index_hnsw_compaction(
+	/// Applies a prepared full-text compaction plan.
+	///
+	/// Returns `false` when there is no work or another compactor advanced the
+	/// generation first.
+	pub(crate) async fn apply_fulltext_compaction(
+		ixs: &IndexStores,
+		ikb: &IndexKeyBase,
+		tx: &Transaction,
+		p: &FullTextParams,
+		allow_list: &[PathBuf],
+		plan: FullTextCompactionPlan,
+	) -> Result<bool> {
+		let ft = FullTextIndex::new(ixs, tx, ikb.clone(), p, allow_list).await?;
+		ft.apply_compaction(tx, plan).await
+	}
+
+	/// Creates the read-phase plan for HNSW pending compaction.
+	pub(crate) async fn prepare_hnsw_compaction(
+		ctx: &FrozenContext,
+		ikb: &IndexKeyBase,
+	) -> Result<HnswCompactionPlan> {
+		HnswIndex::prepare_compaction(ctx, ikb).await
+	}
+
+	/// Applies a prepared HNSW pending compaction plan.
+	///
+	/// Returns `false` when there is no work, another compactor advanced the
+	/// generation first, or a captured pending key changed before the write.
+	pub(crate) async fn apply_hnsw_compaction(
 		ctx: &FrozenContext,
 		ixs: &IndexStores,
 		ikb: &IndexKeyBase,
 		ix: &IndexDefinition,
 		p: &HnswParams,
-	) -> Result<()> {
+		plan: HnswCompactionPlan,
+	) -> Result<bool> {
 		let tx = ctx.tx();
 		if let Some(tb) = tx.get_tb(ikb.ns(), ikb.db(), ikb.table(), None).await? {
 			let hnsw = ixs.get_index_hnsw(ikb.ns(), ikb.db(), ctx, tb.table_id, ix, p).await?;
-			hnsw.index_pendings(ctx).await?;
+			return hnsw.apply_compaction(ctx, plan).await;
 		}
-		Ok(())
+		Ok(false)
 	}
 
-	pub(crate) async fn index_count_compaction(ikb: &IndexKeyBase, tx: &Transaction) -> Result<()> {
+	/// Creates the read-phase plan for count-index compaction.
+	pub(crate) async fn prepare_count_compaction(
+		ikb: &IndexKeyBase,
+		tx: &Transaction,
+	) -> Result<IndexCountCompactionPlan> {
 		IndexCountThingIterator::new(ikb.ns(), ikb.db(), ikb.table(), ikb.index())?
-			.compaction(ikb, tx)
+			.prepare_compaction(ikb, tx)
 			.await
+	}
+
+	/// Applies a prepared count-index compaction plan.
+	///
+	/// Returns `false` when there is no work or another compactor advanced the
+	/// generation first.
+	pub(crate) async fn apply_count_compaction(
+		ikb: &IndexKeyBase,
+		tx: &Transaction,
+		plan: IndexCountCompactionPlan,
+	) -> Result<bool> {
+		IndexCountThingIterator::apply_compaction(ikb, tx, plan).await
 	}
 
 	/// Construct a consistent uniqueness violation error message.

@@ -85,6 +85,22 @@ impl KVValue for HnswState {
 	}
 }
 
+/// Coalesced pending vector state for a single record.
+///
+/// This value is stored under the record-keyed `!hr` pending key. The key
+/// identifies the record; `doc_id` records the current graph document mapping
+/// when one already exists. `old_vectors` is the graph baseline to remove, and
+/// `new_vectors` is the latest desired indexed state for that record.
+#[revisioned(revision = 1)]
+pub(crate) struct HnswRecordPendingUpdate {
+	/// Existing internal document ID, if the record has already reached the graph.
+	doc_id: Option<DocId>,
+	/// Vectors currently represented in the graph for this pending record.
+	old_vectors: Vec<SerializedVector>,
+	/// Latest vectors that should represent the record after compaction.
+	new_vectors: Vec<SerializedVector>,
+}
+
 /// A pending vector update queued for later application to the HNSW graph.
 ///
 /// During concurrent writes, vector updates are not applied directly to the graph.
@@ -113,6 +129,7 @@ pub(crate) enum VectorId {
 	RecordKey(Arc<RecordIdKey>),
 }
 
+impl_kv_value_revisioned!(HnswRecordPendingUpdate);
 impl_kv_value_revisioned!(VectorPendingUpdate);
 
 /// Core HNSW (Hierarchical Navigable Small World) graph implementation.
@@ -592,10 +609,10 @@ mod tests {
 	use crate::idx::trees::hnsw::docs::VecDocs;
 	use crate::idx::trees::hnsw::flavor::HnswFlavor;
 	use crate::idx::trees::hnsw::index::{HnswContext, HnswIndex};
-	use crate::idx::trees::hnsw::{ElementId, HnswSearch, VectorId};
+	use crate::idx::trees::hnsw::{ElementId, HnswRecordPendingUpdate, HnswSearch, VectorId};
 	use crate::idx::trees::knn::tests::{TestCollection, new_vectors_from_file};
 	use crate::idx::trees::knn::{Ids64, KnnResult, KnnResultBuilder};
-	use crate::idx::trees::vector::{SharedVector, Vector};
+	use crate::idx::trees::vector::{SerializedVector, SharedVector, Vector};
 	use crate::kvs::LockType::Optimistic;
 	use crate::kvs::{Datastore, TransactionType};
 	use crate::val::{RecordIdKey, Value};
@@ -887,6 +904,14 @@ mod tests {
 		ctx.freeze()
 	}
 
+	fn vector_content(vector: &SharedVector) -> Vec<Value> {
+		vec![Value::from(vector.deref())]
+	}
+
+	fn serialized(vector: &SharedVector) -> SerializedVector {
+		SerializedVector::from(vector.deref())
+	}
+
 	async fn test_hnsw_index(collection_size: usize, unique: bool, p: HnswParams) {
 		info!("test_hnsw_index - coll size: {collection_size} - params: {p:?}");
 
@@ -1034,6 +1059,228 @@ mod tests {
 			ctx.tx.cancel().await.unwrap();
 			assert_eq!(res.len(), 10);
 		}
+	}
+
+	#[test(tokio::test(flavor = "multi_thread"))]
+	async fn hnsw_pending_coalesces_new_record_updates() -> Result<()> {
+		let ds = Datastore::new("memory").await?;
+		let ikb = IndexKeyBase::new(NamespaceId(1), DatabaseId(2), "tb".into(), IndexId(4));
+		let p = new_params(2, VectorType::I16, Distance::Euclidean, 3, 500, true, true, true);
+		let ctx = new_ctx(&ds, TransactionType::Write).await;
+		let tx = ctx.tx();
+		let h = HnswIndex::new(
+			ctx.get_index_stores().vector_cache().clone(),
+			&tx,
+			ikb.clone(),
+			TableId(3),
+			&p,
+		)
+		.await?;
+		let id = RecordIdKey::Number(1);
+		let first = new_i16_vec(1, 1);
+		let second = new_i16_vec(2, 2);
+
+		h.index(&ctx, &id, None, Some(vector_content(&first))).await?;
+		h.index(&ctx, &id, Some(vector_content(&first)), Some(vector_content(&second))).await?;
+
+		let pending: HnswRecordPendingUpdate = tx.get(&ikb.new_hr_key(&id), None).await?.unwrap();
+		assert_eq!(pending.doc_id, None);
+		assert!(pending.old_vectors.is_empty());
+		assert_eq!(pending.new_vectors, vec![serialized(&second)]);
+		tx.cancel().await?;
+		Ok(())
+	}
+
+	#[test(tokio::test(flavor = "multi_thread"))]
+	async fn hnsw_pending_preserves_existing_doc_baseline() -> Result<()> {
+		let ds = Datastore::new("memory").await?;
+		let ikb = IndexKeyBase::new(NamespaceId(1), DatabaseId(2), "tb".into(), IndexId(4));
+		let p = new_params(2, VectorType::I16, Distance::Euclidean, 3, 500, true, true, true);
+		let ctx = new_ctx(&ds, TransactionType::Write).await;
+		let tx = ctx.tx();
+		let h = HnswIndex::new(
+			ctx.get_index_stores().vector_cache().clone(),
+			&tx,
+			ikb.clone(),
+			TableId(3),
+			&p,
+		)
+		.await?;
+		let id = RecordIdKey::Number(1);
+		let first = new_i16_vec(1, 1);
+		let second = new_i16_vec(2, 2);
+
+		h.index(&ctx, &id, None, Some(vector_content(&first))).await?;
+		assert_eq!(h.index_pendings(&ctx).await?, 1);
+		h.index(&ctx, &id, Some(vector_content(&first)), Some(vector_content(&second))).await?;
+		h.index(&ctx, &id, Some(vector_content(&second)), None).await?;
+
+		let pending: HnswRecordPendingUpdate = tx.get(&ikb.new_hr_key(&id), None).await?.unwrap();
+		assert_eq!(pending.doc_id, Some(0));
+		assert_eq!(pending.old_vectors, vec![serialized(&first)]);
+		assert!(pending.new_vectors.is_empty());
+		tx.cancel().await?;
+		Ok(())
+	}
+
+	#[test(tokio::test(flavor = "multi_thread"))]
+	async fn hnsw_compaction_preserves_changed_pending_value() -> Result<()> {
+		let ds = Datastore::new("memory").await?;
+		let ikb = IndexKeyBase::new(NamespaceId(1), DatabaseId(2), "tb".into(), IndexId(4));
+		let p = new_params(2, VectorType::I16, Distance::Euclidean, 3, 500, true, true, true);
+		let id = RecordIdKey::Number(1);
+		let first = new_i16_vec(1, 1);
+		let second = new_i16_vec(2, 2);
+
+		let h = {
+			let ctx = new_ctx(&ds, TransactionType::Write).await;
+			let tx = ctx.tx();
+			let h = HnswIndex::new(
+				ctx.get_index_stores().vector_cache().clone(),
+				&tx,
+				ikb.clone(),
+				TableId(3),
+				&p,
+			)
+			.await?;
+			h.index(&ctx, &id, None, Some(vector_content(&first))).await?;
+			tx.commit().await?;
+			h
+		};
+
+		let plan = {
+			let ctx = new_ctx(&ds, TransactionType::Read).await;
+			let plan = HnswIndex::prepare_compaction(&ctx, &ikb).await?;
+			ctx.tx().cancel().await?;
+			plan
+		};
+		assert!(plan.has_work());
+
+		{
+			let ctx = new_ctx(&ds, TransactionType::Write).await;
+			h.index(&ctx, &id, Some(vector_content(&first)), Some(vector_content(&second))).await?;
+			ctx.tx().commit().await?;
+		}
+
+		{
+			let ctx = new_ctx(&ds, TransactionType::Write).await;
+			assert!(!h.apply_compaction(&ctx, plan).await?);
+			ctx.tx().cancel().await?;
+		}
+
+		{
+			let ctx = new_ctx(&ds, TransactionType::Read).await;
+			let pending: HnswRecordPendingUpdate =
+				ctx.tx().get(&ikb.new_hr_key(&id), None).await?.unwrap();
+			assert_eq!(pending.new_vectors, vec![serialized(&second)]);
+			ctx.tx().cancel().await?;
+		}
+		Ok(())
+	}
+
+	#[test(tokio::test(flavor = "multi_thread"))]
+	async fn hnsw_compaction_preserves_post_snapshot_pending_key() -> Result<()> {
+		let ds = Datastore::new("memory").await?;
+		let ikb = IndexKeyBase::new(NamespaceId(1), DatabaseId(2), "tb".into(), IndexId(4));
+		let p = new_params(2, VectorType::I16, Distance::Euclidean, 3, 500, true, true, true);
+		let first_id = RecordIdKey::Number(1);
+		let second_id = RecordIdKey::Number(2);
+		let first = new_i16_vec(1, 1);
+		let second = new_i16_vec(2, 2);
+
+		let h = {
+			let ctx = new_ctx(&ds, TransactionType::Write).await;
+			let tx = ctx.tx();
+			let h = HnswIndex::new(
+				ctx.get_index_stores().vector_cache().clone(),
+				&tx,
+				ikb.clone(),
+				TableId(3),
+				&p,
+			)
+			.await?;
+			h.index(&ctx, &first_id, None, Some(vector_content(&first))).await?;
+			tx.commit().await?;
+			h
+		};
+
+		let plan = {
+			let ctx = new_ctx(&ds, TransactionType::Read).await;
+			let plan = HnswIndex::prepare_compaction(&ctx, &ikb).await?;
+			ctx.tx().cancel().await?;
+			plan
+		};
+		assert!(plan.has_work());
+
+		{
+			let ctx = new_ctx(&ds, TransactionType::Write).await;
+			h.index(&ctx, &second_id, None, Some(vector_content(&second))).await?;
+			ctx.tx().commit().await?;
+		}
+
+		{
+			let ctx = new_ctx(&ds, TransactionType::Write).await;
+			assert!(h.apply_compaction(&ctx, plan).await?);
+			ctx.tx().commit().await?;
+		}
+
+		{
+			let ctx = new_ctx(&ds, TransactionType::Read).await;
+			assert!(ctx.tx().get::<_>(&ikb.new_hr_key(&first_id), None).await?.is_none());
+			assert!(ctx.tx().get::<_>(&ikb.new_hr_key(&second_id), None).await?.is_some());
+			ctx.tx().cancel().await?;
+		}
+		Ok(())
+	}
+
+	#[test(tokio::test(flavor = "multi_thread"))]
+	async fn hnsw_compaction_generation_allows_one_winner() -> Result<()> {
+		let ds = Datastore::new("memory").await?;
+		let ikb = IndexKeyBase::new(NamespaceId(1), DatabaseId(2), "tb".into(), IndexId(4));
+		let p = new_params(2, VectorType::I16, Distance::Euclidean, 3, 500, true, true, true);
+		let id = RecordIdKey::Number(1);
+		let first = new_i16_vec(1, 1);
+
+		let h = {
+			let ctx = new_ctx(&ds, TransactionType::Write).await;
+			let tx = ctx.tx();
+			let h = HnswIndex::new(
+				ctx.get_index_stores().vector_cache().clone(),
+				&tx,
+				ikb.clone(),
+				TableId(3),
+				&p,
+			)
+			.await?;
+			h.index(&ctx, &id, None, Some(vector_content(&first))).await?;
+			tx.commit().await?;
+			h
+		};
+
+		let plan_1 = {
+			let ctx = new_ctx(&ds, TransactionType::Read).await;
+			let plan = HnswIndex::prepare_compaction(&ctx, &ikb).await?;
+			ctx.tx().cancel().await?;
+			plan
+		};
+		let plan_2 = {
+			let ctx = new_ctx(&ds, TransactionType::Read).await;
+			let plan = HnswIndex::prepare_compaction(&ctx, &ikb).await?;
+			ctx.tx().cancel().await?;
+			plan
+		};
+
+		{
+			let ctx = new_ctx(&ds, TransactionType::Write).await;
+			assert!(h.apply_compaction(&ctx, plan_1).await?);
+			ctx.tx().commit().await?;
+		}
+		{
+			let ctx = new_ctx(&ds, TransactionType::Write).await;
+			assert!(!h.apply_compaction(&ctx, plan_2).await?);
+			ctx.tx().cancel().await?;
+		}
+		Ok(())
 	}
 
 	async fn test_recall(

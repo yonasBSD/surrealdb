@@ -1710,12 +1710,7 @@ impl Datastore {
 			let ikb = IndexKeyBase::new(ic.ns, ic.db, ic.tb.as_ref().clone(), ic.ix);
 			if let Entry::Vacant(e) = concurrent_compactions.entry(ikb.clone()) {
 				let dbs = dbs.clone();
-				let jh = spawn(async move {
-					let txn = Arc::new(dbs.transaction(Write, Optimistic).await?);
-					catch!(txn, dbs.process_index_compaction(txn.clone(), &ikb).await);
-					catch!(txn, txn.commit().await);
-					Ok(())
-				});
+				let jh = spawn(async move { dbs.process_index_compaction(&ikb).await });
 				e.insert(jh);
 			}
 		}
@@ -1753,13 +1748,7 @@ impl Datastore {
 			if !seen.insert(ikb.clone()) {
 				continue;
 			}
-			let res: Result<()> = async {
-				let txn = Arc::new(dbs.transaction(Write, Optimistic).await?);
-				catch!(txn, dbs.process_index_compaction(txn.clone(), &ikb).await);
-				catch!(txn, txn.commit().await);
-				Ok(())
-			}
-			.await;
+			let res: Result<()> = async { dbs.process_index_compaction(&ikb).await }.await;
 			if let Err(e) = res {
 				error_count += 1;
 				warn!("Index compaction {ikb} fails: {e}");
@@ -1775,32 +1764,26 @@ impl Datastore {
 	/// full-text, count, or HNSW. Indexes that are being removed
 	/// (`prepare_remove`), not found, or of an unsupported type are silently
 	/// skipped with a trace log.
-	async fn process_index_compaction(
-		&self,
-		txn: Arc<Transaction>,
-		ikb: &IndexKeyBase,
-	) -> Result<()> {
-		match txn.get_tb_index_by_id(ikb.ns(), ikb.db(), ikb.table(), ikb.index(), None).await? {
+	async fn process_index_compaction(&self, ikb: &IndexKeyBase) -> Result<()> {
+		let ix = {
+			let txn = self.transaction(Read, Optimistic).await?;
+			let res =
+				txn.get_tb_index_by_id(ikb.ns(), ikb.db(), ikb.table(), ikb.index(), None).await;
+			let _ = txn.cancel().await;
+			res?
+		};
+		match ix {
 			Some(ix) if !ix.prepare_remove => match &ix.index {
 				Index::FullText(p) => {
-					IndexOperation::index_fulltext_compaction(
-						&self.index_stores,
-						ikb,
-						&txn,
-						p,
-						&self.config.file_allowlist,
-					)
-					.await?;
+					self.process_fulltext_compaction(ikb, p).await?;
 				}
 				Index::Count(_) => {
-					IndexOperation::index_count_compaction(ikb, &txn).await?;
+					self.process_count_compaction(ikb).await?;
 				}
-				Index::Hnsw(p) => {
-					let mut ctx = self.setup_ctx()?;
-					ctx.set_transaction(txn.clone());
-					let ctx = ctx.freeze();
-					IndexOperation::index_hnsw_compaction(&ctx, &self.index_stores, ikb, &ix, p)
-						.await?;
+				Index::Hnsw(_) => {
+					// HNSW compaction owns its pending-key allocation and pending-range
+					// drain semantics separately from full-text/count compaction.
+					self.process_hnsw_compaction(ikb).await?;
 				}
 				_ => {
 					trace!(target: TARGET, "Index compaction: Index {:?} does not support compaction, skipping", ikb);
@@ -1812,6 +1795,224 @@ impl Datastore {
 		}
 		Ok(())
 	}
+
+	/// Runs HNSW compaction as bounded read-plan/write-apply batches.
+	///
+	/// Pending entries are captured in a read transaction and conditionally
+	/// deleted in a short write transaction before graph mutation. If a write
+	/// fails after local graph mutation may have started, the cached HNSW index
+	/// is evicted so later use reloads persisted state.
+	async fn process_hnsw_compaction(&self, ikb: &IndexKeyBase) -> Result<()> {
+		loop {
+			let prepared = {
+				let txn = Arc::new(self.transaction(Read, Optimistic).await?);
+				let res: Result<
+					Option<(
+						crate::catalog::TableId,
+						crate::idx::trees::hnsw::index::HnswCompactionPlan,
+					)>,
+				> = async {
+					let Some(tb) = txn.get_tb(ikb.ns(), ikb.db(), ikb.table(), None).await? else {
+						return Ok(None);
+					};
+					match txn
+						.get_tb_index_by_id(ikb.ns(), ikb.db(), ikb.table(), ikb.index(), None)
+						.await?
+					{
+						Some(ix) if !ix.prepare_remove && matches!(&ix.index, Index::Hnsw(_)) => {
+							let mut ctx = self.setup_ctx()?;
+							ctx.set_transaction(txn.clone());
+							let ctx = ctx.freeze();
+							let plan = IndexOperation::prepare_hnsw_compaction(&ctx, ikb).await?;
+							Ok(Some((tb.table_id, plan)))
+						}
+						_ => Ok(None),
+					}
+				}
+				.await;
+				let _ = txn.cancel().await;
+				res?
+			};
+			let Some((tb, plan)) = prepared else {
+				return Ok(());
+			};
+			if !plan.has_work() {
+				return Ok(());
+			}
+			let has_more = plan.has_more();
+
+			let txn = Arc::new(self.transaction(Write, Optimistic).await?);
+			let res: Result<bool> = async {
+				match txn
+					.get_tb_index_by_id(ikb.ns(), ikb.db(), ikb.table(), ikb.index(), None)
+					.await?
+				{
+					Some(ix) if !ix.prepare_remove => match &ix.index {
+						Index::Hnsw(p) => {
+							let mut ctx = self.setup_ctx()?;
+							ctx.set_transaction(txn.clone());
+							let ctx = ctx.freeze();
+							IndexOperation::apply_hnsw_compaction(
+								&ctx,
+								&self.index_stores,
+								ikb,
+								&ix,
+								p,
+								plan,
+							)
+							.await
+						}
+						_ => Ok(false),
+					},
+					_ => Ok(false),
+				}
+			}
+			.await;
+			match res {
+				Ok(true) => {
+					if let Err(e) = txn.commit().await {
+						if let Err(evict) =
+							self.index_stores.remove_hnsw_index(tb, ikb.clone()).await
+						{
+							warn!(target: TARGET, "Failed to evict HNSW index after compaction commit error: {evict}");
+						}
+						return Err(e);
+					}
+				}
+				Ok(false) => {
+					let _ = txn.cancel().await;
+					return Ok(());
+				}
+				Err(e) => {
+					let _ = txn.cancel().await;
+					if let Err(evict) = self.index_stores.remove_hnsw_index(tb, ikb.clone()).await {
+						warn!(target: TARGET, "Failed to evict HNSW index after compaction error: {evict}");
+					}
+					return Err(e);
+				}
+			}
+			if !has_more {
+				return Ok(());
+			}
+		}
+	}
+
+	/// Runs full-text compaction as a read-plan followed by a guarded write.
+	///
+	/// This avoids holding a mutable range scan over `!dc`/`!tt`; deltas
+	/// committed after the read snapshot remain for a later compaction.
+	async fn process_fulltext_compaction(
+		&self,
+		ikb: &IndexKeyBase,
+		p: &crate::catalog::FullTextParams,
+	) -> Result<()> {
+		loop {
+			let plan = {
+				let txn = self.transaction(Read, Optimistic).await?;
+				let res = IndexOperation::prepare_fulltext_compaction(
+					&self.index_stores,
+					ikb,
+					&txn,
+					p,
+					&self.config.file_allowlist,
+				)
+				.await;
+				let _ = txn.cancel().await;
+				res?
+			};
+			if !plan.has_work() {
+				return Ok(());
+			}
+			let has_more = plan.has_more();
+
+			let txn = self.transaction(Write, Optimistic).await?;
+			let res = async {
+				match txn
+					.get_tb_index_by_id(ikb.ns(), ikb.db(), ikb.table(), ikb.index(), None)
+					.await?
+				{
+					Some(ix) if !ix.prepare_remove => match &ix.index {
+						Index::FullText(p) => {
+							IndexOperation::apply_fulltext_compaction(
+								&self.index_stores,
+								ikb,
+								&txn,
+								p,
+								&self.config.file_allowlist,
+								plan,
+							)
+							.await
+						}
+						_ => Ok(false),
+					},
+					_ => Ok(false),
+				}
+			}
+			.await;
+			match res {
+				Ok(true) => txn.commit().await?,
+				Ok(false) => {
+					let _ = txn.cancel().await;
+					return Ok(());
+				}
+				Err(e) => {
+					let _ = txn.cancel().await;
+					return Err(e);
+				}
+			}
+			if !has_more {
+				return Ok(());
+			}
+		}
+	}
+
+	/// Runs count-index compaction as a read-plan followed by a guarded write.
+	///
+	/// The write phase deletes only keys captured in the plan, so concurrent
+	/// `!iu` deltas are preserved and included by later reads/compactions.
+	async fn process_count_compaction(&self, ikb: &IndexKeyBase) -> Result<()> {
+		loop {
+			let plan = {
+				let txn = self.transaction(Read, Optimistic).await?;
+				let res = IndexOperation::prepare_count_compaction(ikb, &txn).await;
+				let _ = txn.cancel().await;
+				res?
+			};
+			if !plan.has_work() {
+				return Ok(());
+			}
+			let has_more = plan.has_more();
+
+			let txn = self.transaction(Write, Optimistic).await?;
+			let res = async {
+				match txn
+					.get_tb_index_by_id(ikb.ns(), ikb.db(), ikb.table(), ikb.index(), None)
+					.await?
+				{
+					Some(ix) if !ix.prepare_remove && matches!(&ix.index, Index::Count(_)) => {
+						IndexOperation::apply_count_compaction(ikb, &txn, plan).await
+					}
+					_ => Ok(false),
+				}
+			}
+			.await;
+			match res {
+				Ok(true) => txn.commit().await?,
+				Ok(false) => {
+					let _ = txn.cancel().await;
+					return Ok(());
+				}
+				Err(e) => {
+					let _ = txn.cancel().await;
+					return Err(e);
+				}
+			}
+			if !has_more {
+				return Ok(());
+			}
+		}
+	}
+
 	/// Process queued async events using a distributed lease to coordinate batches.
 	/// Once a batch starts it runs to completion even if the lease expires, so
 	/// brief overlap is possible.

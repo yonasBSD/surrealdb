@@ -118,7 +118,8 @@ impl IndexStores {
 		Ok(())
 	}
 
-	async fn remove_hnsw_index(&self, tb: TableId, ikb: IndexKeyBase) -> Result<()> {
+	/// Evicts cached HNSW graph and vector entries for one table index.
+	pub(crate) async fn remove_hnsw_index(&self, tb: TableId, ikb: IndexKeyBase) -> Result<()> {
 		self.0.hnsw_indexes.remove(tb, &ikb).await?;
 		self.0.vector_cache.remove_index(ikb.ns(), ikb.db(), tb, ikb.index()).await;
 		Ok(())

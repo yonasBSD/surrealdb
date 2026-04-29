@@ -15,13 +15,16 @@
 pub mod all;
 pub mod dc;
 pub mod dl;
+pub mod dv;
 pub mod hd;
 pub mod he;
+pub mod hg;
 pub mod hh;
 pub mod hi;
 pub mod hl;
 pub mod hn;
 pub mod hp;
+pub mod hr;
 pub mod hs;
 pub mod hv;
 pub mod ib;
@@ -31,8 +34,10 @@ pub mod ii;
 pub mod ip;
 pub mod is;
 pub mod iu;
+pub mod iv;
 pub mod td;
 pub mod tt;
+pub mod tv;
 
 use std::borrow::Cow;
 

@@ -13,19 +13,22 @@ use anyhow::Result;
 use uuid::Uuid;
 
 use crate::catalog::{DatabaseId, IndexId, NamespaceId};
+use crate::err::Error;
 use crate::idx::seqdocids::DocId;
 use crate::idx::trees::hnsw::ElementId;
-use crate::idx::trees::hnsw::index::AppendingId64;
 use crate::idx::trees::vector::SerializedVector;
 use crate::key::index::dc::Dc;
 use crate::key::index::dl::Dl;
+use crate::key::index::dv::Dv;
 use crate::key::index::hd::{Hd, HdRoot};
 use crate::key::index::he::He;
+use crate::key::index::hg::Hg;
 use crate::key::index::hh::Hh;
 use crate::key::index::hi::Hi;
 use crate::key::index::hl::Hl;
 use crate::key::index::hn::HnswNode;
-use crate::key::index::hp::{HnswPending, HnswPendingPrefix};
+use crate::key::index::hp::HnswPendingPrefix;
+use crate::key::index::hr::{HnswRecordPending, HnswRecordPendingPrefix};
 use crate::key::index::hs::Hs;
 use crate::key::index::hv::Hv;
 use crate::key::index::ib::Ib;
@@ -34,12 +37,55 @@ use crate::key::index::ig::IndexAppending;
 use crate::key::index::ii::Ii;
 use crate::key::index::ip::Ip;
 use crate::key::index::is::Is;
+use crate::key::index::iv::Iv;
 use crate::key::index::td::{Td, TdRoot};
 use crate::key::index::tt::Tt;
+use crate::key::index::tv::Tv;
 use crate::key::root::ic::IndexCompactionKey;
-use crate::kvs::Key;
 use crate::kvs::index::{AppendingId, BatchId};
+use crate::kvs::{Error as KvsError, KVKey, Key, Transaction};
 use crate::val::{RecordIdKey, TableName};
+
+/// Reads a compaction generation key.
+///
+/// Missing generation keys are equivalent to generation `0`.
+pub(in crate::idx) async fn read_compaction_generation<K>(
+	tx: &Transaction,
+	key: &K,
+) -> Result<Option<u64>>
+where
+	K: KVKey<ValueType = u64> + Debug,
+{
+	tx.get(key, None).await
+}
+
+/// Advances a compaction generation with a conditional write.
+///
+/// Returns `false` when the stored generation differs from `current`, so the
+/// caller can skip a plan built from an older snapshot.
+pub(in crate::idx) async fn bump_compaction_generation<K>(
+	tx: &Transaction,
+	key: &K,
+	current: Option<u64>,
+) -> Result<bool>
+where
+	K: KVKey<ValueType = u64> + Debug,
+{
+	let next = current.unwrap_or(0).saturating_add(1);
+	match tx.putc(key, &next, current.as_ref()).await {
+		Ok(()) => Ok(true),
+		Err(e) if is_transaction_condition_not_met(&e) => Ok(false),
+		Err(e) => Err(e),
+	}
+}
+
+/// Identifies the datastore error used for failed conditional writes/deletes.
+pub(in crate::idx) fn is_transaction_condition_not_met(e: &anyhow::Error) -> bool {
+	if matches!(e.downcast_ref::<Error>(), Some(Error::Kvs(KvsError::TransactionConditionNotMet))) {
+		return true;
+	}
+	matches!(e.downcast_ref::<KvsError>(), Some(KvsError::TransactionConditionNotMet))
+}
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 #[repr(transparent)]
@@ -85,12 +131,24 @@ impl IndexKeyBase {
 		Hi::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix, id)
 	}
 
-	fn new_hp_key(&self, appending_id: AppendingId64) -> HnswPending<'_> {
-		HnswPending::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix, appending_id)
-	}
-
+	/// Range covering append-keyed HNSW pending updates.
 	fn new_hp_range(&self) -> Result<Range<Key>> {
 		HnswPendingPrefix::range(self.0.ns, self.0.db, &self.0.tb, self.0.ix)
+	}
+
+	/// Key storing the HNSW pending compaction generation.
+	fn new_hg_key(&self) -> Hg<'_> {
+		Hg::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix)
+	}
+
+	/// Key storing the pending HNSW update for one record.
+	fn new_hr_key<'a>(&'a self, id: &'a RecordIdKey) -> HnswRecordPending<'a> {
+		HnswRecordPending::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix, id)
+	}
+
+	/// Range covering record-keyed HNSW pending updates.
+	fn new_hr_range(&self) -> Result<Range<Key>> {
+		HnswRecordPendingPrefix::range(self.0.ns, self.0.db, &self.0.tb, self.0.ix)
 	}
 
 	fn new_hl_key(&self, layer: u16, chunk: u32) -> Hl<'_> {
@@ -198,6 +256,11 @@ impl IndexKeyBase {
 		Tt::terms_range(self.0.ns, self.0.db, &self.0.tb, self.0.ix)
 	}
 
+	/// Generation guard for full-text term-document (`!tt`) compaction.
+	fn new_tv_key(&self) -> Tv<'_> {
+		Tv::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix)
+	}
+
 	fn new_dc_with_id(&self, doc_id: DocId, nid: Uuid, uid: Uuid) -> Dc<'_> {
 		Dc::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix, doc_id, nid, uid)
 	}
@@ -206,16 +269,22 @@ impl IndexKeyBase {
 		Dc::new_root(self.0.ns, self.0.db, &self.0.tb, self.0.ix)
 	}
 
-	fn new_dc_range(&self) -> Result<(Key, Key)> {
-		Dc::range(self.0.ns, self.0.db, &self.0.tb, self.0.ix)
-	}
-
 	fn new_dc_range_with_root(&self) -> Result<(Key, Key)> {
 		Dc::range_with_root(self.0.ns, self.0.db, &self.0.tb, self.0.ix)
 	}
 
+	/// Generation guard for full-text document-stat (`!dc`) compaction.
+	fn new_dv_key(&self) -> Dv<'_> {
+		Dv::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix)
+	}
+
 	fn new_dl(&self, doc_id: DocId) -> Dl<'_> {
 		Dl::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix, doc_id)
+	}
+
+	/// Generation guard for count-index (`!iu`) compaction.
+	pub(crate) fn new_iv_key(&self) -> Iv<'_> {
+		Iv::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix)
 	}
 
 	pub(crate) fn ns(&self) -> NamespaceId {

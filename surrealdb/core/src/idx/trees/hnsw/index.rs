@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use ahash::HashMap;
 use anyhow::{Result, bail};
@@ -14,30 +13,159 @@ use crate::ctx::{Context, FrozenContext};
 use crate::dbs::Options;
 use crate::err::Error;
 use crate::expr::Cond;
-use crate::idx::IndexKeyBase;
 use crate::idx::planner::ScanDirection;
 use crate::idx::planner::iterators::KnnIteratorResult;
 use crate::idx::trees::hnsw::cache::VectorCache;
 use crate::idx::trees::hnsw::docs::{HnswDocs, VecDocs};
 use crate::idx::trees::hnsw::filter::HnswTruthyDocumentFilter;
 use crate::idx::trees::hnsw::flavor::HnswFlavor;
-use crate::idx::trees::hnsw::{ElementId, HnswSearch, VectorId, VectorPendingUpdate};
+use crate::idx::trees::hnsw::{
+	ElementId, HnswRecordPendingUpdate, HnswSearch, VectorId, VectorPendingUpdate,
+};
 use crate::idx::trees::knn::KnnResultBuilder;
 use crate::idx::trees::vector::{SerializedVector, SharedVector, Vector};
-use crate::key::index::hp::HnswPending;
-use crate::kvs::{KVValue, Key, Transaction};
+use crate::idx::{
+	IndexKeyBase, bump_compaction_generation, is_transaction_condition_not_met,
+	read_compaction_generation,
+};
+use crate::key::index::hr::HnswRecordPending;
+use crate::kvs::{KVValue, Key, Transaction, Val};
 use crate::val::{Number, RecordId, RecordIdKey, Value};
 
-pub(crate) type AppendingId64 = u64;
+/// Maximum number of pending key/value pairs captured by one compaction plan.
+const HNSW_COMPACTION_MAX_PENDING_KEYS: usize = 1024;
+/// Maximum encoded pending key/value bytes captured by one compaction plan.
+const HNSW_COMPACTION_MAX_PENDING_BYTES: usize = 16 * 1024 * 1024;
+
+/// Exact pending key/value observed by an HNSW compaction read phase.
+struct CapturedPendingKey {
+	/// Encoded key to delete if the value still matches.
+	key: Key,
+	/// Encoded value that must still be present during conditional delete.
+	value: Val,
+}
+
+/// Coalesced record operation that should be applied to the HNSW graph.
+#[derive(Clone)]
+struct PendingOperation {
+	/// Existing document ID or record key for a not-yet-resolved document.
+	id: VectorId,
+	/// Graph baseline vectors to remove before applying the desired state.
+	old_vectors: Vec<SerializedVector>,
+	/// Desired vectors for the record after compaction.
+	new_vectors: Vec<SerializedVector>,
+}
+
+/// Snapshot gathered by the read phase of HNSW pending compaction.
+///
+/// The plan stores exact pending key/value pairs for conditional deletion and
+/// coalesces all observed work by record identity so replay order does not
+/// determine the final graph state.
+pub(crate) struct HnswCompactionPlan {
+	generation: Option<u64>,
+	captured_keys: Vec<CapturedPendingKey>,
+	pending: Vec<PendingOperation>,
+	has_more: bool,
+}
+
+impl HnswCompactionPlan {
+	/// Returns whether the plan contains pending keys to apply.
+	pub(crate) fn has_work(&self) -> bool {
+		!self.captured_keys.is_empty()
+	}
+
+	/// Returns whether the read phase stopped at the configured batch cap.
+	pub(crate) fn has_more(&self) -> bool {
+		self.has_more
+	}
+
+	/// Returns the number of exact pending keys captured by the plan.
+	#[cfg(test)]
+	pub(crate) fn len(&self) -> usize {
+		self.captured_keys.len()
+	}
+}
+
+/// Mutable accumulator for building a bounded HNSW compaction plan.
+struct PendingPlanBuilder {
+	generation: Option<u64>,
+	captured_keys: Vec<CapturedPendingKey>,
+	pending: Vec<PendingOperation>,
+	pending_by_id: HashMap<VectorId, usize>,
+	encoded_bytes: usize,
+	has_more: bool,
+}
+
+impl PendingPlanBuilder {
+	/// Creates an empty compaction-plan accumulator for a generation snapshot.
+	fn new(generation: Option<u64>) -> Self {
+		Self {
+			generation,
+			captured_keys: Vec::new(),
+			pending: Vec::new(),
+			pending_by_id: HashMap::default(),
+			encoded_bytes: 0,
+			has_more: false,
+		}
+	}
+
+	/// Captures one pending key/value and folds its operation into the plan.
+	///
+	/// Returns `false` when adding the pending entry would exceed a batch cap.
+	fn add(&mut self, key: Key, value: Val, pending: PendingOperation) -> bool {
+		if self.captured_keys.len() >= HNSW_COMPACTION_MAX_PENDING_KEYS
+			|| (!self.captured_keys.is_empty()
+				&& self.encoded_bytes + key.len() + value.len() > HNSW_COMPACTION_MAX_PENDING_BYTES)
+		{
+			self.has_more = true;
+			return false;
+		}
+		self.encoded_bytes += key.len() + value.len();
+		self.captured_keys.push(CapturedPendingKey {
+			key,
+			value,
+		});
+		self.add_pending(pending);
+		if self.captured_keys.len() >= HNSW_COMPACTION_MAX_PENDING_KEYS
+			|| self.encoded_bytes >= HNSW_COMPACTION_MAX_PENDING_BYTES
+		{
+			self.has_more = true;
+		}
+		true
+	}
+
+	/// Coalesces one pending operation into the record operation list.
+	///
+	/// Repeated operations for the same vector identity keep the first graph
+	/// baseline and replace the desired vectors with the latest state.
+	fn add_pending(&mut self, pending: PendingOperation) {
+		if let Some(pos) = self.pending_by_id.get(&pending.id) {
+			self.pending[*pos].new_vectors = pending.new_vectors;
+			return;
+		}
+		let pos = self.pending.len();
+		self.pending_by_id.insert(pending.id.clone(), pos);
+		self.pending.push(pending);
+	}
+
+	/// Converts the accumulator into an immutable compaction plan.
+	fn into_plan(self) -> HnswCompactionPlan {
+		HnswCompactionPlan {
+			generation: self.generation,
+			captured_keys: self.captured_keys,
+			pending: self.pending,
+			has_more: self.has_more,
+		}
+	}
+}
 
 /// High-level HNSW index supporting concurrent reads and writes.
 ///
 /// Writes are handled through a two-phase approach:
-/// 1. **Enqueueing**: The [`index`](Self::index) method converts document changes into
-///    [`VectorPendingUpdate`] entries stored in the key-value store, using an [`AtomicU32`] counter
-///    for lock-free sequencing.
-/// 2. **Applying**: A background task calls [`index_pendings`](Self::index_pendings) to drain and
-///    apply all pending updates to the HNSW graph under a write lock.
+/// 1. **Enqueueing**: The [`index`](Self::index) method converts document changes into record-keyed
+///    [`HnswRecordPendingUpdate`] entries stored in the key-value store.
+/// 2. **Applying**: Compaction prepares a bounded pending snapshot and applies it under a graph
+///    write lock after the captured keys are conditionally deleted.
 ///
 /// Reads via [`knn_search`](Self::knn_search) first scan pending (not-yet-applied)
 /// updates, then search the committed graph under a read lock, merging both
@@ -55,8 +183,6 @@ pub(crate) struct HnswIndex {
 	hnsw: RwLock<HnswFlavor>,
 	/// Vector-to-document mappings.
 	vec_docs: VecDocs,
-	/// Monotonically increasing counter for assigning pending update keys.
-	next_appending_id: AtomicU64,
 }
 
 /// Contextual state passed through HNSW graph operations.
@@ -75,6 +201,7 @@ pub(super) struct HnswContext<'a> {
 }
 
 impl<'a> HnswContext<'a> {
+	/// Creates graph-operation context backed by the frozen transaction context.
 	pub(super) fn new(ctx: &'a FrozenContext, ikb: IndexKeyBase, vec_docs: &'a VecDocs) -> Self {
 		Self {
 			ctx,
@@ -89,20 +216,11 @@ impl HnswIndex {
 	/// Creates a new HNSW index, loading existing document state from the transaction.
 	pub(crate) async fn new(
 		vector_cache: VectorCache,
-		tx: &Transaction,
+		_tx: &Transaction,
 		ikb: IndexKeyBase,
 		tb: TableId,
 		p: &HnswParams,
 	) -> Result<Self> {
-		// Compute the last appending.
-		let rng = ikb.new_hp_range()?;
-		let scan = tx.keysr(rng, 1, 0, None).await?;
-		let next_appending_id = if let Some(key) = scan.last() {
-			let hp = HnswPending::decode_key(key)?;
-			hp.appending_id + 1
-		} else {
-			0
-		};
 		Ok(Self {
 			dim: p.dimension as usize,
 			vector_type: p.vector_type,
@@ -110,7 +228,6 @@ impl HnswIndex {
 			hnsw: RwLock::new(HnswFlavor::new(tb, ikb.clone(), p, vector_cache)?),
 			vec_docs: VecDocs::new(ikb.clone(), p.use_hashed_vector),
 			ikb,
-			next_appending_id: AtomicU64::new(next_appending_id),
 		})
 	}
 
@@ -130,11 +247,10 @@ impl HnswIndex {
 
 	/// Enqueues a vector update for later application to the HNSW graph.
 	///
-	/// Converts old/new document values into serialized vectors, resolves the
-	/// document identity, and writes a [`VectorPendingUpdate`] to the key-value
-	/// store. This method is entirely lock-free: it uses [`HnswDocs::get_doc_id`]
-	/// (a static method) to look up existing doc IDs directly from the
-	/// key-value store without acquiring any lock.
+	/// Converts old/new document values into serialized vectors and stores a
+	/// single record-keyed pending value. Repeated writes to the same record
+	/// preserve the original graph baseline and replace only the desired final
+	/// vectors, so compaction can apply the record's final state directly.
 	pub(crate) async fn index(
 		&self,
 		ctx: &Context,
@@ -156,20 +272,49 @@ impl HnswIndex {
 			vec![]
 		};
 		let tx = ctx.tx();
-		let id = if let Some(doc_id) = HnswDocs::get_doc_id(&self.ikb, &tx, id).await? {
+		let key = self.ikb.new_hr_key(id);
+		let pending = if let Some(mut pending) = tx.get(&key, None).await? {
+			pending.new_vectors = new_vectors;
+			pending
+		} else {
+			HnswRecordPendingUpdate {
+				doc_id: HnswDocs::get_doc_id(&self.ikb, &tx, id).await?,
+				old_vectors,
+				new_vectors,
+			}
+		};
+		tx.set(&key, &pending).await?;
+		Ok(())
+	}
+
+	/// Converts an append-keyed pending value into a graph operation.
+	fn append_pending_to_operation(pending: VectorPendingUpdate) -> PendingOperation {
+		PendingOperation {
+			id: pending.id,
+			old_vectors: pending.old_vectors,
+			new_vectors: pending.new_vectors,
+		}
+	}
+
+	/// Converts a record-keyed pending value into a graph operation.
+	///
+	/// Existing records are addressed by their graph document ID. Records that
+	/// have not reached the graph are addressed by their record key until
+	/// compaction resolves a document ID for them.
+	fn record_pending_to_operation(
+		id: RecordIdKey,
+		pending: HnswRecordPendingUpdate,
+	) -> PendingOperation {
+		let id = if let Some(doc_id) = pending.doc_id {
 			VectorId::DocId(doc_id)
 		} else {
-			VectorId::RecordKey(Arc::new(id.clone()))
+			VectorId::RecordKey(Arc::new(id))
 		};
-		let appending_id = self.next_appending_id.fetch_add(1, Ordering::Release);
-		let key = self.ikb.new_hp_key(appending_id);
-		let pending = VectorPendingUpdate {
+		PendingOperation {
 			id,
-			old_vectors,
-			new_vectors,
-		};
-		tx.put(&key, &pending).await?;
-		Ok(())
+			old_vectors: pending.old_vectors,
+			new_vectors: pending.new_vectors,
+		}
 	}
 
 	/// Creates an [`HnswContext`] from the current index state and a frozen context.
@@ -177,81 +322,181 @@ impl HnswIndex {
 		HnswContext::new(ctx, self.ikb.clone(), &self.vec_docs)
 	}
 
-	/// Drains and applies all pending vector updates to the HNSW graph.
+	/// Builds a bounded compaction plan for HNSW pending updates.
 	///
-	/// Creates a local [`HnswDocs`] instance for the duration of the batch,
-	/// streams pending updates from the key-value store, and applies each one
-	/// (inserting/removing vectors and updating document mappings). The
-	/// `HnswDocs` state is persisted once at the end via [`HnswDocs::finish`],
-	/// and the consumed pending entries are deleted. Returns the number of
-	/// updates applied.
-	pub(in crate::idx) async fn index_pendings(&self, ctx: &FrozenContext) -> Result<usize> {
+	/// The read phase scans append-keyed `!hp` entries first, then record-keyed
+	/// `!hr` entries. It records exact key/value pairs for conditional deletion
+	/// and coalesces pending work by document identity.
+	pub(in crate::idx) async fn prepare_compaction(
+		ctx: &FrozenContext,
+		ikb: &IndexKeyBase,
+	) -> Result<HnswCompactionPlan> {
 		let tx = ctx.tx();
-		let rng = self.ikb.new_hp_range()?;
-		let mut stream =
-			tx.stream_keys_vals(rng, None, None, 0, ScanDirection::Forward, false, None);
-		// Loop until no more entries
+		let generation = read_compaction_generation(&tx, &ikb.new_hg_key()).await?;
+		let mut builder = PendingPlanBuilder::new(generation);
 		let mut count = 0;
-		let mut docs = HnswDocs::new(&tx, self.ikb.clone()).await?;
-		while let Some(res) = stream.next().await {
-			let batch = res?;
-			for (_, v) in batch {
-				// Check if the context is finished
-				if ctx.is_done(Some(count)).await? {
-					bail!(Error::QueryCancelled)
-				}
-				let pending = VectorPendingUpdate::kv_decode_value(v)?;
-				self.index_pending(ctx, &mut docs, pending).await?;
-				// Parse the data from the store
-				count += 1;
-			}
+		Self::collect_append_pending_for_plan(ctx, &tx, ikb, &mut builder, &mut count).await?;
+		if !builder.has_more {
+			Self::collect_record_pending_for_plan(ctx, &tx, ikb, &mut builder, &mut count).await?;
 		}
-		tx.delr(self.ikb.new_hp_range()?).await?;
-		docs.finish(&tx).await?;
-		Ok(count)
+		Ok(builder.into_plan())
 	}
 
-	/// Applies a single pending vector update to the HNSW graph.
+	/// Adds append-keyed pending entries to a compaction plan.
 	///
-	/// Acquires a write lock on the graph to remove old vectors and insert
-	/// new vectors, and updates the provided [`HnswDocs`] instance (passed
-	/// by the caller) to manage document ID allocation and removal.
-	async fn index_pending(
-		&self,
+	/// Entries are captured as exact encoded key/value pairs so the write phase
+	/// can remove only values that still match the read snapshot.
+	async fn collect_append_pending_for_plan(
 		ctx: &FrozenContext,
-		docs: &mut HnswDocs,
-		pending: VectorPendingUpdate,
+		tx: &Transaction,
+		ikb: &IndexKeyBase,
+		builder: &mut PendingPlanBuilder,
+		count: &mut usize,
 	) -> Result<()> {
-		let mut hnsw = self.hnsw.write().await;
-		// Ensure the layers are up-to-date
-		hnsw.check_state(ctx).await?;
-		// Create a new context
-		let mut ctx = self.new_hnsw_context(ctx);
-		// Remove old values if any
-		if let VectorId::DocId(doc_id) = pending.id {
-			for vector in pending.old_vectors {
-				// Extract the vector
-				let vector = Vector::from(vector);
-				// Remove the vector
-				self.vec_docs.remove(&ctx, &vector, doc_id, &mut hnsw).await?;
-			}
-			if pending.new_vectors.is_empty() {
-				// Remove the doc
-				docs.remove(&ctx.tx, doc_id).await?;
+		let rng = ikb.new_hp_range()?;
+		let mut stream =
+			tx.stream_keys_vals(rng, None, None, 0, ScanDirection::Forward, false, None);
+		while let Some(res) = stream.next().await {
+			let batch = res?;
+			for (key, value) in batch {
+				if ctx.is_done(Some(*count)).await? {
+					bail!(Error::QueryCancelled)
+				}
+				let pending = VectorPendingUpdate::kv_decode_value(value.clone())?;
+				let pending = Self::append_pending_to_operation(pending);
+				if !builder.add(key, value, pending) {
+					return Ok(());
+				}
+				*count += 1;
+				if builder.has_more {
+					return Ok(());
+				}
 			}
 		}
+		Ok(())
+	}
 
-		// Index the new values if any
-		if !pending.new_vectors.is_empty() {
-			let doc_id = match pending.id {
-				VectorId::DocId(doc_id) => doc_id,
-				VectorId::RecordKey(id) => docs.resolve(&ctx.tx, &id).await?,
-			};
-			for vector in pending.new_vectors {
-				// Extract the vector
-				let vector = Vector::from(vector);
-				// Insert the vector
-				self.vec_docs.insert(&mut ctx, vector, doc_id, &mut hnsw).await?;
+	/// Adds record-keyed pending entries to a compaction plan.
+	///
+	/// The record identity is decoded from each key and combined with the
+	/// stored pending value before being coalesced into the plan.
+	async fn collect_record_pending_for_plan(
+		ctx: &FrozenContext,
+		tx: &Transaction,
+		ikb: &IndexKeyBase,
+		builder: &mut PendingPlanBuilder,
+		count: &mut usize,
+	) -> Result<()> {
+		let rng = ikb.new_hr_range()?;
+		let mut stream =
+			tx.stream_keys_vals(rng, None, None, 0, ScanDirection::Forward, false, None);
+		while let Some(res) = stream.next().await {
+			let batch = res?;
+			for (key, value) in batch {
+				if ctx.is_done(Some(*count)).await? {
+					bail!(Error::QueryCancelled)
+				}
+				let hr = HnswRecordPending::decode_key(&key)?;
+				let pending = HnswRecordPendingUpdate::kv_decode_value(value.clone())?;
+				let pending = Self::record_pending_to_operation(hr.id.into_owned(), pending);
+				if !builder.add(key, value, pending) {
+					return Ok(());
+				}
+				*count += 1;
+				if builder.has_more {
+					return Ok(());
+				}
+			}
+		}
+		Ok(())
+	}
+
+	/// Applies a prepared HNSW pending compaction plan.
+	///
+	/// The write phase first advances the generation and conditionally deletes
+	/// only the exact pending values observed by the read phase. The graph is
+	/// mutated only after those guards succeed.
+	pub(in crate::idx) async fn apply_compaction(
+		&self,
+		ctx: &FrozenContext,
+		plan: HnswCompactionPlan,
+	) -> Result<bool> {
+		if !plan.has_work() {
+			return Ok(false);
+		}
+		let tx = ctx.tx();
+		if !bump_compaction_generation(&tx, &self.ikb.new_hg_key(), plan.generation).await? {
+			return Ok(false);
+		}
+		for captured in &plan.captured_keys {
+			match tx.delc(&captured.key, Some(&captured.value)).await {
+				Ok(()) => {}
+				Err(e) if is_transaction_condition_not_met(&e) => return Ok(false),
+				Err(e) => return Err(e),
+			}
+		}
+		let mut hnsw = self.hnsw.write().await;
+		hnsw.check_state(ctx).await?;
+		let mut ctx = self.new_hnsw_context(ctx);
+		let mut docs = HnswDocs::new(&tx, self.ikb.clone()).await?;
+		for pending in plan.pending {
+			self.apply_pending_operation(&mut ctx, &mut docs, &mut hnsw, pending).await?;
+		}
+		docs.finish(&tx).await?;
+		Ok(true)
+	}
+
+	/// Drains and applies one batch of pending vector updates to the HNSW graph.
+	///
+	/// This convenience method is used by local HNSW tests. Datastore
+	/// compaction owns the split read/write transactions around the same
+	/// prepare/apply methods.
+	#[cfg(test)]
+	pub(in crate::idx) async fn index_pendings(&self, ctx: &FrozenContext) -> Result<usize> {
+		let plan = Self::prepare_compaction(ctx, &self.ikb).await?;
+		let count = plan.len();
+		if self.apply_compaction(ctx, plan).await? {
+			Ok(count)
+		} else {
+			Ok(0)
+		}
+	}
+
+	/// Applies a coalesced pending operation to the HNSW graph.
+	///
+	/// The operation removes the graph baseline for resolved documents and
+	/// inserts the desired vectors, resolving a document ID for new records only
+	/// when vectors remain to index.
+	async fn apply_pending_operation(
+		&self,
+		ctx: &mut HnswContext<'_>,
+		docs: &mut HnswDocs,
+		hnsw: &mut HnswFlavor,
+		pending: PendingOperation,
+	) -> Result<()> {
+		match pending.id {
+			VectorId::DocId(doc_id) => {
+				for vector in pending.old_vectors {
+					let vector = Vector::from(vector);
+					self.vec_docs.remove(ctx, &vector, doc_id, hnsw).await?;
+				}
+				if pending.new_vectors.is_empty() {
+					docs.remove(&ctx.tx, doc_id).await?;
+				} else {
+					for vector in pending.new_vectors {
+						let vector = Vector::from(vector);
+						self.vec_docs.insert(ctx, vector, doc_id, hnsw).await?;
+					}
+				}
+			}
+			VectorId::RecordKey(id) => {
+				if !pending.new_vectors.is_empty() {
+					let doc_id = docs.resolve(&ctx.tx, &id).await?;
+					for vector in pending.new_vectors {
+						let vector = Vector::from(vector);
+						self.vec_docs.insert(ctx, vector, doc_id, hnsw).await?;
+					}
+				}
 			}
 		}
 		Ok(())
@@ -381,9 +626,9 @@ impl HnswIndex {
 		let mut all_existing_docs = RoaringTreemap::new();
 		let mut non_deleted_docs = HashMap::default();
 		// First pass, identify deleted doc
-		self.collect_pending(ctx.ctx, &ctx.tx, |_, pending| {
-			if let VectorId::DocId(doc_id) = pending.id {
-				all_existing_docs.insert(doc_id);
+		self.collect_pending(ctx.ctx, &ctx.tx, |pending| {
+			if let VectorId::DocId(doc_id) = &pending.id {
+				all_existing_docs.insert(*doc_id);
 			};
 			if pending.new_vectors.is_empty() {
 				non_deleted_docs.remove(&pending.id);
@@ -420,7 +665,10 @@ impl HnswIndex {
 		Ok(Some(all_existing_docs))
 	}
 
-	/// Streams all pending updates from the key-value store and passes them to a collector.
+	/// Streams all pending updates and passes graph operations to a collector.
+	///
+	/// Append-keyed entries are streamed before record-keyed entries. The
+	/// collector decides whether and how to coalesce operations.
 	async fn collect_pending<F>(
 		&self,
 		ctx: &Context,
@@ -428,23 +676,36 @@ impl HnswIndex {
 		mut collector: F,
 	) -> Result<()>
 	where
-		F: FnMut(Key, VectorPendingUpdate),
+		F: FnMut(PendingOperation),
 	{
 		let rng = self.ikb.new_hp_range()?;
 		let mut stream =
 			tx.stream_keys_vals(rng, None, None, 0, ScanDirection::Forward, false, None);
-		// Loop until no more entries
 		let mut count = 0;
 		while let Some(res) = stream.next().await {
 			let batch = res?;
-			for (k, v) in batch {
-				// Check if the context is finished
+			for (_, v) in batch {
 				if ctx.is_done(Some(count)).await? {
 					bail!(Error::QueryCancelled)
 				}
 				let pending = VectorPendingUpdate::kv_decode_value(v)?;
-				collector(k, pending);
-				// Parse the data from the store
+				collector(Self::append_pending_to_operation(pending));
+				count += 1;
+			}
+		}
+
+		let rng = self.ikb.new_hr_range()?;
+		let mut stream =
+			tx.stream_keys_vals(rng, None, None, 0, ScanDirection::Forward, false, None);
+		while let Some(res) = stream.next().await {
+			let batch = res?;
+			for (key, value) in batch {
+				if ctx.is_done(Some(count)).await? {
+					bail!(Error::QueryCancelled)
+				}
+				let hr = HnswRecordPending::decode_key(&key)?;
+				let pending = HnswRecordPendingUpdate::kv_decode_value(value)?;
+				collector(Self::record_pending_to_operation(hr.id.into_owned(), pending));
 				count += 1;
 			}
 		}
