@@ -63,6 +63,8 @@ impl<'a> Ip<'a> {
 
 #[cfg(test)]
 mod tests {
+	use surrealdb_strand::Strand;
+
 	use super::*;
 	use crate::kvs::KVKey;
 
@@ -74,7 +76,7 @@ mod tests {
 			DatabaseId(2),
 			&tb,
 			IndexId(3),
-			RecordIdKey::String("id".into()),
+			RecordIdKey::String(Strand::new_static("id")),
 		);
 		let enc = Ip::encode_key(&val).unwrap();
 		assert_eq!(

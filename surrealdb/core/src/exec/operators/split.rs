@@ -164,13 +164,15 @@ fn split_value_on_idiom(value: Value, idiom: &Idiom, output: &mut Vec<Value>) {
 
 #[cfg(test)]
 mod tests {
+	use surrealdb_strand::Strand;
+
 	use super::*;
 	use crate::expr::part::Part;
 	use crate::val::{Array, Object, Set};
 
 	#[test]
 	fn test_split_on_array() {
-		let idiom = Idiom(vec![Part::Field("tags".into())]);
+		let idiom = Idiom(vec![Part::Field(Strand::new_static("tags"))]);
 		let value = Value::Object(Object::from_iter([
 			("id".to_string(), Value::from("t:1")),
 			("tags".to_string(), Value::Array(Array::from(vec![1, 2, 3]))),
@@ -184,7 +186,7 @@ mod tests {
 
 	#[test]
 	fn test_split_on_set() {
-		let idiom = Idiom(vec![Part::Field("tags".into())]);
+		let idiom = Idiom(vec![Part::Field(Strand::new_static("tags"))]);
 		let value = Value::Object(Object::from_iter([
 			("id".to_string(), Value::from("t:1")),
 			("tags".to_string(), Value::Set(Set::from(vec![1, 2, 3]))),
@@ -198,7 +200,7 @@ mod tests {
 
 	#[test]
 	fn test_split_on_non_array() {
-		let idiom = Idiom(vec![Part::Field("name".into())]);
+		let idiom = Idiom(vec![Part::Field(Strand::new_static("name"))]);
 		let value = Value::Object(Object::from_iter([
 			("id".to_string(), Value::from("t:1")),
 			("name".to_string(), Value::from("test")),
@@ -213,7 +215,7 @@ mod tests {
 
 	#[test]
 	fn test_split_empty_array() {
-		let idiom = Idiom(vec![Part::Field("tags".into())]);
+		let idiom = Idiom(vec![Part::Field(Strand::new_static("tags"))]);
 		let value = Value::Object(Object::from_iter([
 			("id".to_string(), Value::from("t:1")),
 			("tags".to_string(), Value::Array(Array::from(Vec::<Value>::new()))),
@@ -227,7 +229,7 @@ mod tests {
 
 	#[test]
 	fn test_split_empty_set() {
-		let idiom = Idiom(vec![Part::Field("tags".into())]);
+		let idiom = Idiom(vec![Part::Field(Strand::new_static("tags"))]);
 		let value = Value::Object(Object::from_iter([
 			("id".to_string(), Value::from("t:1")),
 			("tags".to_string(), Value::Set(Set::new())),

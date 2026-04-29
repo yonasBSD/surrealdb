@@ -1158,12 +1158,14 @@ impl Value {
 
 #[cfg(test)]
 mod tests {
+	use surrealdb_strand::Strand;
+
 	use super::*;
 
 	#[test]
 	fn test_cast_to_table_generic() {
 		// Test casting string to generic table type
-		let value = Value::String("users".into());
+		let value = Value::String(Strand::new_static("users"));
 		let kind = Kind::Table(vec![]);
 		let result = value.cast_to_kind(&kind);
 		assert!(result.is_ok());
@@ -1177,7 +1179,7 @@ mod tests {
 	#[test]
 	fn test_cast_to_table_specific() {
 		// Test casting string to specific table type (matching)
-		let value = Value::String("users".into());
+		let value = Value::String(Strand::new_static("users"));
 		let kind = Kind::Table(vec!["users".into()]);
 		let result = value.cast_to_kind(&kind);
 		assert!(result.is_ok());
@@ -1186,7 +1188,7 @@ mod tests {
 		}
 
 		// Test casting string to specific table type (not matching)
-		let value = Value::String("posts".into());
+		let value = Value::String(Strand::new_static("posts"));
 		let kind = Kind::Table(vec!["users".into()]);
 		let result = value.cast_to_kind(&kind);
 		assert!(result.is_err());
@@ -1195,7 +1197,7 @@ mod tests {
 	#[test]
 	fn test_cast_to_table_union() {
 		// Test casting string to union of table types
-		let value = Value::String("posts".into());
+		let value = Value::String(Strand::new_static("posts"));
 		let kind = Kind::Table(vec!["users".into(), "posts".into()]);
 		let result = value.cast_to_kind(&kind);
 		assert!(result.is_ok());
@@ -1204,7 +1206,7 @@ mod tests {
 		}
 
 		// Test casting string that doesn't match any in the union
-		let value = Value::String("comments".into());
+		let value = Value::String(Strand::new_static("comments"));
 		let kind = Kind::Table(vec!["users".into(), "posts".into()]);
 		let result = value.cast_to_kind(&kind);
 		assert!(result.is_err());
@@ -1222,7 +1224,7 @@ mod tests {
 	#[test]
 	fn test_can_cast_to_table() {
 		// Test can_cast_to_kind for tables - String can always cast to generic table
-		let value = Value::String("users".into());
+		let value = Value::String(Strand::new_static("users"));
 		let kind = Kind::Table(vec![]);
 		assert!(value.can_cast_to_kind(&kind));
 

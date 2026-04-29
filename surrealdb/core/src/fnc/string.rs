@@ -727,6 +727,7 @@ pub mod semver {
 
 #[cfg(test)]
 mod tests {
+	use surrealdb_strand::Strand;
 	use surrealdb_types::ToSql;
 
 	use super::{matches, replace, slice};
@@ -800,19 +801,22 @@ mod tests {
 	#[test]
 	fn html_encode() {
 		let value = super::html::encode((String::from("<div>Hello world!</div>"),)).unwrap();
-		assert_eq!(value, Value::String("&lt;div&gt;Hello&#32;world!&lt;&#47;div&gt;".into()));
+		assert_eq!(
+			value,
+			Value::String(Strand::new_static("&lt;div&gt;Hello&#32;world!&lt;&#47;div&gt;"))
+		);
 
 		let value = super::html::encode((String::from("SurrealDB"),)).unwrap();
-		assert_eq!(value, Value::String("SurrealDB".into()));
+		assert_eq!(value, Value::String(Strand::new_static("SurrealDB")));
 	}
 
 	#[test]
 	fn html_sanitize() {
 		let value = super::html::sanitize((String::from("<div>Hello world!</div>"),)).unwrap();
-		assert_eq!(value, Value::String("<div>Hello world!</div>".into()));
+		assert_eq!(value, Value::String(Strand::new_static("<div>Hello world!</div>")));
 
 		let value = super::html::sanitize((String::from("XSS<script>attack</script>"),)).unwrap();
-		assert_eq!(value, Value::String("XSS".into()));
+		assert_eq!(value, Value::String(Strand::new_static("XSS")));
 	}
 
 	#[test]

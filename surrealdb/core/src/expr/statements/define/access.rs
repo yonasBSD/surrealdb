@@ -1,6 +1,7 @@
 use anyhow::{Result, bail};
 use rand::distr::{Alphanumeric, SampleString};
 use reblessive::tree::Stk;
+use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql};
 
 use super::DefineKind;
@@ -465,10 +466,10 @@ impl DefineAccessStatement {
 			if let JwtAccessVerify::Key(ref mut v) = acc.verify
 				&& v.alg.is_symmetric()
 			{
-				v.key = Expr::Literal(Literal::String("[REDACTED]".into()));
+				v.key = Expr::Literal(Literal::String(Strand::new_static("[REDACTED]")));
 			}
 			if let Some(ref mut s) = acc.issue {
-				s.key = Expr::Literal(Literal::String("[REDACTED]".into()));
+				s.key = Expr::Literal(Literal::String(Strand::new_static("[REDACTED]")));
 			}
 		}
 

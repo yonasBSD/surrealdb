@@ -1470,7 +1470,7 @@ mod tests {
 				_ => panic!("Session token is not an object"),
 			};
 			let string_claim = tk.get("string_claim").unwrap();
-			assert_eq!(*string_claim, crate::types::PublicValue::String("test".into()));
+			assert_eq!(*string_claim, crate::types::PublicValue::String("test".to_string()));
 			let bool_claim = tk.get("bool_claim").unwrap();
 			assert_eq!(*bool_claim, crate::types::PublicValue::Bool(true));
 			let int_claim = tk.get("int_claim").unwrap();
@@ -1484,16 +1484,18 @@ mod tests {
 			);
 			let object_claim = tk.get("object_claim").unwrap();
 			let mut test_object: HashMap<String, crate::types::PublicValue> = HashMap::new();
-			test_object
-				.insert("test_1".to_string(), crate::types::PublicValue::String("value_1".into()));
+			test_object.insert(
+				"test_1".to_string(),
+				crate::types::PublicValue::String("value_1".to_string()),
+			);
 			let mut test_object_child = HashMap::new();
 			test_object_child.insert(
 				"test_2_1".to_string(),
-				crate::types::PublicValue::String("value_2_1".into()),
+				crate::types::PublicValue::String("value_2_1".to_string()),
 			);
 			test_object_child.insert(
 				"test_2_2".to_string(),
-				crate::types::PublicValue::String("value_2_2".into()),
+				crate::types::PublicValue::String("value_2_2".to_string()),
 			);
 			test_object.insert(
 				"test_2".to_string(),

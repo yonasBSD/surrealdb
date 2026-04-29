@@ -433,11 +433,11 @@ mod tests {
 
 		let obj = Value::Object(Object::from_iter([(
 			"key1".to_string(),
-			Value::String("value1".into()),
+			Value::String(Strand::new_static("value1")),
 		)]));
 
-		let result = evaluate_index(&obj, &Value::String("key1".into())).unwrap();
-		assert_eq!(result, Value::String("value1".into()));
+		let result = evaluate_index(&obj, &Value::String(Strand::new_static("key1"))).unwrap();
+		assert_eq!(result, Value::String(Strand::new_static("value1")));
 	}
 
 	// =========================================================================

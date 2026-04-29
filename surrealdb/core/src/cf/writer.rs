@@ -115,6 +115,8 @@ impl Changefeed {
 mod tests {
 	use std::time::Duration;
 
+	use surrealdb_strand::Strand;
+
 	use crate::catalog::providers::{DatabaseProvider, NamespaceProvider, TableProvider};
 	use crate::catalog::{
 		DatabaseDefinition, DatabaseId, NamespaceDefinition, NamespaceId, TableDefinition, TableId,
@@ -149,7 +151,7 @@ mod tests {
 		let tx1 = ds.transaction(Write, Optimistic).await.unwrap();
 		let record_a = RecordId {
 			table: tb_name.clone(),
-			key: RecordIdKey::String("A".into()),
+			key: RecordIdKey::String(Strand::new_static("A")),
 		};
 		let value_a: Value = "a".into();
 		let previous = Value::None;
@@ -167,7 +169,7 @@ mod tests {
 		let tx2 = ds.transaction(Write, Optimistic).await.unwrap();
 		let record_c = RecordId {
 			table: tb_name.clone(),
-			key: RecordIdKey::String("C".into()),
+			key: RecordIdKey::String(Strand::new_static("C")),
 		};
 		let value_c: Value = "c".into();
 		tx2.changefeed_buffer_record_change(
@@ -184,7 +186,7 @@ mod tests {
 		let tx3 = ds.transaction(Write, Optimistic).await.unwrap();
 		let record_b = RecordId {
 			table: tb_name.clone(),
-			key: RecordIdKey::String("B".into()),
+			key: RecordIdKey::String(Strand::new_static("B")),
 		};
 		let value_b: Value = "b".into();
 		tx3.changefeed_buffer_record_change(
@@ -198,7 +200,7 @@ mod tests {
 		);
 		let record_c2 = RecordId {
 			table: tb_name.clone(),
-			key: RecordIdKey::String("C".into()),
+			key: RecordIdKey::String(Strand::new_static("C")),
 		};
 		let value_c2: Value = "c2".into();
 		tx3.changefeed_buffer_record_change(

@@ -464,6 +464,8 @@ pub(crate) async fn batch_fetch_in_place(
 
 #[cfg(test)]
 mod tests {
+	use surrealdb_strand::Strand;
+
 	use super::*;
 	use crate::exec::physical_expr::Literal;
 
@@ -472,7 +474,7 @@ mod tests {
 		use crate::exec::operators::scan::DynamicScan;
 		use crate::expr::part::Part;
 
-		let fields = vec![Idiom(vec![Part::Field("author".into())])];
+		let fields = vec![Idiom(vec![Part::Field(Strand::new_static("author"))])];
 
 		// Create a minimal scan for testing
 		let scan = Arc::new(DynamicScan::new(

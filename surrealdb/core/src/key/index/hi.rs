@@ -60,13 +60,15 @@ impl<'a> Hi<'a> {
 
 #[cfg(test)]
 mod tests {
+	use surrealdb_strand::Strand;
+
 	use super::*;
 	use crate::kvs::KVKey;
 
 	#[test]
 	fn key() {
 		let tb = TableName::from("testtb");
-		let id = RecordIdKey::String("testid".into());
+		let id = RecordIdKey::String(Strand::new_static("testid"));
 		let val = Hi::new(NamespaceId(1), DatabaseId(2), &tb, IndexId(3), &id);
 		let enc = Hi::encode_key(&val).unwrap();
 		assert_eq!(

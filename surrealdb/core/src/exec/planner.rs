@@ -1320,13 +1320,15 @@ fn is_simple_binary_eligible(op: &crate::expr::operator::BinaryOperator) -> bool
 
 #[cfg(test)]
 mod planner_tests {
+	use surrealdb_strand::Strand;
+
 	use super::*;
 	use crate::ctx::Context;
 
 	#[tokio::test]
 	async fn test_planner_creates_let_operator() {
 		let expr = Expr::Let(Box::new(crate::expr::statements::SetStatement {
-			name: "x".into(),
+			name: Strand::new_static("x"),
 			what: Expr::Literal(crate::expr::literal::Literal::Integer(42)),
 			kind: None,
 		}));

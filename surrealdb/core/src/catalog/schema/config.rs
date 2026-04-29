@@ -120,7 +120,7 @@ impl InfoStructure for GraphQLTablesConfig {
 	fn structure(self) -> Value {
 		match self {
 			GraphQLTablesConfig::None => Value::None,
-			GraphQLTablesConfig::Auto => Value::String("AUTO".into()),
+			GraphQLTablesConfig::Auto => Value::String(Strand::new_static("AUTO")),
 			GraphQLTablesConfig::Include(ts) => Value::from(map!(
 				"include" => Value::Array(ts.into_iter().map(Value::Table).collect()),
 			)),
@@ -145,7 +145,7 @@ impl InfoStructure for GraphQLFunctionsConfig {
 	fn structure(self) -> Value {
 		match self {
 			GraphQLFunctionsConfig::None => Value::None,
-			GraphQLFunctionsConfig::Auto => Value::String("AUTO".into()),
+			GraphQLFunctionsConfig::Auto => Value::String(Strand::new_static("AUTO")),
 			GraphQLFunctionsConfig::Include(fs) => Value::from(map!(
 				"include" => Value::Array(fs.into_iter().map(Value::from).collect()),
 			)),
@@ -167,7 +167,7 @@ pub enum GraphQLIntrospectionConfig {
 impl InfoStructure for GraphQLIntrospectionConfig {
 	fn structure(self) -> Value {
 		match self {
-			GraphQLIntrospectionConfig::Auto => Value::String("AUTO".into()),
+			GraphQLIntrospectionConfig::Auto => Value::String(Strand::new_static("AUTO")),
 			GraphQLIntrospectionConfig::None => Value::None,
 		}
 	}

@@ -311,17 +311,20 @@ pub mod is {
 
 #[cfg(test)]
 mod tests {
+	use surrealdb_strand::Strand;
+
 	use crate::err::Error;
 	use crate::fnc::args::Optional;
 	use crate::val::Value;
 
 	#[test]
 	fn is_array() {
-		let value =
-			super::is::array((
-				vec![Value::String("hello".into()), Value::String("world".into())].into(),
-			))
-			.unwrap();
+		let value = super::is::array((vec![
+			Value::String(Strand::new_static("hello")),
+			Value::String(Strand::new_static("world")),
+		]
+		.into(),))
+		.unwrap();
 		assert_eq!(value, Value::Bool(true));
 
 		let value = super::is::array(("test".into(),)).unwrap();

@@ -1,5 +1,6 @@
 use geo::Point;
 use rstest::rstest;
+use surrealdb_strand::Strand;
 use surrealdb_types::ToSql;
 
 use crate::sql::literal::ObjectEntry;
@@ -33,7 +34,7 @@ use crate::val::{Bytes, Duration, File, Geometry, Number, Object, RecordId, Set,
 #[case::value_number_int(Value::Number(Number::Int(1)), "1", "1")]
 #[case::value_number_float(Value::Number(Number::Float(1.0)), "1f", "1f")]
 #[case::value_number_decimal(Value::Number(Number::Decimal(1.into())), "1dec", "1dec")]
-#[case::value_string(Value::String("hello".into()), "'hello'", "'hello'")]
+#[case::value_string(Value::String(Strand::new_static("hello")), "'hello'", "'hello'")]
 #[case::value_array(Value::Array(vec![Value::Number(Number::Int(1)), Value::Number(Number::Int(2))].into()), "[1, 2]", "[\n\t1,\n\t2\n]")]
 #[case::value_set(Value::Set(Set::new()), "{,}", "{,}")]
 #[case::value_set_one(Value::Set(Set::from(vec![Value::Number(Number::Int(1))])), "{1,}", "{1,}")]
@@ -54,7 +55,11 @@ use crate::val::{Bytes, Duration, File, Geometry, Number, Object, RecordId, Set,
 #[case::expr_lit_number_int(Expr::Literal(Literal::Integer(1)), "1", "1")]
 #[case::expr_lit_number_float(Expr::Literal(Literal::Float(1.0)), "1f", "1f")]
 #[case::expr_lit_number_decimal(Expr::Literal(Literal::Decimal(1.into())), "1dec", "1dec")]
-#[case::expr_lit_string(Expr::Literal(Literal::String("hello".into())), "'hello'", "'hello'")]
+#[case::expr_lit_string(
+	Expr::Literal(Literal::String(Strand::new_static("hello"))),
+	"'hello'",
+	"'hello'"
+)]
 #[case::expr_lit_array(Expr::Literal(Literal::Array(vec![
     Expr::Literal(Literal::Integer(1)),
     Expr::Literal(Literal::Integer(2))
@@ -118,7 +123,11 @@ use crate::val::{Bytes, Duration, File, Geometry, Number, Object, RecordId, Set,
 // Expression: Continue
 #[case::expr_continue(Expr::Continue, "CONTINUE", "CONTINUE")]
 // Expression: Throw
-#[case::expr_throw(Expr::Throw(Box::new(Expr::Literal(Literal::String("error".into())))), "THROW 'error'", "THROW 'error'")]
+#[case::expr_throw(
+	Expr::Throw(Box::new(Expr::Literal(Literal::String(Strand::new_static("error"))))),
+	"THROW 'error'",
+	"THROW 'error'"
+)]
 // Expression: Return
 #[case::expr_return(Expr::Return(Box::new(OutputStatement { what: Expr::Literal(Literal::Integer(1)), fetch: None })), "RETURN 1", "RETURN 1")]
 // Expression: If
@@ -143,7 +152,7 @@ use crate::val::{Bytes, Duration, File, Geometry, Number, Object, RecordId, Set,
 // Expression: Relate
 #[case::expr_relate(Expr::Relate(Box::new(RelateStatement { only: false, through: Expr::Table("likes".into()), from: Expr::Param(Param::new("from".to_string())), to: Expr::Param(Param::new("to".to_string())), data: None, output: None, timeout: Expr::Literal(Literal::None) })), "RELATE $from -> likes -> $to", "RELATE $from -> likes -> $to")]
 // Expression: Insert
-#[case::expr_insert(Expr::Insert(Box::new(InsertStatement { into: Some(Expr::Table("user".into())), data: Data::SingleExpression(Expr::Literal(Literal::Object(vec![ObjectEntry { key: "name".into(), value: Expr::Literal(Literal::String("test".into())) }]))), ignore: false, update: None, output: None, timeout: Expr::Literal(Literal::None), relation: false})), "INSERT INTO user { name: 'test' }", "INSERT INTO user {\n\tname: 'test'\n}")]
+#[case::expr_insert(Expr::Insert(Box::new(InsertStatement { into: Some(Expr::Table("user".into())), data: Data::SingleExpression(Expr::Literal(Literal::Object(vec![ObjectEntry { key: "name".into(), value: Expr::Literal(Literal::String(Strand::new_static("test"))) }]))), ignore: false, update: None, output: None, timeout: Expr::Literal(Literal::None), relation: false})), "INSERT INTO user { name: 'test' }", "INSERT INTO user {\n\tname: 'test'\n}")]
 // Expression: Define
 #[case::expr_define(
 	Expr::Define(Box::new(DefineStatement::Table(DefineTableStatement::default()))),
@@ -187,7 +196,7 @@ use crate::val::{Bytes, Duration, File, Geometry, Number, Object, RecordId, Set,
                 Expr::Block(Box::new(Block(vec![
                     Expr::Let(Box::new(SetStatement {
                         name: "result".into(),
-                        what: Expr::Literal(Literal::String("high".into())),
+                        what: Expr::Literal(Literal::String(Strand::new_static("high"))),
                         kind: None
                     })),
                     Expr::Return(Box::new(OutputStatement {
@@ -204,7 +213,7 @@ use crate::val::{Bytes, Duration, File, Geometry, Number, Object, RecordId, Set,
                 },
                 Expr::Block(Box::new(Block(vec![
                     Expr::Return(Box::new(OutputStatement {
-                        what: Expr::Literal(Literal::String("medium".into())),
+                        what: Expr::Literal(Literal::String(Strand::new_static("medium"))),
                         fetch: None
                     }))
                 ])))
@@ -212,7 +221,7 @@ use crate::val::{Bytes, Duration, File, Geometry, Number, Object, RecordId, Set,
         ],
         close: Some(Expr::Block(Box::new(Block(vec![
             Expr::Return(Box::new(OutputStatement {
-                what: Expr::Literal(Literal::String("low".into())),
+                what: Expr::Literal(Literal::String(Strand::new_static("low"))),
                 fetch: None
             }))
         ]))))
@@ -246,8 +255,8 @@ use crate::val::{Bytes, Duration, File, Geometry, Number, Object, RecordId, Set,
                 exprs: vec![(
                     Expr::Binary {
                         left: Box::new(Expr::Idiom(Idiom(vec![
-                            crate::sql::Part::Field("user".into()),
-                            crate::sql::Part::Field("active".into())
+                            crate::sql::Part::Field(Strand::new_static("user")),
+                            crate::sql::Part::Field(Strand::new_static("active"))
                         ]))),
                         op: BinaryOperator::Equal,
                         right: Box::new(Expr::Literal(Literal::Bool(true)))
@@ -276,14 +285,14 @@ use crate::val::{Bytes, Duration, File, Geometry, Number, Object, RecordId, Set,
             value: Expr::Literal(Literal::Object(vec![
                 ObjectEntry {
                     key: "name".into(),
-                    value: Expr::Literal(Literal::String("Alice".into()))
+                    value: Expr::Literal(Literal::String(Strand::new_static("Alice")))
                 },
                 ObjectEntry {
                     key: "settings".into(),
                     value: Expr::Literal(Literal::Object(vec![
                         ObjectEntry {
                             key: "theme".into(),
-                            value: Expr::Literal(Literal::String("dark".into()))
+                            value: Expr::Literal(Literal::String(Strand::new_static("dark")))
                         },
                         ObjectEntry {
                             key: "notifications".into(),
@@ -303,8 +312,8 @@ use crate::val::{Bytes, Duration, File, Geometry, Number, Object, RecordId, Set,
                 ObjectEntry {
                     key: "tags".into(),
                     value: Expr::Literal(Literal::Array(vec![
-                        Expr::Literal(Literal::String("admin".into())),
-                        Expr::Literal(Literal::String("premium".into()))
+                        Expr::Literal(Literal::String(Strand::new_static("admin"))),
+                        Expr::Literal(Literal::String(Strand::new_static("premium")))
                     ]))
                 }
             ]))

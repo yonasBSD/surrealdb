@@ -1434,27 +1434,27 @@ mod tests {
 	#[case::number(
 		PublicValue::Number(PublicNumber::Decimal(Decimal::new(123, 2))),
 		json!("1.23"),
-		PublicValue::String("1.23".into()),
+		PublicValue::String("1.23".to_string()),
 	)]
 	#[case::strand(
-		PublicValue::String("".into()),
+		PublicValue::String("".to_string()),
 		json!(""),
-		PublicValue::String("".into()),
+		PublicValue::String("".to_string()),
 	)]
 	#[case::strand(
-		PublicValue::String("foo".into()),
+		PublicValue::String("foo".to_string()),
 		json!("foo"),
-		PublicValue::String("foo".into()),
+		PublicValue::String("foo".to_string()),
 	)]
 	#[case::duration(
 		PublicValue::Duration(PublicDuration::ZERO),
 		json!("0ns"),
-		PublicValue::String("0ns".into()),
+		PublicValue::String("0ns".to_string()),
 	)]
 	#[case::duration(
 		PublicValue::Duration(PublicDuration::MAX),
 		json!("584942417355y3w5d7h15s999ms999µs999ns"),
-		PublicValue::String("584942417355y3w5d7h15s999ms999µs999ns".into()),
+		PublicValue::String("584942417355y3w5d7h15s999ms999µs999ns".to_string()),
 	)]
 	#[case::datetime(
 		PublicValue::Datetime(PublicDatetime::MIN_UTC),
@@ -1491,9 +1491,9 @@ mod tests {
 		])),
 	)]
 	#[case::record_id(
-		PublicValue::RecordId(PublicRecordId::new("foo", PublicRecordIdKey::String("bar".into()))) ,
+		PublicValue::RecordId(PublicRecordId::new("foo", PublicRecordIdKey::String("bar".to_string()))) ,
 		json!("foo:bar"),
-		PublicValue::RecordId(PublicRecordId::new("foo", PublicRecordIdKey::String("bar".into()))) ,
+		PublicValue::RecordId(PublicRecordId::new("foo", PublicRecordIdKey::String("bar".to_string()))) ,
 	)]
 	#[case::array(
 		PublicValue::Array(PublicArray::new()),

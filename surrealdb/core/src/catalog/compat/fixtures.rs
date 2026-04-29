@@ -16,6 +16,7 @@ use std::time::Duration;
 use chrono::DateTime;
 use geo::{LineString, MultiLineString, MultiPoint, MultiPolygon, Point, Polygon, coord};
 use rust_decimal::Decimal;
+use surrealdb_strand::Strand;
 use uuid::Uuid as UuidExt;
 
 use super::super::*;
@@ -149,12 +150,12 @@ pub fn table_with_view() -> TableDefinition {
 			fields: Fields::Select(vec![
 				Field::All,
 				Field::Single(Selector {
-					expr: Expr::Literal(Literal::String("count".into())),
+					expr: Expr::Literal(Literal::String(Strand::new_static("count"))),
 					alias: Some(Idiom::from_str("total").unwrap()),
 				}),
 			]),
 			tables: vec![TableName::from("users")],
-			condition: Some(Expr::Literal(Literal::String("active = true".into()))),
+			condition: Some(Expr::Literal(Literal::String(Strand::new_static("active = true")))),
 			groups: Some(Groups::default()),
 		}),
 		permissions: Permissions::default(),
@@ -236,7 +237,7 @@ pub fn table_with_materialized_view() -> TableDefinition {
 		view: Some(ViewDefinition::Materialized {
 			fields: Fields::Select(vec![Field::All]),
 			tables: vec![TableName::from("users")],
-			condition: Some(Expr::Literal(Literal::String("active = true".into()))),
+			condition: Some(Expr::Literal(Literal::String(Strand::new_static("active = true")))),
 		}),
 		permissions: Permissions::default(),
 		changefeed: None,
@@ -280,7 +281,7 @@ pub fn subscription_basic() -> SubscriptionDefinition {
 		id: UuidExt::nil(),
 		node: UuidExt::nil(),
 		fields: SubscriptionFields::Diff,
-		what: Expr::Literal(Literal::String("users".into())),
+		what: Expr::Literal(Literal::String(Strand::new_static("users"))),
 		cond: None,
 		fetch: None,
 		auth: None,
@@ -297,13 +298,15 @@ pub fn subscription_with_filters() -> SubscriptionDefinition {
 		fields: SubscriptionFields::Select(Fields::Select(vec![
 			Field::All,
 			Field::Single(Selector {
-				expr: Expr::Literal(Literal::String("name".into())),
+				expr: Expr::Literal(Literal::String(Strand::new_static("name"))),
 				alias: None,
 			}),
 		])),
-		what: Expr::Literal(Literal::String("users".into())),
-		cond: Some(Expr::Literal(Literal::String("active = true".into()))),
-		fetch: Some(Fetchs::new(vec![Fetch(Expr::Literal(Literal::String("profile".into())))])),
+		what: Expr::Literal(Literal::String(Strand::new_static("users"))),
+		cond: Some(Expr::Literal(Literal::String(Strand::new_static("active = true")))),
+		fetch: Some(Fetchs::new(vec![Fetch(Expr::Literal(Literal::String(Strand::new_static(
+			"profile",
+		))))])),
 		auth: Some(Auth::default()),
 		session: Some(Value::default()),
 		vars: BTreeMap::new(),
@@ -313,14 +316,14 @@ pub fn subscription_with_filters() -> SubscriptionDefinition {
 /// Subscription with non-empty vars
 pub fn subscription_with_vars() -> SubscriptionDefinition {
 	let mut vars = BTreeMap::new();
-	vars.insert("user_id".to_string(), Value::String("user:123".into()));
+	vars.insert("user_id".to_string(), Value::String(Strand::new_static("user:123")));
 	vars.insert("threshold".to_string(), Value::Number(Number::Int(50)));
 	SubscriptionDefinition {
 		id: UuidExt::nil(),
 		node: UuidExt::nil(),
 		fields: SubscriptionFields::Diff,
-		what: Expr::Literal(Literal::String("orders".into())),
-		cond: Some(Expr::Literal(Literal::String("amount > $threshold".into()))),
+		what: Expr::Literal(Literal::String(Strand::new_static("orders"))),
+		cond: Some(Expr::Literal(Literal::String(Strand::new_static("amount > $threshold")))),
 		fetch: None,
 		auth: Some(Auth::default()),
 		session: Some(Value::default()),
@@ -581,7 +584,7 @@ pub fn api_basic() -> ApiDefinition {
 		path: "/api/v1/users".parse().unwrap(),
 		actions: vec![ApiActionDefinition {
 			methods: vec![ApiMethod::Get],
-			action: Expr::Literal(Literal::String("SELECT * FROM users".into())),
+			action: Expr::Literal(Literal::String(Strand::new_static("SELECT * FROM users"))),
 			config: ApiConfigDefinition::default(),
 		}],
 		fallback: None,
@@ -599,16 +602,16 @@ pub fn api_with_middleware() -> ApiDefinition {
 		actions: vec![
 			ApiActionDefinition {
 				methods: vec![ApiMethod::Get, ApiMethod::Post],
-				action: Expr::Literal(Literal::String("SELECT * FROM orders".into())),
+				action: Expr::Literal(Literal::String(Strand::new_static("SELECT * FROM orders"))),
 				config: ApiConfigDefinition::default(),
 			},
 			ApiActionDefinition {
 				methods: vec![ApiMethod::Delete],
-				action: Expr::Literal(Literal::String("DELETE FROM orders".into())),
+				action: Expr::Literal(Literal::String(Strand::new_static("DELETE FROM orders"))),
 				config: ApiConfigDefinition::default(),
 			},
 		],
-		fallback: Some(Expr::Literal(Literal::String("RETURN 404".into()))),
+		fallback: Some(Expr::Literal(Literal::String(Strand::new_static("RETURN 404")))),
 		config: ApiConfigDefinition {
 			middleware: vec![
 				MiddlewareDefinition {
@@ -633,7 +636,9 @@ pub fn api_with_auth_limit() -> ApiDefinition {
 		actions: vec![
 			ApiActionDefinition {
 				methods: vec![ApiMethod::Get, ApiMethod::Put, ApiMethod::Patch],
-				action: Expr::Literal(Literal::String("SELECT * FROM admin_data".into())),
+				action: Expr::Literal(Literal::String(Strand::new_static(
+					"SELECT * FROM admin_data",
+				))),
 				config: ApiConfigDefinition {
 					middleware: vec![],
 					permissions: Permission::Specific(Expr::Literal(Literal::String(
@@ -643,7 +648,9 @@ pub fn api_with_auth_limit() -> ApiDefinition {
 			},
 			ApiActionDefinition {
 				methods: vec![ApiMethod::Delete, ApiMethod::Trace],
-				action: Expr::Literal(Literal::String("RETURN { status: 'ok' }".into())),
+				action: Expr::Literal(Literal::String(Strand::new_static(
+					"RETURN { status: 'ok' }",
+				))),
 				config: ApiConfigDefinition::default(),
 			},
 		],
@@ -707,7 +714,7 @@ pub fn config_api() -> ConfigDefinition {
 	ConfigDefinition::Api(ApiConfigDefinition {
 		middleware: vec![MiddlewareDefinition {
 			name: "cors".into(),
-			args: vec![Value::String("*".into())],
+			args: vec![Value::String(Strand::new_static("*"))],
 		}],
 		permissions: Permission::Specific(Expr::Literal(Literal::String(
 			"$auth.role = 'admin'".into(),
@@ -738,8 +745,10 @@ pub fn event_basic() -> EventDefinition {
 	EventDefinition {
 		name: "on_create".into(),
 		target_table: TableName::from("users"),
-		when: Expr::Literal(Literal::String("$event = 'CREATE'".into())),
-		then: vec![Expr::Literal(Literal::String("CREATE audit SET action = 'create'".into()))],
+		when: Expr::Literal(Literal::String(Strand::new_static("$event = 'CREATE'"))),
+		then: vec![Expr::Literal(Literal::String(Strand::new_static(
+			"CREATE audit SET action = 'create'",
+		)))],
 		comment: Some("Audit log on create".to_string()),
 		auth_limit: AuthLimit::new_no_limit(),
 		kind: EventKind::Sync,
@@ -751,7 +760,7 @@ pub fn event_async() -> EventDefinition {
 	EventDefinition {
 		name: "on_update_async".into(),
 		target_table: TableName::from("orders"),
-		when: Expr::Literal(Literal::String("$event = 'UPDATE'".into())),
+		when: Expr::Literal(Literal::String(Strand::new_static("$event = 'UPDATE'"))),
 		then: vec![Expr::Literal(Literal::String(
 			"CREATE notification SET order = $after.id, type = 'updated'".into(),
 		))],
@@ -798,10 +807,14 @@ pub fn field_with_type() -> FieldDefinition {
 		field_kind: Some(Kind::String),
 		readonly: false,
 		flexible: false,
-		value: Some(Expr::Literal(Literal::String("string::lowercase($value)".into()))),
-		assert: Some(Expr::Literal(Literal::String("string::is::email($value)".into()))),
+		value: Some(Expr::Literal(Literal::String(Strand::new_static(
+			"string::lowercase($value)",
+		)))),
+		assert: Some(Expr::Literal(Literal::String(Strand::new_static(
+			"string::is::email($value)",
+		)))),
 		computed: None,
-		default: DefineDefault::Always(Expr::Literal(Literal::String("".into()))),
+		default: DefineDefault::Always(Expr::Literal(Literal::String(Strand::new_static("")))),
 		select_permission: Permission::Full,
 		create_permission: Permission::Full,
 		update_permission: Permission::Full,
@@ -822,7 +835,7 @@ pub fn field_readonly() -> FieldDefinition {
 		flexible: false,
 		value: None,
 		assert: None,
-		computed: Some(Expr::Literal(Literal::String("time::now()".into()))),
+		computed: Some(Expr::Literal(Literal::String(Strand::new_static("time::now()")))),
 		default: DefineDefault::None,
 		select_permission: Permission::Full,
 		create_permission: Permission::None,
@@ -842,7 +855,7 @@ pub fn field_flexible_with_reference() -> FieldDefinition {
 		field_kind: Some(Kind::Number),
 		readonly: false,
 		flexible: true,
-		value: Some(Expr::Literal(Literal::String("$price * $quantity".into()))),
+		value: Some(Expr::Literal(Literal::String(Strand::new_static("$price * $quantity")))),
 		assert: None,
 		computed: None,
 		default: DefineDefault::None,
@@ -876,7 +889,9 @@ pub fn field_with_default_set() -> FieldDefinition {
 			"$value INSIDE ['pending', 'active', 'closed']".into(),
 		))),
 		computed: None,
-		default: DefineDefault::Set(Expr::Literal(Literal::String("'pending'".into()))),
+		default: DefineDefault::Set(Expr::Literal(Literal::String(Strand::new_static(
+			"'pending'",
+		)))),
 		select_permission: Permission::Full,
 		create_permission: Permission::Full,
 		update_permission: Permission::Specific(Expr::Literal(Literal::String(
@@ -932,7 +947,9 @@ pub fn function_basic() -> FunctionDefinition {
 	FunctionDefinition {
 		name: "greet".into(),
 		args: vec![],
-		block: Block(vec![Expr::Literal(Literal::String("RETURN 'Hello, World!'".into()))]),
+		block: Block(vec![Expr::Literal(Literal::String(Strand::new_static(
+			"RETURN 'Hello, World!'",
+		)))]),
 		comment: None,
 		permissions: Permission::Full,
 		returns: None,
@@ -945,7 +962,7 @@ pub fn function_with_args() -> FunctionDefinition {
 	FunctionDefinition {
 		name: "add_numbers".into(),
 		args: vec![("a".to_string(), Kind::Number), ("b".to_string(), Kind::Number)],
-		block: Block(vec![Expr::Literal(Literal::String("RETURN $a + $b".into()))]),
+		block: Block(vec![Expr::Literal(Literal::String(Strand::new_static("RETURN $a + $b")))]),
 		comment: Some("Add two numbers".to_string()),
 		permissions: Permission::Full,
 		returns: Some(Kind::Number),
@@ -1034,7 +1051,9 @@ pub fn index_count() -> IndexDefinition {
 		name: "idx_status_count".into(),
 		table_name: TableName::from("orders"),
 		cols: vec![Idiom::from_str("status").unwrap()],
-		index: Index::Count(Some(Cond(Expr::Literal(Literal::String("status = 'active'".into()))))),
+		index: Index::Count(Some(Cond(Expr::Literal(Literal::String(Strand::new_static(
+			"status = 'active'",
+		)))))),
 		comment: None,
 		prepare_remove: true,
 	}
@@ -1073,7 +1092,7 @@ pub fn param_bool() -> ParamDefinition {
 pub fn param_string() -> ParamDefinition {
 	ParamDefinition {
 		name: "app_name".into(),
-		value: Value::String("MyApp".into()),
+		value: Value::String(Strand::new_static("MyApp")),
 		comment: None,
 		permissions: Permission::Full,
 	}
@@ -1185,7 +1204,7 @@ pub fn record_number_decimal() -> Record {
 
 /// Record with string data
 pub fn record_string() -> Record {
-	Record::new(Value::String("test data".into()))
+	Record::new(Value::String(Strand::new_static("test data")))
 }
 
 /// Record with bytes data
@@ -1329,7 +1348,7 @@ pub fn record_regex() -> Record {
 /// Record with array data
 pub fn record_array() -> Record {
 	Record::new(Value::Array(Array::from(vec![
-		Value::String("item1".into()),
+		Value::String(Strand::new_static("item1")),
 		Value::Number(Number::Int(123)),
 		Value::Bool(true),
 	])))
@@ -1338,7 +1357,7 @@ pub fn record_array() -> Record {
 /// Record with object data
 pub fn record_object() -> Record {
 	let mut obj = Object::default();
-	obj.insert("name".to_string(), Value::String("Alice".into()));
+	obj.insert("name".to_string(), Value::String(Strand::new_static("Alice")));
 	obj.insert("age".to_string(), Value::Number(Number::Int(30)));
 	obj.insert("active".to_string(), Value::Bool(true));
 	Record::new(Value::Object(obj))
@@ -1347,9 +1366,9 @@ pub fn record_object() -> Record {
 /// Record with set data
 pub fn record_set() -> Record {
 	Record::new(Value::Set(Set::from(vec![
-		Value::String("tag1".into()),
-		Value::String("tag2".into()),
-		Value::String("tag3".into()),
+		Value::String(Strand::new_static("tag1")),
+		Value::String(Strand::new_static("tag2")),
+		Value::String(Strand::new_static("tag3")),
 	])))
 }
 
@@ -1363,7 +1382,7 @@ pub fn record_with_metadata() -> Record {
 /// Record with explicit Table metadata type
 pub fn record_with_table_metadata() -> Record {
 	let mut obj = Object::default();
-	obj.insert("name".to_string(), Value::String("Test Record".into()));
+	obj.insert("name".to_string(), Value::String(Strand::new_static("Test Record")));
 	let mut record = Record::new(Value::Object(obj));
 	record.set_record_type(RecordType::Table);
 	record
@@ -1391,7 +1410,7 @@ pub fn version_3() -> MajorVersion {
 pub fn api_action_basic() -> ApiActionDefinition {
 	ApiActionDefinition {
 		methods: vec![ApiMethod::Get],
-		action: Expr::Literal(Literal::String("SELECT * FROM users".into())),
+		action: Expr::Literal(Literal::String(Strand::new_static("SELECT * FROM users"))),
 		config: ApiConfigDefinition::default(),
 	}
 }
@@ -1400,7 +1419,7 @@ pub fn api_action_basic() -> ApiActionDefinition {
 pub fn api_action_multi_method() -> ApiActionDefinition {
 	ApiActionDefinition {
 		methods: vec![ApiMethod::Get, ApiMethod::Post, ApiMethod::Put],
-		action: Expr::Literal(Literal::String("CREATE users CONTENT $body".into())),
+		action: Expr::Literal(Literal::String(Strand::new_static("CREATE users CONTENT $body"))),
 		config: ApiConfigDefinition::default(),
 	}
 }
@@ -1496,7 +1515,7 @@ pub fn node_live_query_basic() -> NodeLiveQuery {
 pub fn table_mutations_set() -> TableMutations {
 	let mut mutations = TableMutations::new(TableName::from("users"));
 	let mut obj = Object::default();
-	obj.insert("name".to_string(), Value::String("Alice".into()));
+	obj.insert("name".to_string(), Value::String(Strand::new_static("Alice")));
 	mutations
 		.1
 		.push(TableMutation::Set(RecordId::new(TableName::from("users"), 1), Value::Object(obj)));
@@ -1521,14 +1540,14 @@ pub fn table_mutations_def() -> TableMutations {
 pub fn table_mutations_set_with_diff() -> TableMutations {
 	let mut mutations = TableMutations::new(TableName::from("users"));
 	let mut obj = Object::default();
-	obj.insert("name".to_string(), Value::String("Bob".into()));
+	obj.insert("name".to_string(), Value::String(Strand::new_static("Bob")));
 	obj.insert("age".to_string(), Value::Number(Number::Int(30)));
 	mutations.1.push(TableMutation::SetWithDiff(
 		RecordId::new(TableName::from("users"), 1),
 		Value::Object(obj),
 		vec![Operation::Replace {
 			path: vec!["name".into()],
-			value: Value::String("Alice".into()),
+			value: Value::String(Strand::new_static("Alice")),
 		}],
 	));
 	mutations
@@ -1538,7 +1557,7 @@ pub fn table_mutations_set_with_diff() -> TableMutations {
 pub fn table_mutations_del_with_original() -> TableMutations {
 	let mut mutations = TableMutations::new(TableName::from("users"));
 	let mut obj = Object::default();
-	obj.insert("name".to_string(), Value::String("Charlie".into()));
+	obj.insert("name".to_string(), Value::String(Strand::new_static("Charlie")));
 	mutations.1.push(TableMutation::DelWithOriginal(
 		RecordId::new(TableName::from("users"), 2),
 		Value::Object(obj),
@@ -1599,17 +1618,25 @@ pub fn appending_none() -> Appending {
 }
 
 pub fn appending_old_values() -> Appending {
-	Appending::new(Some(vec![Value::String("old value".into())]), None, RecordIdKey::Number(123))
+	Appending::new(
+		Some(vec![Value::String(Strand::new_static("old value"))]),
+		None,
+		RecordIdKey::Number(123),
+	)
 }
 
 pub fn appending_new_values() -> Appending {
-	Appending::new(None, Some(vec![Value::String("new value".into())]), RecordIdKey::Number(123))
+	Appending::new(
+		None,
+		Some(vec![Value::String(Strand::new_static("new value"))]),
+		RecordIdKey::Number(123),
+	)
 }
 
 pub fn appending_both() -> Appending {
 	Appending::new(
-		Some(vec![Value::String("old value".into())]),
-		Some(vec![Value::String("new value".into())]),
+		Some(vec![Value::String(Strand::new_static("old value"))]),
+		Some(vec![Value::String(Strand::new_static("new value"))]),
 		RecordIdKey::Number(123),
 	)
 }
@@ -1679,7 +1706,7 @@ pub fn recordid_key_number() -> RecordIdKey {
 
 /// RecordIdKey with string
 pub fn recordid_key_string() -> RecordIdKey {
-	RecordIdKey::String("test_key".into())
+	RecordIdKey::String(Strand::new_static("test_key"))
 }
 
 /// RecordIdKey with UUID
@@ -1689,7 +1716,10 @@ pub fn recordid_key_uuid() -> RecordIdKey {
 
 /// RecordIdKey with array
 pub fn recordid_key_array() -> RecordIdKey {
-	RecordIdKey::Array(Array::from(vec![Value::Number(Number::Int(1)), Value::String("a".into())]))
+	RecordIdKey::Array(Array::from(vec![
+		Value::Number(Number::Int(1)),
+		Value::String(Strand::new_static("a")),
+	]))
 }
 
 /// RecordIdKey with object

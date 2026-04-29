@@ -1174,7 +1174,7 @@ mod tests {
 					table: "test".into(),
 					key: RecordIdKeyLit::Number(1),
 				}))),
-				Part::Value(Expr::Literal(Literal::String("foo".into()))),
+				Part::Value(Expr::Literal(Literal::String(Strand::new_static("foo")))),
 			]))
 		);
 	}

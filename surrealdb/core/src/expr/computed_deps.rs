@@ -263,6 +263,8 @@ pub fn resolve_required_computed_fields(
 
 #[cfg(test)]
 mod tests {
+	use surrealdb_strand::Strand;
+
 	use super::*;
 	use crate::expr::operator::BinaryOperator;
 	use crate::expr::{Literal, Part};
@@ -316,9 +318,9 @@ mod tests {
 	fn nested_field_access() {
 		// Expression: `user.name.first` -- root dep is `user`
 		let expr = Expr::Idiom(Idiom(vec![
-			Part::Field("user".into()),
-			Part::Field("name".into()),
-			Part::Field("first".into()),
+			Part::Field(Strand::new_static("user")),
+			Part::Field(Strand::new_static("name")),
+			Part::Field(Strand::new_static("first")),
 		]));
 		let deps = extract_computed_deps(&expr);
 		assert_eq!(deps.fields, vec!["user"]);
@@ -410,9 +412,9 @@ mod tests {
 		// $this.a.b.c -- root dep is `a`
 		let expr = Expr::Idiom(Idiom(vec![
 			Part::Start(Expr::Param(crate::expr::Param::from("this".to_string()))),
-			Part::Field("a".into()),
-			Part::Field("b".into()),
-			Part::Field("c".into()),
+			Part::Field(Strand::new_static("a")),
+			Part::Field(Strand::new_static("b")),
+			Part::Field(Strand::new_static("c")),
 		]));
 		let deps = extract_computed_deps(&expr);
 		assert_eq!(deps.fields, vec!["a"]);
@@ -509,7 +511,7 @@ mod tests {
 		// $this["a"] -- bracket string access, equivalent to $this.a
 		let expr = Expr::Idiom(Idiom(vec![
 			Part::Start(Expr::Param(crate::expr::Param::from("this".to_string()))),
-			Part::Value(Expr::Literal(Literal::String("a".into()))),
+			Part::Value(Expr::Literal(Literal::String(Strand::new_static("a")))),
 		]));
 		let deps = extract_computed_deps(&expr);
 		assert_eq!(deps.fields, vec!["a"]);
@@ -521,7 +523,7 @@ mod tests {
 		// $self["c"] -- bracket string access, equivalent to $self.c
 		let expr = Expr::Idiom(Idiom(vec![
 			Part::Start(Expr::Param(crate::expr::Param::from("self".to_string()))),
-			Part::Value(Expr::Literal(Literal::String("c".into()))),
+			Part::Value(Expr::Literal(Literal::String(Strand::new_static("c")))),
 		]));
 		let deps = extract_computed_deps(&expr);
 		assert_eq!(deps.fields, vec!["c"]);
@@ -539,7 +541,7 @@ mod tests {
 				op: BinaryOperator::Add,
 				right: Box::new(Expr::Idiom(Idiom(vec![
 					Part::Start(Expr::Param(crate::expr::Param::from("self".to_string()))),
-					Part::Value(Expr::Literal(Literal::String("c".into()))),
+					Part::Value(Expr::Literal(Literal::String(Strand::new_static("c")))),
 				]))),
 			}),
 		};
@@ -553,7 +555,7 @@ mod tests {
 		// $foo.a -- unknown param, not $this/$self
 		let expr = Expr::Idiom(Idiom(vec![
 			Part::Start(Expr::Param(crate::expr::Param::from("foo".to_string()))),
-			Part::Field("a".into()),
+			Part::Field(Strand::new_static("a")),
 		]));
 		let deps = extract_computed_deps(&expr);
 		assert!(!deps.is_complete);

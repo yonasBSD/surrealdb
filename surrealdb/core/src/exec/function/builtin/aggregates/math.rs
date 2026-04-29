@@ -647,6 +647,8 @@ impl Accumulator for MedianAccumulator {
 
 #[cfg(test)]
 mod tests {
+	use surrealdb_strand::Strand;
+
 	use super::*;
 
 	// Helper to extract f64 from Value
@@ -1055,7 +1057,7 @@ mod tests {
 		let values = vec![
 			Value::Number(Number::Int(5)),
 			Value::None,
-			Value::String("test".into()),
+			Value::String(Strand::new_static("test")),
 			Value::Number(Number::Int(3)),
 		];
 		acc.update_batch(&values).unwrap();

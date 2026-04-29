@@ -13,7 +13,7 @@ pub struct OptionStatement {
 impl OptionStatement {
 	pub(crate) fn import() -> Self {
 		Self {
-			name: Strand::from("IMPORT"),
+			name: Strand::new_static("IMPORT"),
 			what: true,
 		}
 	}

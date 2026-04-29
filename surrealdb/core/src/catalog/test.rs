@@ -3,6 +3,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use rstest::rstest;
+use surrealdb_strand::Strand;
 use uuid::Uuid;
 
 use super::*;
@@ -46,11 +47,11 @@ use crate::val::{Datetime, TableName, Value};
 	schemafull: false,
 	view: Some(ViewDefinition::Select {
 		fields: Fields::Select(vec![Field::All, Field::Single (crate::expr::field::Selector{
-			expr: Expr::Literal(Literal::String("expr".into())),
+			expr: Expr::Literal(Literal::String(Strand::new_static("expr"))),
 			alias: Some(Idiom::from_str("field[0]").unwrap()),
 		})]),
 		tables: vec![TableName::from("what")],
-		condition: Some(Expr::Literal(Literal::String("cond".into()))),
+		condition: Some(Expr::Literal(Literal::String(Strand::new_static("cond")))),
 		groups: Some(Groups::default()),
 	}),
 	permissions: Permissions::default(),
@@ -69,12 +70,12 @@ use crate::val::{Datetime, TableName, Value};
 	id: Uuid::default(),
 	node: Uuid::default(),
 	fields: SubscriptionFields::Select(Fields::Select(vec![Field::All, Field::Single(Selector{
-		expr: Expr::Literal(Literal::String("expr".into())),
+		expr: Expr::Literal(Literal::String(Strand::new_static("expr"))),
 		alias: Some(Idiom::from_str("field[0]").unwrap()),
 	})])),
-	what: Expr::Literal(Literal::String("what".into())),
-	cond: Some(Expr::Literal(Literal::String("cond".into()))),
-	fetch: Some(Fetchs::new(vec![Fetch(Expr::Literal(Literal::String("fetch".into())))])),
+	what: Expr::Literal(Literal::String(Strand::new_static("what"))),
+	cond: Some(Expr::Literal(Literal::String(Strand::new_static("cond")))),
+	fetch: Some(Fetchs::new(vec![Fetch(Expr::Literal(Literal::String(Strand::new_static("fetch"))))])),
 	auth: Some(Auth::default()),
 	session: Some(Value::default()),
 	vars: BTreeMap::new(),
@@ -96,7 +97,7 @@ use crate::val::{Datetime, TableName, Value};
 		},
 	}),
 	base: Base::Root,
-	authenticate: Some(Expr::Literal(Literal::String("expr".into()))),
+	authenticate: Some(Expr::Literal(Literal::String(Strand::new_static("expr")))),
 	grant_duration: Some(Duration::from_secs(123)),
 	token_duration: Some(Duration::from_secs(123)),
 	session_duration: Some(Duration::from_secs(123)),
@@ -126,7 +127,7 @@ use crate::val::{Datetime, TableName, Value};
 	actions: vec![
 		ApiActionDefinition {
 			methods: vec![ApiMethod::Get],
-			action: Expr::Literal(Literal::String("action".into())),
+			action: Expr::Literal(Literal::String(Strand::new_static("action"))),
 			config: ApiConfigDefinition::default(),
 		},
 	],
@@ -161,8 +162,8 @@ use crate::val::{Datetime, TableName, Value};
 #[case::event(EventDefinition {
 	name: "test".into(),
 	target_table: TableName::from("test"),
-	when: Expr::Literal(Literal::String("when".into())),
-	then: vec![Expr::Literal(Literal::String("then".into()))],
+	when: Expr::Literal(Literal::String(Strand::new_static("when"))),
+	then: vec![Expr::Literal(Literal::String(Strand::new_static("then")))],
 	comment: Some("comment".to_string()),
 	auth_limit: AuthLimit::default(),
     kind: EventKind::Async {
@@ -192,7 +193,7 @@ use crate::val::{Datetime, TableName, Value};
 	name: "function".into(),
 	args: vec![],
 	block: Block(vec![
-		Expr::Literal(Literal::String("expr".into())),
+		Expr::Literal(Literal::String(Strand::new_static("expr"))),
 	]),
 	comment: Some("comment".to_string()),
 	permissions: Permission::Full,

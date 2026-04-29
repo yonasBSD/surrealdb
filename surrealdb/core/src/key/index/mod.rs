@@ -299,13 +299,15 @@ impl<'a> Index<'a> {
 
 #[cfg(test)]
 mod tests {
+	use surrealdb_strand::Strand;
+
 	use super::*;
 	use crate::val::Array;
 
 	#[test]
 	fn key() {
 		let fd: Array = vec!["testfd1", "testfd2"].into();
-		let id = RecordIdKey::String("testid".into());
+		let id = RecordIdKey::String(Strand::new_static("testid"));
 		let tb = TableName::from("testtb");
 		let val = Index::new(NamespaceId(1), DatabaseId(2), &tb, IndexId(3), &fd, Some(&id));
 		let enc = Index::encode_key(&val).unwrap();

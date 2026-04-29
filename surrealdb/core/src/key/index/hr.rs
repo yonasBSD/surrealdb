@@ -127,13 +127,15 @@ impl<'a> HnswRecordPendingPrefix<'a> {
 
 #[cfg(test)]
 mod tests {
+	use surrealdb_strand::Strand;
+
 	use super::*;
 	use crate::key::index::hp::HnswPendingPrefix;
 
 	#[test]
 	fn record_pending_key_is_outside_hp_range() {
 		let tb = TableName::from("testtb");
-		let id = RecordIdKey::String("testid".into());
+		let id = RecordIdKey::String(Strand::new_static("testid"));
 		let key = HnswRecordPending::new(NamespaceId(1), DatabaseId(2), &tb, IndexId(3), &id)
 			.encode_key()
 			.unwrap();

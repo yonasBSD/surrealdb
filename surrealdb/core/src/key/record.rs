@@ -75,6 +75,8 @@ impl<'a> RecordKey<'a> {
 #[cfg(test)]
 mod tests {
 
+	use surrealdb_strand::Strand;
+
 	use super::*;
 	use crate::syn;
 
@@ -85,7 +87,7 @@ mod tests {
 			NamespaceId(1),
 			DatabaseId(2),
 			&tb,
-			RecordIdKey::String("testid".into()),
+			RecordIdKey::String(Strand::new_static("testid")),
 		);
 		let enc = RecordKey::encode_key(&val).unwrap();
 		assert_eq!(enc, b"/*\x00\x00\x00\x01*\x00\x00\x00\x02*testtb\0*\x03testid\0");

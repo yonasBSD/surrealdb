@@ -864,12 +864,14 @@ impl Value {
 
 #[cfg(test)]
 mod tests {
+	use surrealdb_strand::Strand;
+
 	use super::*;
 
 	#[test]
 	fn test_coerce_to_table_generic() {
 		// Test coercing string to generic table type
-		let value = Value::String("users".into());
+		let value = Value::String(Strand::new_static("users"));
 		let kind = Kind::Table(vec![]);
 		let result = value.coerce_to_kind(&kind);
 		assert!(result.is_ok());
@@ -881,7 +883,7 @@ mod tests {
 	#[test]
 	fn test_coerce_to_table_specific() {
 		// Coercion should fail for wrong table name (more strict than cast)
-		let value = Value::String("posts".into());
+		let value = Value::String(Strand::new_static("posts"));
 		let kind = Kind::Table(vec!["users".into()]);
 		let result = value.coerce_to_kind(&kind);
 		// Coercion from string to specific table type should fail because

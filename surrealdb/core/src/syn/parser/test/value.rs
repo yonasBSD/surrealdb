@@ -1,5 +1,6 @@
 use reblessive::Stack;
 use rust_decimal::Decimal;
+use surrealdb_strand::Strand;
 use surrealdb_types::ToSql;
 
 use crate::sql::literal::ObjectEntry;
@@ -19,7 +20,7 @@ fn parse_index_expression() {
 	let Expr::Idiom(x) = value else {
 		panic!("not the right value type");
 	};
-	assert_eq!(x.0[0], Part::Field("a".into()));
+	assert_eq!(x.0[0], Part::Field(Strand::new_static("a")));
 	assert_eq!(
 		x.0[1],
 		Part::Value(Expr::Binary {
@@ -174,7 +175,9 @@ fn parse_record_string_2() {
 		res,
 		Expr::Literal(Literal::RecordId(RecordIdLit {
 			table: "a".into(),
-			key: RecordIdKeyLit::Array(vec![Expr::Literal(Literal::String("foo".into()))])
+			key: RecordIdKeyLit::Array(vec![Expr::Literal(Literal::String(Strand::new_static(
+				"foo"
+			)))])
 		}))
 	)
 }
