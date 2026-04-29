@@ -9,17 +9,14 @@ const KIB: u64 = 1024;
 const MIB: u64 = 1024 * KIB;
 const GIB: u64 = 1024 * MIB;
 
-/// Scale the compaction readahead buffer with system memory.
-/// < 4 GiB: 4 MiB, < 16 GiB: 8 MiB, otherwise 16 MiB.
+/// The default compaction readahead size is 256 KiB.
+/// This is should ideally be aligned with max_sectors_kb,
+/// because the kernel splits each 2MB read into multiple smaller
+/// IO requests, adding CPU overhead.
+/// 256kb is based on the assumption that that for most workloads,
+/// this will be the default sector size.
 fn default_compaction_readahead_size() -> usize {
-	let mem = *TOTAL_SYSTEM_MEMORY;
-	if mem < 4 * GIB {
-		(4 * MIB) as usize
-	} else if mem < 16 * GIB {
-		(8 * MIB) as usize
-	} else {
-		(16 * MIB) as usize
-	}
+	(256 * KIB) as usize
 }
 
 /// Size the LRU block cache from available memory:
