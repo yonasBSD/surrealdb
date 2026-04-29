@@ -1,4 +1,4 @@
-//! Methods to use when interacting with a SurrealDB instance
+//! Methods to use when interacting with a SurrealDB instance.
 use std::borrow::Cow;
 use std::marker::PhantomData;
 use std::path::Path;
@@ -80,23 +80,27 @@ pub use version::Version;
 
 use super::opt::{CreateResource, IntoResource};
 
-/// A alias for an often used type of future returned by async methods in this
+/// An alias for an often used type of future returned by async methods in this
 /// library
 pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + Sync + 'a>>;
 
-/// Machine learning model marker type for import and export types
+/// Type-state marker for [`Export::ml`](Export::ml) on an [`Export`](Export) from
+/// [`Surreal::export`](crate::Surreal::export).
 pub struct Model;
 
-/// Marker type for configured exports
+/// Type-state marker for [`Export::with_config`](Export::with_config) on an [`Export`](Export) from
+/// [`Surreal::export`](crate::Surreal::export).
 pub struct ExportConfig;
 
-/// Live query marker type
+/// Type-state marker for [`Select::live`](Select::live) on a [`Select`] from
+/// [`Surreal::select`](crate::Surreal::select).
 pub struct Live;
 
 /// Relation marker type
 pub struct Relation;
 
-/// Query execution statistics
+/// Time elapsed for a single statement, paired by [`WithStats::take`](WithStats::take) after
+/// [`Query::with_stats`](crate::method::Query::with_stats).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub struct Stats {
@@ -104,7 +108,8 @@ pub struct Stats {
 	pub execution_time: Option<Duration>,
 }
 
-/// Responses returned with statistics
+/// Wraps the [`Query`] output from [`Query::with_stats`](crate::method::Query::with_stats) so each
+/// [`WithStats::take`](WithStats::take) includes [`Stats`].
 #[derive(Debug)]
 pub struct WithStats<T>(pub T);
 
@@ -153,7 +158,7 @@ where
 	///     }).await?;
 	///
 	///     // Select a namespace/database
-	///     DB.use_ns("namespace").use_db("database").await?;
+	///     DB.use_ns("main").use_db("main").await?;
 	///
 	///     // Create or update a specific record
 	///     let tobie: Option<Person> = DB.update(("person", "tobie"))
@@ -194,7 +199,7 @@ where
 	///     }).await?;
 	///
 	///     // Select a namespace/database
-	///     DB.use_ns("namespace").use_db("database").await?;
+	///     DB.use_ns("main").use_db("main").await?;
 	///
 	///     // Create or update a specific record
 	///     let tobie: Option<Person> = DB.update(("person", "tobie"))
@@ -242,6 +247,35 @@ where
 		}
 	}
 
+	/// Starts a client transaction and returns a handle for running
+	/// [`Transaction::query`], [`Transaction::select`], and other operations
+	/// in the same transaction until you call [`Transaction::commit`] or
+	/// [`Transaction::cancel`].
+	///
+	/// This is differs from writing `BEGIN` / `COMMIT` inside a raw SurrealQL
+	/// string in that the client issues a dedicated transaction begin command, then
+	/// keeps a [`Transaction`] that tags each subsequent
+	/// statement with the same transaction id.
+	///
+	/// The return type, [`Begin`], resolves to a [`Transaction`]. You can
+	/// end the transaction with [`Transaction::commit`] to apply changes, or
+	/// [`Transaction::cancel`] to roll them back. Both of those yield the original [`Surreal`]
+	/// client again on success so you can keep using the connection.
+	///
+	/// # Examples
+	///
+	/// ```no_run
+	/// # #[tokio::main]
+	/// # async fn main() -> surrealdb::Result<()> {
+	/// # let db = surrealdb::engine::any::connect("mem://").await?;
+	/// # db.use_ns("main").use_db("main").await?;
+	/// let tx = db.begin().await?;
+	/// tx.query("CREATE person SET name = 'Ann'").await?;
+	/// let db = tx.commit().await?;
+	/// # let _ = db;
+	/// # Ok(())
+	/// # }
+	/// ```
 	pub fn begin(self) -> Begin<C> {
 		Begin {
 			client: self,
@@ -274,7 +308,7 @@ where
 	/// # #[tokio::main]
 	/// # async fn main() -> surrealdb::Result<()> {
 	/// # let db = surrealdb::engine::any::connect("mem://").await?;
-	/// db.use_ns("namespace").await?;
+	/// db.use_ns("main").await?;
 	/// # Ok(())
 	/// # }
 	/// ```
@@ -293,7 +327,7 @@ where
 	/// # #[tokio::main]
 	/// # async fn main() -> surrealdb::Result<()> {
 	/// # let db = surrealdb::engine::any::connect("mem://").await?;
-	/// db.use_db("database").await?;
+	/// db.use_db("main").await?;
 	/// # Ok(())
 	/// # }
 	/// ```
@@ -411,7 +445,7 @@ where
 	/// .await?;
 	///
 	/// // Select the namespace/database to use
-	/// db.use_ns("namespace").use_db("database").await?;
+	/// db.use_ns("main").use_db("main").await?;
 	///
 	/// // Define the user record access
 	/// let surql = r#"
@@ -423,8 +457,8 @@ where
 	///
 	/// // Sign a user up
 	/// db.signup(Record {
-	///     namespace: "namespace",
-	///     database: "database",
+	///     namespace: "main",
+	///     database: "main",
 	///     access: "user_access",
 	///     params: AuthParams {
 	///         email: "john.doe@example.com".into(),
@@ -464,7 +498,7 @@ where
 	/// .await?;
 	///
 	/// // Select the namespace/database to use
-	/// db.use_ns("namespace").use_db("database").await?;
+	/// db.use_ns("main").use_db("main").await?;
 	///
 	/// // Define the user
 	/// let surql = "DEFINE USER johndoe ON NAMESPACE PASSWORD 'password123'";
@@ -472,7 +506,7 @@ where
 	///
 	/// // Sign a user in
 	/// db.signin(Namespace {
-	///     namespace: "namespace",
+	///     namespace: "main",
 	///     username: "johndoe",
 	///     password: "password123",
 	/// }).await?;
@@ -499,7 +533,7 @@ where
 	/// .await?;
 	///
 	/// // Select the namespace/database to use
-	/// db.use_ns("namespace").use_db("database").await?;
+	/// db.use_ns("main").use_db("main").await?;
 	///
 	/// // Define the user
 	/// let surql = "DEFINE USER johndoe ON DATABASE PASSWORD 'password123'";
@@ -507,8 +541,8 @@ where
 	///
 	/// // Sign a user in
 	/// db.signin(Database {
-	///     namespace: "namespace",
-	///     database: "database",
+	///     namespace: "main",
+	///     database: "main",
 	///     username: "johndoe",
 	///     password: "password123",
 	/// }).await?;
@@ -535,12 +569,12 @@ where
 	/// # let db = surrealdb::engine::any::connect("mem://").await?;
 	/// #
 	/// // Select the namespace/database to use
-	/// db.use_ns("namespace").use_db("database").await?;
+	/// db.use_ns("main").use_db("main").await?;
 	///
 	/// // Sign a user in
 	/// db.signin(Record {
-	///     namespace: "namespace",
-	///     database: "database",
+	///     namespace: "main",
+	///     database: "main",
 	///     access: "user_access",
 	///     params: AuthParams {
 	///         email: "john.doe@example.com".into(),
@@ -611,7 +645,7 @@ where
 	/// # let db = surrealdb::engine::any::connect("mem://").await?;
 	/// #
 	/// // Select the namespace/database to use
-	/// db.use_ns("namespace").use_db("database").await?;
+	/// db.use_ns("main").use_db("main").await?;
 	///
 	/// // Run queries
 	/// let mut result = db
@@ -672,7 +706,7 @@ where
 	/// # let db = surrealdb::engine::any::connect("mem://").await?;
 	/// #
 	/// // Select the namespace/database to use
-	/// db.use_ns("namespace").use_db("database").await?;
+	/// db.use_ns("main").use_db("main").await?;
 	///
 	/// // Select all records from a table
 	/// let people: Vec<Person> = db.select("person").await?;
@@ -733,7 +767,7 @@ where
 	/// # let db = surrealdb::engine::any::connect("mem://").await?;
 	/// #
 	/// // Select the namespace/database to use
-	/// db.use_ns("namespace").use_db("database").await?;
+	/// db.use_ns("main").use_db("main").await?;
 	///
 	/// // Create a record with a random ID
 	/// let person: Option<Person> = db.create("person").await?;
@@ -789,7 +823,7 @@ where
 	/// # let db = surrealdb::engine::any::connect("mem://").await?;
 	/// #
 	/// // Select the namespace/database to use
-	/// db.use_ns("namespace").use_db("database").await?;
+	/// db.use_ns("main").use_db("main").await?;
 	///
 	/// // Insert a record with a specific ID
 	/// let person: Option<Person> = db.insert(("person", "tobie"))
@@ -936,7 +970,7 @@ where
 	/// # let db = surrealdb::engine::any::connect("mem://").await?;
 	/// #
 	/// // Select the namespace/database to use
-	/// db.use_ns("namespace").use_db("database").await?;
+	/// db.use_ns("main").use_db("main").await?;
 	///
 	/// // Update all records in a table
 	/// let people: Vec<Person> = db.upsert("person").await?;
@@ -986,7 +1020,7 @@ where
 	/// # let db = surrealdb::engine::any::connect("mem://").await?;
 	/// #
 	/// // Select the namespace/database to use
-	/// db.use_ns("namespace").use_db("database").await?;
+	/// db.use_ns("main").use_db("main").await?;
 	///
 	/// // Update all records in a table
 	/// let people: Vec<Person> = db.upsert("person")
@@ -1040,7 +1074,7 @@ where
 	/// # let db = surrealdb::engine::any::connect("mem://").await?;
 	/// #
 	/// // Select the namespace/database to use
-	/// db.use_ns("namespace").use_db("database").await?;
+	/// db.use_ns("main").use_db("main").await?;
 	///
 	/// // Update all records in a table
 	/// let people: Vec<Person> = db.upsert("person")
@@ -1095,7 +1129,7 @@ where
 	/// # let db = surrealdb::engine::any::connect("mem://").await?;
 	/// #
 	/// // Select the namespace/database to use
-	/// db.use_ns("namespace").use_db("database").await?;
+	/// db.use_ns("main").use_db("main").await?;
 	///
 	/// // Update all records in a table
 	/// let people: Vec<Person> = db.update("person").await?;
@@ -1145,7 +1179,7 @@ where
 	/// # let db = surrealdb::engine::any::connect("mem://").await?;
 	/// #
 	/// // Select the namespace/database to use
-	/// db.use_ns("namespace").use_db("database").await?;
+	/// db.use_ns("main").use_db("main").await?;
 	///
 	/// // Update all records in a table
 	/// let people: Vec<Person> = db.update("person")
@@ -1199,7 +1233,7 @@ where
 	/// # let db = surrealdb::engine::any::connect("mem://").await?;
 	/// #
 	/// // Select the namespace/database to use
-	/// db.use_ns("namespace").use_db("database").await?;
+	/// db.use_ns("main").use_db("main").await?;
 	///
 	/// // Update all records in a table
 	/// let people: Vec<Person> = db.update("person")
@@ -1238,7 +1272,7 @@ where
 	/// # let db = surrealdb::engine::any::connect("mem://").await?;
 	/// #
 	/// // Select the namespace/database to use
-	/// db.use_ns("namespace").use_db("database").await?;
+	/// db.use_ns("main").use_db("main").await?;
 	///
 	/// // Delete all records from a table
 	/// let people: Vec<Person> = db.delete("person").await?;
@@ -1353,7 +1387,7 @@ where
 	/// # async fn main() -> surrealdb::Result<()> {
 	/// # let db = surrealdb::engine::any::connect("mem://").await?;
 	/// // Select the namespace/database to use
-	/// db.use_ns("namespace").use_db("database").await?;
+	/// db.use_ns("main").use_db("main").await?;
 	///
 	/// // Export to a file
 	/// db.export("backup.sql").await?;
@@ -1398,7 +1432,7 @@ where
 	/// # async fn main() -> surrealdb::Result<()> {
 	/// # let db = surrealdb::engine::any::connect("mem://").await?;
 	/// // Select the namespace/database to use
-	/// db.use_ns("namespace").use_db("database").await?;
+	/// db.use_ns("main").use_db("main").await?;
 	///
 	/// db.import("backup.sql").await?;
 	/// # Ok(())
