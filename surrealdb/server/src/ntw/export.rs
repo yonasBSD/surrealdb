@@ -91,12 +91,26 @@ async fn handle_inner(
 	// Start the export task
 	let task = db.export_with_config(&session, snd, cfg).await.map_err(ResponseError)?;
 	// Spawn a new database export job
-	tokio::spawn(task);
-	// Process all chunk values
+	let export_handle = tokio::spawn(task);
+	// Process all chunk values, stopping if the client disconnects
 	tokio::spawn(async move {
+		let mut client_disconnected = false;
 		while let Ok(v) = rcv.recv().await {
 			if let Err(err) = chn.send(Ok(Bytes::from(v))).await {
-				tracing::warn!("Error sending bytes: {:?}", err);
+				// The client disconnected; dropping `rcv` here will cause the
+				// export task's channel sends to fail, aborting it promptly.
+				tracing::info!("Export client disconnected, aborting export: {}", err);
+				client_disconnected = true;
+				break;
+			}
+		}
+		// In the non-cancellation path, surface any error from the export task
+		// that would otherwise be silently dropped.
+		if !client_disconnected {
+			match export_handle.await {
+				Ok(Ok(())) => {}
+				Ok(Err(err)) => tracing::error!("Export task failed: {err}"),
+				Err(join_err) => tracing::error!("Export task panicked: {join_err}"),
 			}
 		}
 	});
