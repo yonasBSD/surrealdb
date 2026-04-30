@@ -184,14 +184,15 @@ fn default_max_open_files() -> usize {
 	}
 }
 
-/// Disable blob file separation on very small systems. Blob files
-/// add a parallel file type with their own garbage collector, FDs and
-/// compaction readahead; on tight disks (typically paired with tight
-/// memory) the bookkeeping cost outweighs the benefit of keeping
-/// large values out of the LSM. Returns the RocksDB default of `true`
-/// for any system with >= 1 GiB of memory.
+/// Always enable blob file separation. The `min_blob_size` threshold
+/// (default 4 KiB) is the safety mechanism that keeps small values in
+/// the LSM where they belong; only values that exceed the threshold
+/// pay the cost of blob storage. Per-blob-file in-memory metadata is
+/// ~100 bytes; blob files share the `max_open_files` budget with
+/// SSTs (no separate FD pool); blob cache shares the block cache (no
+/// separate memory allocation).
 fn default_enable_blob_files() -> bool {
-	*TOTAL_SYSTEM_MEMORY >= GIB
+	true
 }
 
 /// Scale the target blob file size with system memory. Blob files
