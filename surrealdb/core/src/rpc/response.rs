@@ -213,7 +213,9 @@ impl SurrealValue for DbResponse {
 		if let Some(session_id) = self.session_id {
 			value.insert(SESSION_ID, PublicValue::Uuid(session_id.into()));
 		}
-		PublicValue::Object(PublicObject::from(value))
+		PublicValue::Object(PublicObject::from(
+			value.into_iter().collect::<std::collections::BTreeMap<_, _>>(),
+		))
 	}
 
 	fn from_value(value: PublicValue) -> Result<Self, TypesError> {

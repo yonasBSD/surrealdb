@@ -5,6 +5,7 @@ use anyhow::Result;
 use http::{HeaderMap, HeaderName, HeaderValue};
 use revision::revisioned;
 use storekey::{BorrowDecode, Encode};
+use surrealdb_collections::{Entry as VecMapEntry, VecMap, VecMapIntoIter};
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use crate::err::Error;
@@ -17,69 +18,93 @@ use crate::val::{IndexFormat, RecordId, Strand, Value};
 #[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Hash, Encode, BorrowDecode)]
 #[storekey(format = "()")]
 #[storekey(format = "IndexFormat")]
-pub(crate) struct Object(pub(crate) BTreeMap<Strand, Value>);
+pub(crate) struct Object(pub(crate) VecMap<Strand, Value>);
 
 impl From<BTreeMap<&str, Value>> for Object {
 	fn from(v: BTreeMap<&str, Value>) -> Self {
-		Self(v.into_iter().map(|(key, val)| (key.into(), val)).collect())
+		let mut entries = Vec::with_capacity(v.len());
+		entries.extend(v.into_iter().map(|(k, val)| (Strand::from(k), val)));
+		Self(VecMap::from_sorted_vec_unchecked(entries))
 	}
 }
 
 impl From<BTreeMap<String, Value>> for Object {
 	fn from(v: BTreeMap<String, Value>) -> Self {
-		Self(v.into_iter().map(|(k, val)| (k.into(), val)).collect())
+		let mut entries = Vec::with_capacity(v.len());
+		entries.extend(v.into_iter().map(|(k, val)| (Strand::from(k), val)));
+		Self(VecMap::from_sorted_vec_unchecked(entries))
 	}
 }
 
 impl From<BTreeMap<Strand, Value>> for Object {
 	fn from(v: BTreeMap<Strand, Value>) -> Self {
+		Self(VecMap::from(v))
+	}
+}
+
+impl From<VecMap<Strand, Value>> for Object {
+	fn from(v: VecMap<Strand, Value>) -> Self {
 		Self(v)
+	}
+}
+
+impl From<VecMap<String, Value>> for Object {
+	fn from(v: VecMap<String, Value>) -> Self {
+		let mut entries = Vec::with_capacity(v.len());
+		entries.extend(v.into_iter().map(|(k, val)| (Strand::from(k), val)));
+		Self(VecMap::from_sorted_vec_unchecked(entries))
+	}
+}
+
+impl From<VecMap<&str, Value>> for Object {
+	fn from(v: VecMap<&str, Value>) -> Self {
+		let mut entries = Vec::with_capacity(v.len());
+		entries.extend(v.into_iter().map(|(k, val)| (Strand::from(k), val)));
+		Self(VecMap::from_sorted_vec_unchecked(entries))
 	}
 }
 
 impl FromIterator<(String, Value)> for Object {
 	fn from_iter<T: IntoIterator<Item = (String, Value)>>(iter: T) -> Self {
-		Self(iter.into_iter().map(|(k, v)| (k.into(), v)).collect())
+		Self(VecMap::from_iter(iter.into_iter().map(|(k, v)| (Strand::from(k), v))))
 	}
 }
 
 impl FromIterator<(Strand, Value)> for Object {
 	fn from_iter<T: IntoIterator<Item = (Strand, Value)>>(iter: T) -> Self {
-		Self(BTreeMap::from_iter(iter))
+		Self(VecMap::from_iter(iter))
 	}
 }
 
 impl<'a> FromIterator<(&'a str, Value)> for Object {
 	fn from_iter<T: IntoIterator<Item = (&'a str, Value)>>(iter: T) -> Self {
-		Self(iter.into_iter().map(|(k, v)| (k.into(), v)).collect())
+		Self(VecMap::from_iter(iter.into_iter().map(|(k, v)| (Strand::from(k), v))))
 	}
 }
 
 impl From<BTreeMap<String, String>> for Object {
 	fn from(v: BTreeMap<String, String>) -> Self {
-		Self(
-			v.into_iter()
-				.map(|(k, v)| (Strand::from(k), Value::from(v)))
-				.collect::<BTreeMap<Strand, Value>>(),
-		)
+		let mut entries = Vec::with_capacity(v.len());
+		entries.extend(v.into_iter().map(|(k, v)| (Strand::from(k), Value::from(v))));
+		Self(VecMap::from_sorted_vec_unchecked(entries))
 	}
 }
 
 impl From<Vec<(String, Value)>> for Object {
 	fn from(v: Vec<(String, Value)>) -> Self {
-		Self(v.into_iter().map(|(k, val)| (k.into(), val)).collect())
+		Self(VecMap::from_iter(v.into_iter().map(|(k, val)| (Strand::from(k), val))))
 	}
 }
 
 impl From<HashMap<&str, Value>> for Object {
 	fn from(v: HashMap<&str, Value>) -> Self {
-		Self(v.into_iter().map(|(key, val)| (key.into(), val)).collect())
+		Self(VecMap::from_iter(v.into_iter().map(|(key, val)| (Strand::from(key), val))))
 	}
 }
 
 impl From<HashMap<String, Value>> for Object {
 	fn from(v: HashMap<String, Value>) -> Self {
-		Self(v.into_iter().map(|(k, val)| (k.into(), val)).collect())
+		Self(VecMap::from_iter(v.into_iter().map(|(k, val)| (Strand::from(k), val))))
 	}
 }
 
@@ -101,15 +126,14 @@ impl TryFrom<Object> for crate::types::PublicObject {
 
 impl From<crate::types::PublicObject> for Object {
 	fn from(s: crate::types::PublicObject) -> Self {
-		s.into_iter()
-			.map(|(k, v)| (Strand::from(k), Value::from(v)))
-			.collect::<BTreeMap<Strand, Value>>()
-			.into()
+		let mut entries = Vec::with_capacity(s.len());
+		entries.extend(s.into_iter().map(|(k, v)| (Strand::from(k), Value::from(v))));
+		Self(VecMap::from_sorted_vec_unchecked(entries))
 	}
 }
 
 impl Deref for Object {
-	type Target = BTreeMap<Strand, Value>;
+	type Target = VecMap<Strand, Value>;
 	fn deref(&self) -> &Self::Target {
 		&self.0
 	}
@@ -123,7 +147,7 @@ impl DerefMut for Object {
 
 impl IntoIterator for Object {
 	type Item = (Strand, Value);
-	type IntoIter = std::collections::btree_map::IntoIter<Strand, Value>;
+	type IntoIter = VecMapIntoIter<Strand, Value>;
 	fn into_iter(self) -> Self::IntoIter {
 		self.0.into_iter()
 	}
@@ -192,10 +216,7 @@ impl Object {
 	/// Return the map entry for `key`, so callers can use the
 	/// `Entry` API without manual interning.
 	#[inline]
-	pub fn entry(
-		&mut self,
-		key: impl Into<Strand>,
-	) -> std::collections::btree_map::Entry<'_, Strand, Value> {
+	pub fn entry(&mut self, key: impl Into<Strand>) -> VecMapEntry<'_, Strand, Value> {
 		self.0.entry(key.into())
 	}
 
@@ -222,9 +243,7 @@ impl std::ops::Add for Object {
 	type Output = Self;
 
 	fn add(self, rhs: Self) -> Self::Output {
-		let mut lhs = self;
-		lhs.0.extend(rhs.0);
-		lhs
+		Self(VecMap::merge_sorted_prefer_rhs(self.0, rhs.0))
 	}
 }
 

@@ -118,8 +118,8 @@ impl Array {
 		self
 	}
 
-	// Removes all values in the array from those in a BTreeSet which are equal to a value.
-	pub fn remove_all_set(mut self, other: &BTreeSet<Value>) -> Self {
+	/// Removes all values in the array that appear in `other`.
+	pub fn remove_all_set(mut self, other: &Set) -> Self {
 		self.retain(|x| !other.contains(x));
 		self
 	}

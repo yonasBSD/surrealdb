@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::str;
 
 use anyhow::Context as _;
@@ -179,10 +180,10 @@ async fn create_all(
 	// Specify the request statement
 	let sql = "CREATE type::table($table) CONTENT $data";
 	// Specify the request variables
-	let vars = Variables::from(map! {
+	let vars = Variables::from(BTreeMap::from_iter(map! {
 		String::from("table") => Value::String(table),
 		=> params.parse()
-	});
+	}));
 
 	execute_and_return(db, sql, &session, vars, accept.as_deref(), Some(data.to_string()))
 		.await
@@ -208,10 +209,10 @@ async fn update_all(
 	// Specify the request statement
 	let sql = "UPDATE type::table($table) CONTENT $data";
 	// Specify the request variables
-	let vars = Variables::from(map! {
+	let vars = Variables::from(BTreeMap::from_iter(map! {
 		String::from("table") => Value::String(table),
 		=> params.parse()
-	});
+	}));
 	execute_and_return(db, sql, &session, vars, accept.as_deref(), Some(data.to_string()))
 		.await
 		.map_err(ResponseError)
@@ -236,10 +237,10 @@ async fn modify_all(
 	// Specify the request statement
 	let sql = "UPDATE type::table($table) MERGE $data";
 	// Specify the request variables
-	let vars = Variables::from(map! {
+	let vars = Variables::from(BTreeMap::from_iter(map! {
 		String::from("table") => Value::String(table),
 		=> params.parse()
-	});
+	}));
 	execute_and_return(db, sql, &session, vars, accept.as_deref(), Some(data.to_string()))
 		.await
 		.map_err(ResponseError)
@@ -261,10 +262,10 @@ async fn delete_all(
 	// Specify the request statement
 	let sql = "DELETE type::table($table) RETURN BEFORE";
 	// Specify the request variables
-	let vars = Variables::from(map! {
+	let vars = Variables::from(BTreeMap::from_iter(map! {
 		String::from("table") => Value::String(table),
 		=> params.parse()
-	});
+	}));
 	// Execute the query and return the result
 	execute_and_return(db, sql, &session, vars, accept.as_deref(), None)
 		.await
@@ -299,11 +300,11 @@ async fn select_one(
 		Err(_) => Value::String(id),
 	};
 	// Specify the request variables
-	let vars = Variables::from(map! {
+	let vars = Variables::from(BTreeMap::from_iter(map! {
 		String::from("table") => Value::String(table),
 		String::from("id") => rid,
 		String::from("fields") => Value::Array(Array::from(query.fields.unwrap_or_default().into_iter().map(SurrealValue::into_value).collect::<Vec<Value>>())),
-	});
+	}));
 	// Execute the query and return the result
 	execute_and_return(db, sql, &session, vars, accept.as_deref(), None)
 		.await
@@ -335,11 +336,11 @@ async fn create_one(
 	// Specify the request statement
 	let sql = "CREATE type::record($table, $id) CONTENT $data";
 	// Specify the request variables
-	let vars = Variables::from(map! {
+	let vars = Variables::from(BTreeMap::from_iter(map! {
 		String::from("table") => Value::String(table),
 		String::from("id") => rid,
 		=> params.parse()
-	});
+	}));
 	// Execute the query and return the result
 	execute_and_return(db, sql, &session, vars, accept.as_deref(), Some(data.to_string()))
 		.await
@@ -371,11 +372,11 @@ async fn update_one(
 	// Specify the request statement
 	let sql = "UPSERT type::record($table, $id) CONTENT $data";
 	// Specify the request variables
-	let vars = Variables::from(map! {
+	let vars = Variables::from(BTreeMap::from_iter(map! {
 		String::from("table") => Value::String(table),
 		String::from("id") => rid,
 		=> params.parse()
-	});
+	}));
 	// Execute the query and return the result
 	execute_and_return(db, sql, &session, vars, accept.as_deref(), Some(data.to_string()))
 		.await
@@ -407,11 +408,11 @@ async fn modify_one(
 	// Specify the request statement
 	let sql = "UPSERT type::record($table, $id) MERGE $data";
 	// Specify the request variables
-	let vars = Variables::from(map! {
+	let vars = Variables::from(BTreeMap::from_iter(map! {
 		String::from("table") => Value::String(table),
 		String::from("id") => rid,
 		=> params.parse()
-	});
+	}));
 	// Execute the query and return the result
 	execute_and_return(db, sql, &session, vars, accept.as_deref(), Some(data.to_string()))
 		.await
@@ -438,10 +439,10 @@ async fn delete_one(
 		Err(_) => Value::String(id),
 	};
 	// Specify the request variables
-	let vars = Variables::from(map! {
+	let vars = Variables::from(BTreeMap::from_iter(map! {
 		String::from("table") => Value::String(table),
 		String::from("id") => rid,
-	});
+	}));
 	// Execute the query and return the result
 	execute_and_return(db, sql, &session, vars, accept.as_deref(), None)
 		.await

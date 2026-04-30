@@ -5,7 +5,7 @@ use std::time::Duration;
 use num_traits::ToPrimitive;
 
 use crate::expr::statements::info::InfoStructure;
-use crate::val::Value;
+use crate::val::{Object, Value};
 
 /// Thread‑safe container for dynamic Datastore configuration toggles.
 ///
@@ -53,6 +53,6 @@ impl InfoStructure for DynamicConfiguration {
 				Some(d) => d.into(),
 			}
 		};
-		Value::Object(object.into())
+		Value::Object(Object::from(object))
 	}
 }

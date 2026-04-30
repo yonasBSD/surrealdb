@@ -932,7 +932,12 @@ impl Datastore {
 		};
 
 		// Execute the SQL statement
-		self.execute(&sql, &Session::owner(), Some(vars.into())).await?;
+		self.execute(
+			&sql,
+			&Session::owner(),
+			Some(vars.into_iter().collect::<std::collections::BTreeMap<_, _>>().into()),
+		)
+		.await?;
 		// Everything ok
 		Ok(())
 	}
@@ -2746,6 +2751,8 @@ impl Datastore {
 
 #[cfg(test)]
 mod test {
+	use std::collections::BTreeMap;
+
 	use super::*;
 	use crate::iam::verify::verify_root_creds;
 	use crate::types::{PublicValue, PublicVariables};
@@ -2937,7 +2944,8 @@ mod test {
 		KILL $lqid;
 	"
 			.to_owned();
-			let vars = PublicVariables::from(map! { "lqid".to_string() => lqid });
+			let vars =
+				PublicVariables::from(BTreeMap::from_iter(map! { "lqid".to_string() => lqid }));
 			let res = &mut ds.execute(&sql, &ses, Some(vars)).await?;
 			assert_eq!(res.len(), 5);
 			res.remove(0).result.unwrap();

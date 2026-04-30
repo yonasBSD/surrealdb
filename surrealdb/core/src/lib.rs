@@ -86,6 +86,9 @@ pub(crate) mod types {
 	};
 }
 
+/// Used by the `map!` macro (`$crate::VecMap`); not public API.
+#[doc(hidden)]
+pub use surrealdb_collections::VecMap;
 #[cfg(feature = "ml")]
 pub use surrealml_core as ml;
 

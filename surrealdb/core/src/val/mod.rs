@@ -11,6 +11,7 @@ use geo::Point;
 use revision::revisioned;
 use rust_decimal::prelude::*;
 use storekey::{BorrowDecode, Encode};
+use surrealdb_collections::VecMap;
 use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
@@ -647,7 +648,7 @@ impl TrySub for Value {
 			(Self::Duration(v), Self::Datetime(w)) => Self::Datetime(v.try_sub(w)?),
 			(Self::Duration(v), Self::Duration(w)) => Self::Duration(v.try_sub(w)?),
 			(Self::Array(v), Self::Array(x)) => Self::from(v.remove_all(&x.0)),
-			(Self::Array(v), Self::Set(x)) => Self::from(v.remove_all_set(&x.0)),
+			(Self::Array(v), Self::Set(x)) => Self::from(v.remove_all_set(&x)),
 			(Self::Set(mut v), Self::Array(x)) => {
 				for item in x.0 {
 					v.remove(&item);
@@ -655,7 +656,7 @@ impl TrySub for Value {
 				Self::from(v)
 			}
 			(Self::Set(mut v), Self::Set(x)) => {
-				for item in x.0 {
+				for item in x {
 					v.remove(&item);
 				}
 				Self::from(v)
@@ -1058,6 +1059,24 @@ impl From<HashMap<String, Value>> for Value {
 
 impl From<BTreeMap<String, Value>> for Value {
 	fn from(v: BTreeMap<String, Value>) -> Self {
+		Value::Object(Object::from(v))
+	}
+}
+
+impl From<VecMap<String, Value>> for Value {
+	fn from(v: VecMap<String, Value>) -> Self {
+		Value::Object(Object::from(v))
+	}
+}
+
+impl From<VecMap<Strand, Value>> for Value {
+	fn from(v: VecMap<Strand, Value>) -> Self {
+		Value::Object(Object(v))
+	}
+}
+
+impl From<VecMap<&str, Value>> for Value {
+	fn from(v: VecMap<&str, Value>) -> Self {
 		Value::Object(Object::from(v))
 	}
 }

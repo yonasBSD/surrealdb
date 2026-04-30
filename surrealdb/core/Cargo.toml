@@ -92,6 +92,7 @@ reblessive = { workspace = true, features = ["tree"] }
 revision.workspace = true
 storekey.workspace = true
 surrealdb-types = { workspace = true }
+surrealdb-collections.workspace = true
 vart.workspace = true
 
 # External KV stores

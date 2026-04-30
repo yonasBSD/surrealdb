@@ -7262,6 +7262,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "surrealdb-collections"
+version = "3.1.0-alpha"
+dependencies = [
+ "criterion 0.8.2",
+ "revision",
+ "storekey",
+]
+
+[[package]]
 name = "surrealdb-common"
 version = "3.1.0-alpha"
 dependencies = [
@@ -7352,6 +7361,7 @@ dependencies = [
  "storekey",
  "strsim",
  "subtle",
+ "surrealdb-collections",
  "surrealdb-protocol",
  "surrealdb-rocksdb",
  "surrealdb-strand",

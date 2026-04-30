@@ -19,7 +19,8 @@ use crate::val::Value;
 /// # Examples
 ///
 /// ```no_compile
-/// use surrealdb_core::val::{record::Record, Value, Object};
+/// use surrealdb_core::catalog::Record;
+/// use surrealdb_core::val::{Object, Value};
 ///
 /// // Create a new record with data
 /// let record = Record::new(Value::Object(Object::default()));
@@ -108,7 +109,7 @@ pub(crate) struct Metadata {
 	/// The type of the record (e.g., Edge for graph edges)
 	pub(crate) record_type: RecordType,
 	/// Statistics related to running aggregations for this record.
-	/// These do not directly correspond to a feild but must be used in conjunction with the table
+	/// These do not directly correspond to a field but must be used in conjunction with the table
 	/// definition to calculate the final value for this record.
 	pub(crate) aggregation_stats: Vec<AggregationStat>,
 }

@@ -347,8 +347,10 @@ pub(crate) fn convert_public_value_to_internal(value: surrealdb_types::Value) ->
 				.map(convert_public_value_to_internal)
 				.collect::<std::collections::BTreeSet<_>>(),
 		)),
-		surrealdb_types::Value::Object(o) => crate::val::Value::Object(crate::val::Object(
-			o.into_iter().map(|(k, v)| (k.into(), convert_public_value_to_internal(v))).collect(),
+		surrealdb_types::Value::Object(o) => crate::val::Value::Object(crate::val::Object::from(
+			o.into_iter()
+				.map(|(k, v)| (k.into(), convert_public_value_to_internal(v)))
+				.collect::<std::collections::BTreeMap<surrealdb_strand::Strand, crate::val::Value>>(),
 		)),
 		surrealdb_types::Value::Geometry(g) => {
 			crate::val::Value::Geometry(convert_public_geometry_to_internal(g))
@@ -402,10 +404,11 @@ fn convert_public_record_id_key_to_internal(
 			crate::val::Array(a.into_iter().map(convert_public_value_to_internal).collect()),
 		),
 		surrealdb_types::RecordIdKey::Object(o) => {
-			crate::val::RecordIdKey::Object(crate::val::Object(
+			crate::val::RecordIdKey::Object(crate::val::Object::from(
 				o.into_iter()
 					.map(|(k, v)| (k.into(), convert_public_value_to_internal(v)))
-					.collect(),
+					.collect::<std::collections::BTreeMap<surrealdb_strand::Strand, crate::val::Value>>(
+				),
 			))
 		}
 		surrealdb_types::RecordIdKey::Range(r) => {

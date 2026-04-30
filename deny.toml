@@ -116,6 +116,10 @@ name = "surrealdb"
 allow = ["BUSL-1.1"]
 
 [[licenses.exceptions]]
+name = "surrealdb-collections"
+allow = ["BUSL-1.1"]
+
+[[licenses.exceptions]]
 name = "surrealdb-core"
 allow = ["BUSL-1.1"]
 
@@ -162,6 +166,11 @@ license-files = []
 
 [[licenses.clarify]]
 name = "surrealdb"
+expression = "BUSL-1.1"
+license-files = []
+
+[[licenses.clarify]]
+name = "surrealdb-collections"
 expression = "BUSL-1.1"
 license-files = []
 

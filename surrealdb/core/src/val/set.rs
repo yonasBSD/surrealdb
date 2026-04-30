@@ -1,7 +1,6 @@
-use std::collections::BTreeSet;
-
 use revision::revisioned;
 use storekey::{BorrowDecode, Encode};
+use surrealdb_collections::{VecSet, VecSetIntoIter};
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use crate::expr::Expr;
@@ -9,17 +8,17 @@ use crate::val::{IndexFormat, Value};
 
 /// Internal Set type that stores unique values
 ///
-/// Sets use BTreeSet internally to maintain uniqueness and sorted order.
+/// Sets use [`VecSet`] internally to maintain uniqueness and sorted order.
 #[revisioned(revision = 1)]
 #[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Hash, Encode, BorrowDecode)]
 #[storekey(format = "()")]
 #[storekey(format = "IndexFormat")]
-pub(crate) struct Set(pub(crate) BTreeSet<Value>);
+pub(crate) struct Set(pub(crate) VecSet<Value>);
 
 impl Set {
 	/// Create a new empty set
 	pub fn new() -> Self {
-		Set(BTreeSet::new())
+		Set(VecSet::new())
 	}
 
 	/// Get the number of elements in the set
@@ -76,22 +75,22 @@ impl Set {
 
 	/// Return the union of this set with another (A ∪ B)
 	pub fn union(self, other: Set) -> Set {
-		Set(self.0.union(&other.0).cloned().collect())
+		Set(self.0.union(&other.0))
 	}
 
 	/// Return the intersection of this set with another (A ∩ B)
 	pub fn intersection(&self, other: &Set) -> Set {
-		Set(self.0.intersection(&other.0).cloned().collect())
+		Set(self.0.intersection(&other.0))
 	}
 
 	/// Return the symmetric difference (A △ B) - elements in either but not both
 	pub fn symmetric_difference(self, other: Set) -> Set {
-		Set(self.0.symmetric_difference(&other.0).cloned().collect())
+		Set(self.0.symmetric_difference(&other.0))
 	}
 
 	/// Return the relative complement (A \ B) - elements in self but not in other
 	pub fn complement(self, other: Set) -> Set {
-		Set(self.0.difference(&other.0).cloned().collect())
+		Set(self.0.difference(&other.0))
 	}
 
 	/// Flatten nested sets and arrays into a single set
@@ -127,8 +126,14 @@ where
 	}
 }
 
-impl From<BTreeSet<Value>> for Set {
-	fn from(set: BTreeSet<Value>) -> Self {
+impl From<std::collections::BTreeSet<Value>> for Set {
+	fn from(set: std::collections::BTreeSet<Value>) -> Self {
+		Set(set.into())
+	}
+}
+
+impl From<VecSet<Value>> for Set {
+	fn from(set: VecSet<Value>) -> Self {
 		Set(set)
 	}
 }
@@ -163,7 +168,7 @@ impl FromIterator<Value> for Set {
 
 impl IntoIterator for Set {
 	type Item = Value;
-	type IntoIter = std::collections::btree_set::IntoIter<Self::Item>;
+	type IntoIter = VecSetIntoIter<Value>;
 	fn into_iter(self) -> Self::IntoIter {
 		self.0.into_iter()
 	}
