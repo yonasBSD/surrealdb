@@ -2915,8 +2915,7 @@ define_include_tests! {
 	detach_connection_session_rejected,
 }
 
-/// Regression coverage for GHSA-5qfp-32cf-69jh defense-in-depth: the
-/// WebSocket `attach` method must enforce
+/// Defense-in-depth: the WebSocket `attach` method must enforce
 /// `SURREAL_WEBSOCKET_MAX_ATTACHED_SESSIONS` so a single connection
 /// cannot create an unbounded number of per-connection sessions.
 ///

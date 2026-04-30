@@ -15,11 +15,11 @@
 //! `signin` replay sequence emitted by this SDK. Once the session is
 //! bound to a principal, every subsequent request that targets that
 //! session UUID must present a request-level principal that matches on
-//! actor id and [`Level`]; mismatches return `session_not_found`. This
-//! closes [GHSA-5qfp-32cf-69jh]: an attacker who observes or guesses a
-//! victim's session UUID *after* the victim authenticates cannot use it
-//! to impersonate them, and an attacker cannot enumerate UUIDs in the
-//! first place - see the `sessions` bullet below.
+//! actor id and [`Level`]; mismatches return `session_not_found`.
+//! This ensures an attacker who observes or guesses a victim's session UUID
+//! *after* the victim authenticates cannot use it to impersonate them, and
+//! an attacker cannot enumerate UUIDs in the first place - see the `sessions`
+//! bullet below.
 //!
 //! Concretely, this has two SDK-visible consequences:
 //!
@@ -39,7 +39,6 @@
 //! but its creator even though the server does not enforce ownership
 //! on it.
 //!
-//! [GHSA-5qfp-32cf-69jh]: https://github.com/surrealdb/surrealdb/security/advisories/GHSA-5qfp-32cf-69jh
 //! [`Level`]: surrealdb_core::iam::Level
 //!
 //! # Multi-Node Deployments and Sticky Sessions

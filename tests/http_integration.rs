@@ -701,12 +701,11 @@ mod http_integration {
 		Ok(())
 	}
 
-	/// Regression test for GHSA-4vgr-h27g-cf9p. Spawns many authenticated
-	/// and unauthenticated POST `/rpc` requests in parallel and asserts
-	/// every unauthenticated request is rejected while every authenticated
-	/// one succeeds. A shared-slot regression would cause at least one
-	/// unauthenticated task to observe an authenticated session and
-	/// succeed.
+	/// Spawns many authenticated and unauthenticated POST `/rpc` requests in
+	/// parallel and asserts every unauthenticated request is rejected while
+	/// every authenticated one succeeds. A shared-slot regression would cause
+	/// at least one unauthenticated task to observe an authenticated session
+	/// and succeed.
 	#[test(tokio::test)]
 	async fn rpc_session_isolation_under_concurrency() -> Result<(), Box<dyn std::error::Error>> {
 		let (addr, _server) = common::start_server_with_defaults().await.unwrap();
@@ -2564,12 +2563,11 @@ mod http_integration {
 		}
 	}
 
-	/// Regression coverage for [GHSA-5qfp-32cf-69jh][1]: HTTP `/rpc` must
-	/// not leak attached session UUIDs via the `sessions` method, and must
-	/// not let an anonymous caller impersonate an authenticated session by
-	/// supplying its UUID on subsequent requests.
+	/// HTTP `/rpc` must not leak attached session UUIDs via the `sessions`
+	/// method, and must not let an anonymous caller impersonate an
+	/// authenticated session by supplying its UUID on subsequent requests.
 	///
-	/// This exercises the full PoC sequence:
+	/// This exercises the full sequence:
 	///
 	/// 1. Anonymous `sessions` / `attach` are refused outright.
 	/// 2. A legitimate authenticated caller attaches a session and signs in successfully under that
@@ -2583,10 +2581,8 @@ mod http_integration {
 	///    the common case.
 	/// 6. A collision probe where `session == request_session_id` is safely ignored (the handler
 	///    treats it as the per-request ephemeral session; no cross-request hijack is possible).
-	///
-	/// [1]: https://github.com/surrealdb/surrealdb/security/advisories/GHSA-5qfp-32cf-69jh
 	#[test(tokio::test)]
-	async fn rpc_session_hijack_ghsa_5qfp_32cf_69jh() -> Result<(), Box<dyn std::error::Error>> {
+	async fn rpc_session_hijack_prevention() -> Result<(), Box<dyn std::error::Error>> {
 		let (addr, _server) = common::start_server_with_defaults().await.unwrap();
 		let url = format!("http://{addr}/rpc");
 		let ns = Ulid::new().to_string();
@@ -2763,17 +2759,14 @@ mod http_integration {
 	/// over HTTP `/rpc` must succeed when the caller forwards the bearer
 	/// token returned by `signup` on the subsequent `signin` request.
 	///
-	/// The HTTP ownership gate added for [GHSA-5qfp-32cf-69jh][1] requires
-	/// every non-`Attach` request that targets an attached session to
-	/// present a request-level principal matching the session's stored
-	/// principal. Because `signup` mutates the stored principal to the
-	/// newly created record user, an anonymous follow-up `signin` would
-	/// be rejected with `session_not_found`. The Rust SDK avoids this by
-	/// stashing the signup-issued bearer in `SessionState.auth`; this
-	/// test pins the wire-level contract that any HTTP RPC client which
-	/// does the same thing is accepted.
-	///
-	/// [1]: https://github.com/surrealdb/surrealdb/security/advisories/GHSA-5qfp-32cf-69jh
+	/// The HTTP ownership gate requires every non-`Attach` request that
+	/// targets an attached session to present a request-level principal
+	/// matching the session's stored principal. Because `signup` mutates
+	/// the stored principal to the newly created record user, an anonymous
+	/// follow-up `signin` would be rejected with `session_not_found`. The
+	/// Rust SDK avoids this by stashing the signup-issued bearer in
+	/// `SessionState.auth`; this test pins the wire-level contract that any
+	/// HTTP RPC client which does the same thing is accepted.
 	#[test(tokio::test)]
 	async fn rpc_attach_signup_signin_forwards_bearer() -> Result<(), Box<dyn std::error::Error>> {
 		let (addr, _server) = common::start_server_with_defaults().await.unwrap();

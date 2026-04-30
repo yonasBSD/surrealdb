@@ -18,7 +18,7 @@ use crate::err::Error;
 use crate::expr::FlowResultExt as _;
 use crate::expr::paths::{AC, ID, RD, TK};
 use crate::kvs::Transaction;
-use crate::types::{PublicAction, PublicNotification};
+use crate::types::{PublicAction, PublicNotification, PublicValue};
 use crate::val::{Number, Value, convert_value_to_public_value};
 
 impl Document {
@@ -182,21 +182,58 @@ impl Document {
 		// Freeze the context
 		let ctx = ctx.freeze();
 
+		// Extract the session ID now so it is available for both the normal notification
+		// path and any early-return error notification path below.
+		let session_id = match sess.pick(ID.as_ref()) {
+			Value::Uuid(uuid) => Some(uuid.into()),
+			Value::String(s) => s.parse::<crate::val::Uuid>().ok().map(|uuid| uuid.into()),
+			_ => None,
+		};
+
 		// Get the document to check against and to return based on lq context
 		// We need to clone the document as we will potentially modify it with computed fields
 		// The outcome for every computed field can be different based on the context of the
-		// user
-		let mut doc = match (self.check_reduction_required(&opt)?, is_delete) {
-			(true, true) => self.compute_reduced_target(stk, &ctx, &opt, &self.initial).await?,
-			(true, false) => self.compute_reduced_target(stk, &ctx, &opt, &self.current).await?,
-			(false, true) => self.initial.clone(),
-			(false, false) => self.current.clone(),
+		// user. Both compute_reduced_target and computed_fields_inner run under the LIVE
+		// owner's auth, which may differ from the writer's; any evaluation error skips this
+		// notification rather than aborting the triggering write transaction.
+		//
+		// Store the reduction flag so the DIFF arm can reuse it without a second call.
+		let reduction_required = self.check_reduction_required(&opt)?;
+		let mut doc = if reduction_required {
+			let target = if is_delete {
+				&self.initial
+			} else {
+				&self.current
+			};
+			match self.compute_reduced_target(stk, &ctx, &opt, target).await {
+				Ok(d) => d,
+				Err(_) => return Ok(()),
+			}
+		} else if is_delete {
+			self.initial.clone()
+		} else {
+			self.current.clone()
 		};
 
 		if let Ok(rid) = self.id() {
-			let fields = self.fd(&ctx, &opt).await?;
-			Document::computed_fields_inner(stk, &ctx, &opt, &rid, fields.as_ref(), &mut doc, None)
-				.await?;
+			let fields = match self.fd(&ctx, &opt).await {
+				Ok(f) => f,
+				Err(_) => return Ok(()),
+			};
+			if Document::computed_fields_inner(
+				stk,
+				&ctx,
+				&opt,
+				&rid,
+				fields.as_ref(),
+				&mut doc,
+				None,
+			)
+			.await
+			.is_err()
+			{
+				return Ok(());
+			}
 		};
 
 		// First of all, let's check to see if the WHERE
@@ -204,7 +241,26 @@ impl Document {
 		// document. If it is then we can continue.
 		match self.lq_check(stk, &ctx, &opt, &live_subscription, &doc).await {
 			Err(IgnoreError::Ignore) => return Ok(()),
-			Err(IgnoreError::Error(e)) => return Err(e),
+			Err(IgnoreError::Error(e)) => {
+				// The WHERE clause raised an evaluation error (e.g. InvalidFunctionArguments,
+				// THROW). Surface it to the subscriber as an Action::Error notification so
+				// they can diagnose the broken query rather than silently receiving nothing.
+				// We still return Ok(()) to avoid aborting the triggering write transaction.
+				if let Ok(rid_public) =
+					convert_value_to_public_value(Value::RecordId(rid.as_ref().clone()))
+				{
+					sender
+						.send(PublicNotification::new(
+							live_subscription.id.into(),
+							session_id,
+							PublicAction::Error,
+							rid_public,
+							PublicValue::String(e.to_string()),
+						))
+						.await;
+				}
+				return Ok(());
+			}
 			Ok(_) => (),
 		}
 		// Secondly, let's check to see if any PERMISSIONS
@@ -240,8 +296,39 @@ impl Document {
 					);
 					(PublicAction::Create, result)
 				} else {
-					// For UPDATE: compute diff from initial to current document
-					let operations = self.initial.doc.as_ref().diff(doc.doc.as_ref());
+					// For UPDATE: mirror the same preparation that was applied to `doc`
+					// (the RHS). First reduce under the LIVE owner's auth so restricted
+					// fields cancel out on both sides (no spurious Remove ops). Then run
+					// computed_fields_inner so COMPUTED fields are populated on the LHS
+					// too (no spurious Add/Replace ops for fields defined as COMPUTED).
+					let mut reduced_initial = if reduction_required {
+						match self.compute_reduced_target(stk, &ctx, &opt, &self.initial).await {
+							Ok(d) => d,
+							Err(_) => return Ok(()),
+						}
+					} else {
+						self.initial.clone()
+					};
+					if let Ok(rid) = self.id() {
+						let Ok(fields) = self.fd(&ctx, &opt).await else {
+							return Ok(());
+						};
+						if Document::computed_fields_inner(
+							stk,
+							&ctx,
+							&opt,
+							&rid,
+							fields.as_ref(),
+							&mut reduced_initial,
+							None,
+						)
+						.await
+						.is_err()
+						{
+							return Ok(());
+						}
+					}
+					let operations = reduced_initial.doc.as_ref().diff(doc.doc.as_ref());
 					let result = Value::Array(
 						operations.into_iter().map(|op| Value::Object(op.into_object())).collect(),
 					);
@@ -249,79 +336,53 @@ impl Document {
 				}
 			}
 			SubscriptionFields::Select(x) => {
+				// Evaluate the projection. Any error (type mismatch, THROW, BREAK, CONTINUE,
+				// closure result, etc.) skips this notification without aborting the write.
+				let Ok(result) = x.compute(stk, &ctx, &opt, Some(&doc)).await else {
+					return Ok(());
+				};
 				if is_delete {
-					// Prepare a DELETE notification
-					// An error ignore here is about livequery not the query which invoked the
-					// livequery trigger. So we should catch the ignore and skip this entry in this
-					// case.
-					let result = match x
-						.compute(stk, &ctx, &opt, Some(&doc))
-						.await
-						.map_err(IgnoreError::from)
-					{
-						Err(IgnoreError::Ignore) => return Ok(()),
-						Err(IgnoreError::Error(e)) => return Err(e),
-						Ok(x) => x,
-					};
 					(PublicAction::Delete, result)
 				} else if self.is_new() {
-					// Prepare a CREATE notification
-					// An error ignore here is about livequery not the query which invoked the
-					// livequery trigger. So we should catch the ignore and skip this entry in this
-					// case.
-					let result = match x
-						.compute(stk, &ctx, &opt, Some(&doc))
-						.await
-						.map_err(IgnoreError::from)
-					{
-						Err(IgnoreError::Ignore) => return Ok(()),
-						Err(IgnoreError::Error(e)) => return Err(e),
-						Ok(x) => x,
-					};
 					(PublicAction::Create, result)
 				} else {
-					// Prepare a UPDATE notification
-					// An error ignore here is about livequery not the query which invoked the
-					// livequery trigger. So we should catch the ignore and skip this entry in this
-					// case.
-					let result = match x
-						.compute(stk, &ctx, &opt, Some(&doc))
-						.await
-						.map_err(IgnoreError::from)
-					{
-						Err(IgnoreError::Ignore) => return Ok(()),
-						Err(IgnoreError::Error(e)) => return Err(e),
-						Ok(x) => x,
-					};
 					(PublicAction::Update, result)
 				}
 			}
 		};
 
-		// Process any potential `FETCH` clause on the live statement
+		// Process any potential `FETCH` clause on the live statement.
+		// Any evaluation error (invalid function arguments, unsupported expressions, etc.)
+		// skips this notification rather than aborting the triggering write transaction.
 		if let Some(fetchs) = live_subscription.fetch {
 			let mut idioms = BTreeSet::new();
 			for fetch in fetchs.iter() {
-				fetch.compute(stk, &ctx, &opt, &mut idioms).await?;
+				if fetch.compute(stk, &ctx, &opt, &mut idioms).await.is_err() {
+					return Ok(());
+				}
 			}
 			for i in &idioms {
-				stk.run(|stk| result.fetch(stk, &ctx, &opt, i)).await?;
+				if stk.run(|stk| result.fetch(stk, &ctx, &opt, i)).await.is_err() {
+					return Ok(());
+				}
 			}
 		}
 
-		// Extract the session ID from the session value
-		let session_id = match sess.pick(ID.as_ref()) {
-			Value::Uuid(uuid) => Some(uuid.into()),
-			Value::String(s) => s.parse::<crate::val::Uuid>().ok().map(|uuid| uuid.into()),
-			_ => None,
+		// Convert values to the public wire format. Any conversion error (e.g. a
+		// closure-valued projection that cannot be serialised) skips this notification
+		// rather than aborting the triggering write transaction.
+		let (Ok(rid_public), Ok(result_public)) = (
+			convert_value_to_public_value(Value::RecordId(rid.as_ref().clone())),
+			convert_value_to_public_value(result),
+		) else {
+			return Ok(());
 		};
-
 		let notification = PublicNotification::new(
 			live_subscription.id.into(),
 			session_id,
 			action,
-			convert_value_to_public_value(Value::RecordId(rid.as_ref().clone()))?,
-			convert_value_to_public_value(result)?,
+			rid_public,
+			result_public,
 		);
 
 		// Send the notification
@@ -330,7 +391,15 @@ impl Document {
 		Ok(())
 	}
 
-	/// Check the WHERE clause for a LIVE query
+	/// Check the WHERE clause for a LIVE query.
+	///
+	/// Returns:
+	/// - `Ok(())` — the WHERE clause matched (or there is no WHERE clause).
+	/// - `Err(IgnoreError::Ignore)` — the WHERE clause evaluated to a non-truthy value; skip this
+	///   notification silently.
+	/// - `Err(IgnoreError::Error(e))` — the WHERE clause raised an evaluation error (e.g.
+	///   `InvalidFunctionArguments`, `THROW`). The caller should send an `Action::Error`
+	///   notification to the subscriber instead of silently discarding the event.
 	async fn lq_check(
 		&self,
 		stk: &mut Stk,
@@ -341,15 +410,16 @@ impl Document {
 	) -> Result<(), IgnoreError> {
 		// Check where condition
 		if let Some(cond) = live_subscription.cond.as_ref() {
-			// Check if the expression is truthy
-			if !stk
-				.run(|stk| cond.compute(stk, ctx, opt, Some(doc)))
-				.await
-				.catch_return()?
-				.is_truthy()
-			{
-				// Ignore this document
-				return Err(IgnoreError::Ignore);
+			// Evaluate the WHERE expression. Control-flow signals (RETURN, BREAK,
+			// CONTINUE) are normalised by `catch_return` into either a value or an
+			// `InvalidControlFlow` error. All other errors are propagated so the
+			// caller can surface them to the subscriber via an Action::Error
+			// notification rather than silently dropping the event. Neither path
+			// can abort the write transaction — the caller always returns Ok(()).
+			match stk.run(|stk| cond.compute(stk, ctx, opt, Some(doc))).await.catch_return() {
+				Ok(v) if !v.is_truthy() => return Err(IgnoreError::Ignore),
+				Err(e) => return Err(IgnoreError::Error(e)),
+				Ok(_) => {}
 			}
 		}
 		// Carry on
@@ -437,7 +507,7 @@ mod tests {
 	use crate::kvs::Datastore;
 	use crate::kvs::LockType::Optimistic;
 	use crate::kvs::TransactionType::Write;
-	use crate::types::PublicNotification;
+	use crate::types::{PublicNotification, PublicRecordId, PublicRecordIdKey, PublicValue};
 
 	async fn new_ds_with_broker() -> Result<(Receiver<PublicNotification>, Datastore)> {
 		let (send, recv) = crate::channel::bounded(1000);
@@ -456,6 +526,356 @@ mod tests {
 		tx.commit().await.unwrap();
 		let ses = Session::owner().with_ns(ns).with_db(db);
 		ds.execute(&format!("DEFINE TABLE {tb}"), &ses, None).await.unwrap();
+	}
+
+	/// A LIVE query with a constant WHERE clause that always throws
+	/// `InvalidFunctionArguments` (here: `string::len(NONE)`) must be rejected at
+	/// registration time. The expression is document-independent (no field refs, no
+	/// doc params), so we can evaluate it eagerly and surface the error immediately.
+	#[tokio::test]
+	async fn test_live_where_constant_error_rejected_at_registration() {
+		let (_, ds) = new_ds_with_broker().await.unwrap();
+		let (ns, db, tb) = ("test", "test", "person");
+		setup_ns_db_table(&ds, ns, db, tb).await;
+
+		let ses = Session::owner().with_ns(ns).with_db(db).with_rt(true);
+
+		let mut res = ds
+			.execute("LIVE SELECT * FROM person WHERE string::len(NONE)", &ses, None)
+			.await
+			.unwrap();
+		let err = res.remove(0).result;
+		assert!(
+			err.is_err(),
+			"LIVE query with a constant invalid WHERE clause should be rejected at registration"
+		);
+	}
+
+	/// A LIVE query whose WHERE clause depends on a document field (`name`) and
+	/// always throws `InvalidFunctionArguments` (when `name` is not a string) must
+	/// not abort subsequent CREATE statements on the same table. The error is
+	/// surfaced as an `Action::Error` notification instead.
+	#[tokio::test]
+	async fn test_live_where_doc_dependent_error_does_not_abort_create() {
+		let (recv, ds) = new_ds_with_broker().await.unwrap();
+		let (ns, db, tb) = ("test", "test", "person");
+		setup_ns_db_table(&ds, ns, db, tb).await;
+
+		let ses = Session::owner().with_ns(ns).with_db(db).with_rt(true);
+
+		// `string::len(name)` is document-dependent (references field `name`), so it
+		// passes the constant-expression check. When `name` is NONE or a non-string
+		// the function throws, which should surface as an error notification rather
+		// than aborting the write.
+		ds.execute("LIVE SELECT * FROM person WHERE string::len(name) > 3", &ses, None)
+			.await
+			.unwrap();
+
+		// CREATE must succeed despite the erroring WHERE-clause subscription.
+		let ses_write = Session::owner().with_ns(ns).with_db(db);
+		let mut res = ds
+			.execute("CREATE person:1", &ses_write, None)
+			.await
+			.expect("execute should not return an Err");
+		res.remove(0).result.expect("CREATE should succeed, not be aborted by LIVE WHERE error");
+
+		// Notifications are forwarded asynchronously; wait briefly for the error one.
+		let notification =
+			tokio::time::timeout(tokio::time::Duration::from_millis(500), recv.recv())
+				.await
+				.expect("expected an error notification within timeout")
+				.expect("channel should not be closed");
+		assert_eq!(
+			notification.action,
+			crate::types::PublicAction::Error,
+			"expected Action::Error, got {:?}",
+			notification.action
+		);
+	}
+
+	/// Defense-in-depth: a LIVE query whose SELECT projection always throws
+	/// `InvalidFunctionArguments` must not abort subsequent writes on the table.
+	#[tokio::test]
+	async fn test_live_projection_type_error_does_not_abort_create() {
+		let (_, ds) = new_ds_with_broker().await.unwrap();
+		let (ns, db, tb) = ("test", "test", "person");
+		setup_ns_db_table(&ds, ns, db, tb).await;
+
+		let ses = Session::owner().with_ns(ns).with_db(db).with_rt(true);
+
+		// Register a LIVE query whose SELECT projection always errors.
+		ds.execute("LIVE SELECT string::len(NONE) FROM person", &ses, None).await.unwrap();
+
+		// CREATE must succeed despite the erroring projection.
+		let ses_write = Session::owner().with_ns(ns).with_db(db);
+		let mut res = ds
+			.execute("CREATE person:2", &ses_write, None)
+			.await
+			.expect("execute should not return an Err");
+		res.remove(0)
+			.result
+			.expect("CREATE should succeed, not be aborted by LIVE projection error");
+	}
+
+	/// Multiple LIVE queries with document-dependent erroring WHERE clauses on the
+	/// same table must not prevent any of CREATE, UPDATE, or DELETE from succeeding.
+	/// Each failing evaluation fires an Action::Error notification instead.
+	#[tokio::test]
+	async fn test_multiple_erroring_live_queries_do_not_abort_writes() {
+		let (_, ds) = new_ds_with_broker().await.unwrap();
+		let (ns, db, tb) = ("test", "test", "person");
+		setup_ns_db_table(&ds, ns, db, tb).await;
+
+		let ses = Session::owner().with_ns(ns).with_db(db).with_rt(true);
+
+		// Register doc-dependent subscriptions that will error when evaluated against
+		// a record without a matching string field.
+		ds.execute("LIVE SELECT * FROM person WHERE string::len(name) > 3", &ses, None)
+			.await
+			.unwrap();
+		ds.execute("LIVE SELECT * FROM person WHERE string::uppercase(name) = 'ALICE'", &ses, None)
+			.await
+			.unwrap();
+
+		let ses_write = Session::owner().with_ns(ns).with_db(db);
+
+		let mut res =
+			ds.execute("CREATE person:3", &ses_write, None).await.expect("execute should not Err");
+		res.remove(0).result.expect("CREATE should succeed");
+
+		let mut res = ds
+			.execute("UPDATE person:3 SET name = 'Alice'", &ses_write, None)
+			.await
+			.expect("execute should not Err");
+		res.remove(0).result.expect("UPDATE should succeed");
+
+		let mut res =
+			ds.execute("DELETE person:3", &ses_write, None).await.expect("execute should not Err");
+		res.remove(0).result.expect("DELETE should succeed");
+	}
+
+	/// A LIVE query with a constant `THROW` WHERE clause must be rejected at
+	/// registration (the expression is document-independent).
+	#[tokio::test]
+	async fn test_live_where_constant_throw_rejected_at_registration() {
+		let (_, ds) = new_ds_with_broker().await.unwrap();
+		let (ns, db, tb) = ("test", "test", "person");
+		setup_ns_db_table(&ds, ns, db, tb).await;
+
+		let ses = Session::owner().with_ns(ns).with_db(db).with_rt(true);
+		let mut res = ds
+			.execute(r#"LIVE SELECT * FROM person WHERE THROW "abort""#, &ses, None)
+			.await
+			.unwrap();
+		assert!(
+			res.remove(0).result.is_err(),
+			"constant THROW in WHERE should be rejected at registration"
+		);
+	}
+
+	/// A LIVE query whose document-dependent WHERE clause uses THROW must not abort
+	/// subsequent writes. The error is surfaced as an Action::Error notification.
+	/// `THROW` produces `Error::Thrown`, which is not in the old `is_ignorable()` allowlist.
+	#[tokio::test]
+	async fn test_live_where_doc_dependent_throw_does_not_abort_create() {
+		let (recv, ds) = new_ds_with_broker().await.unwrap();
+		let (ns, db, tb) = ("test", "test", "person");
+		setup_ns_db_table(&ds, ns, db, tb).await;
+
+		let ses = Session::owner().with_ns(ns).with_db(db).with_rt(true);
+		// `THROW name` is document-dependent (references field `name`), so it passes
+		// the constant-expression check at registration.
+		ds.execute(r#"LIVE SELECT * FROM person WHERE THROW name"#, &ses, None).await.unwrap();
+
+		let ses_write = Session::owner().with_ns(ns).with_db(db);
+		let mut res = ds
+			.execute("CREATE person:10", &ses_write, None)
+			.await
+			.expect("execute should not return an Err");
+		res.remove(0).result.expect("CREATE should succeed despite THROW in LIVE WHERE");
+
+		// Notifications are forwarded asynchronously; wait briefly for the error one.
+		let notification =
+			tokio::time::timeout(tokio::time::Duration::from_millis(500), recv.recv())
+				.await
+				.expect("expected an error notification within timeout")
+				.expect("channel should not be closed");
+		assert_eq!(
+			notification.action,
+			crate::types::PublicAction::Error,
+			"expected Action::Error for THROW in LIVE WHERE"
+		);
+	}
+
+	/// A LIVE query whose SELECT projection uses THROW must not abort subsequent writes.
+	#[tokio::test]
+	async fn test_live_projection_throw_does_not_abort_create() {
+		let (_, ds) = new_ds_with_broker().await.unwrap();
+		let (ns, db, tb) = ("test", "test", "person");
+		setup_ns_db_table(&ds, ns, db, tb).await;
+
+		let ses = Session::owner().with_ns(ns).with_db(db).with_rt(true);
+		ds.execute(r#"LIVE SELECT THROW "abort" FROM person"#, &ses, None).await.unwrap();
+
+		let ses_write = Session::owner().with_ns(ns).with_db(db);
+		let mut res = ds
+			.execute("CREATE person:11", &ses_write, None)
+			.await
+			.expect("execute should not return an Err");
+		res.remove(0).result.expect("CREATE should succeed despite THROW in LIVE SELECT");
+	}
+
+	/// A LIVE query with a FETCH clause that always errors must not abort subsequent writes.
+	/// `type::field(NONE)` triggers `InvalidFunctionArguments` in the FETCH path, which was
+	/// previously unprotected (raw `?` propagation).
+	#[tokio::test]
+	async fn test_live_fetch_error_does_not_abort_create() {
+		let (_, ds) = new_ds_with_broker().await.unwrap();
+		let (ns, db, tb) = ("test", "test", "person");
+		setup_ns_db_table(&ds, ns, db, tb).await;
+
+		let ses = Session::owner().with_ns(ns).with_db(db).with_rt(true);
+		ds.execute("LIVE SELECT * FROM person FETCH type::field(NONE)", &ses, None).await.unwrap();
+
+		let ses_write = Session::owner().with_ns(ns).with_db(db);
+		let mut res = ds
+			.execute("CREATE person:12", &ses_write, None)
+			.await
+			.expect("execute should not return an Err");
+		res.remove(0).result.expect("CREATE should succeed despite invalid FETCH expression");
+	}
+
+	/// A LIVE query registered by a record-access session whose per-field SELECT permission
+	/// expression always errors must not abort subsequent writes. `compute_reduced_target`
+	/// runs under the LIVE owner's auth and can fail even when the writer's evaluation
+	/// succeeds; the error must skip the notification rather than rolling back the
+	/// triggering write transaction.
+	///
+	/// The LIVE subscriber must be a non-root session (here: a record-access user) so that
+	/// `check_reduction_required` returns true and `compute_reduced_target` is actually
+	/// called. A root/owner session bypasses per-field permission evaluation entirely.
+	#[tokio::test]
+	async fn test_live_field_permission_error_does_not_abort_create() {
+		let (_, ds) = new_ds_with_broker().await.unwrap();
+		let (ns, db) = ("test", "test");
+		let tx = ds.transaction(Write, Optimistic).await.unwrap();
+		tx.ensure_ns_db(None, ns, db).await.unwrap();
+		tx.commit().await.unwrap();
+
+		let owner_ses = Session::owner().with_ns(ns).with_db(db);
+		// Define a table with a field whose SELECT permission always errors.
+		ds.execute(
+			"DEFINE TABLE person; \
+			 DEFINE ACCESS user ON DATABASE TYPE RECORD; \
+			 DEFINE FIELD secret ON person PERMISSIONS FOR select WHERE string::len(NONE)",
+			&owner_ses,
+			None,
+		)
+		.await
+		.unwrap();
+
+		// Register the LIVE query as a record-access user. Record-level auth has
+		// db_in_actor_level = false, so check_reduction_required returns true and
+		// compute_reduced_target is invoked under the subscriber's restricted auth.
+		let live_ses = Session::for_record(
+			ns,
+			db,
+			"user",
+			PublicValue::RecordId(PublicRecordId {
+				table: "user".to_string().into(),
+				key: PublicRecordIdKey::String("alice".to_string()),
+			}),
+		)
+		.with_rt(true);
+		ds.execute("LIVE SELECT * FROM person", &live_ses, None).await.unwrap();
+
+		let ses_write = Session::owner().with_ns(ns).with_db(db);
+		let mut res = ds
+			.execute("CREATE person:20 SET secret = 'shh'", &ses_write, None)
+			.await
+			.expect("execute should not return an Err");
+		res.remove(0)
+			.result
+			.expect("CREATE should succeed despite erroring field SELECT permission");
+	}
+
+	/// `LIVE SELECT DIFF FROM t` with a non-Owner subscriber must not include `Remove`
+	/// operations for fields the subscriber cannot `SELECT`.
+	///
+	/// Before the fix, `self.initial` (LHS of the diff for UPDATE notifications) was not reduced
+	/// under the subscriber's auth, so any field present in the initial document but absent from
+	/// the reduced RHS would appear as a spurious `Remove` op — leaking the field name and
+	/// existence to a subscriber who has no SELECT permission on it.
+	#[tokio::test]
+	async fn test_live_diff_does_not_leak_restricted_field_name() {
+		let (recv, ds) = new_ds_with_broker().await.unwrap();
+		let (ns, db) = ("test", "test");
+		let tx = ds.transaction(Write, Optimistic).await.unwrap();
+		tx.ensure_ns_db(None, ns, db).await.unwrap();
+		tx.commit().await.unwrap();
+
+		let owner_ses = Session::owner().with_ns(ns).with_db(db);
+		ds.execute(
+			"DEFINE TABLE person PERMISSIONS FOR select FULL; \
+			 DEFINE ACCESS user ON DATABASE TYPE RECORD; \
+			 DEFINE FIELD name ON person TYPE string; \
+			 DEFINE FIELD secret ON person TYPE string PERMISSIONS FOR select WHERE false",
+			&owner_ses,
+			None,
+		)
+		.await
+		.unwrap();
+
+		// Pre-create the record before the LIVE query so the subsequent UPDATE is
+		// seen as a diff from a known initial state, not a CREATE notification.
+		ds.execute("CREATE person:50 SET name = 'foo', secret = 'shh'", &owner_ses, None)
+			.await
+			.unwrap();
+
+		// Register LIVE SELECT DIFF as a record-access (non-Owner) subscriber.
+		let live_ses = Session::for_record(
+			ns,
+			db,
+			"user",
+			PublicValue::RecordId(PublicRecordId {
+				table: "user".to_string().into(),
+				key: PublicRecordIdKey::String("alice".to_string()),
+			}),
+		)
+		.with_rt(true);
+		ds.execute("LIVE SELECT DIFF FROM person", &live_ses, None).await.unwrap();
+		// Drain any stale notifications.
+		while recv.try_recv().is_ok() {}
+
+		// Trigger an UPDATE as owner — only the `name` field changes.
+		ds.execute("UPDATE person:50 SET name = 'bar'", &owner_ses, None).await.unwrap();
+
+		// Collect the UPDATE notification.
+		let notif = tokio::time::timeout(tokio::time::Duration::from_millis(500), recv.recv())
+			.await
+			.expect("notification should arrive within timeout")
+			.expect("channel should not be closed");
+
+		// The result must be an array of JSON patch operations.
+		let PublicValue::Array(ops) = notif.result else {
+			panic!(
+				"DIFF result should be a Value::Array of patch operations, got: {:?}",
+				notif.result
+			);
+		};
+		// No operation should be a Remove referencing /secret.
+		for op in ops.iter() {
+			let PublicValue::Object(obj) = op else {
+				continue;
+			};
+			let is_remove = obj.get("op") == Some(&PublicValue::String("remove".to_string()));
+			let targets_secret =
+				obj.get("path") == Some(&PublicValue::String("/secret".to_string()));
+			assert!(
+				!(is_remove && targets_secret),
+				"DIFF UPDATE must not leak a Remove op for the restricted /secret field; ops: {ops:?}"
+			);
+		}
 	}
 
 	/// Sanity check: a LIVE query with a non-expiring session receives notifications normally.
@@ -481,9 +901,8 @@ mod tests {
 	}
 
 	/// A LIVE query whose originating session has expired via TTL must not receive
-	/// notifications after the TTL passes. This guards against the session-expiry
-	/// data-leakage scenario described in GHSA-mf3f-f4wh-w626: data written after
-	/// a session expires should not be streamed to the now-invalid subscriber.
+	/// notifications after the TTL passes. Data written after a session expires
+	/// should not be streamed to the now-invalid subscriber.
 	///
 	/// We set `exp` to the current integer second so the session is still technically
 	/// valid at query-creation time (`Utc::now().timestamp() > exp` is false), then

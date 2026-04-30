@@ -22,8 +22,7 @@ use crate::cnf::{HTTP_MAX_ATTACHED_SESSIONS, PKG_NAME, PKG_VERSION};
 ///
 /// Unlike WebSocket, the HTTP transport shares a single `Http` instance
 /// across every `POST /rpc` request (there is no per-connection scope).
-/// To prevent session hijack via UUID enumeration or guessing (see
-/// GHSA-5qfp-32cf-69jh), this implementation:
+/// To prevent session hijack via UUID enumeration or guessing, this implementation:
 ///
 /// - Rejects the `sessions` method outright - no enumeration is offered.
 /// - Requires the caller's request-level auth principal to match the attached session's current
@@ -180,8 +179,7 @@ impl RpcProtocol for Http {
 
 	/// Session enumeration is not available on the HTTP transport.
 	///
-	/// The HTTP `sessions()` method was the vector exploited in
-	/// GHSA-5qfp-32cf-69jh: it returned every attached session UUID to any
+	/// The HTTP `sessions()` method returned every attached session UUID to any
 	/// anonymous caller, enabling trivial discovery of privileged sessions
 	/// for hijack. HTTP has no legitimate per-caller use for listing other
 	/// clients' sessions, so the method is refused outright.
