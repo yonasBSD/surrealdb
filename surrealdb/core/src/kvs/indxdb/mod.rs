@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use indxdb::{Database as Db, Transaction as Tx};
 use tokio::sync::RwLock;
 
-use super::api::ScanLimit;
+use super::api::{KeysResult, ScanLimit, ScanResult};
 use super::err::{Error, Result};
 use super::{ESTIMATED_BYTES_PER_KEY, ESTIMATED_BYTES_PER_KV, util};
 use crate::key::debug::Sprintable;
@@ -247,7 +247,7 @@ impl Transactable for Transaction {
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<Vec<Key>> {
+	) -> Result<KeysResult> {
 		// IndxDB does not support versioned queries.
 		if version.is_some() {
 			return Err(Error::UnsupportedVersionedQueries);
@@ -267,9 +267,7 @@ impl Transactable for Transaction {
 		// Scan the keys
 		let res = inner.keys(rng, count).await?;
 		// Consume the results
-		let res = consume_keys(&mut res.into_iter(), limit, skip);
-		// Return result
-		Ok(res)
+		Ok(consume_keys(&mut res.into_iter(), limit, skip))
 	}
 
 	/// Retrieve a range of keys, in reverse
@@ -280,7 +278,7 @@ impl Transactable for Transaction {
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<Vec<Key>> {
+	) -> Result<KeysResult> {
 		// IndxDB does not support versioned queries.
 		if version.is_some() {
 			return Err(Error::UnsupportedVersionedQueries);
@@ -300,9 +298,7 @@ impl Transactable for Transaction {
 		// Scan the keys
 		let res = inner.keysr(rng, count).await?;
 		// Consume the results
-		let res = consume_keys(&mut res.into_iter(), limit, skip);
-		// Return result
-		Ok(res)
+		Ok(consume_keys(&mut res.into_iter(), limit, skip))
 	}
 
 	/// Retrieve a range of key-value pairs
@@ -313,7 +309,7 @@ impl Transactable for Transaction {
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<Vec<(Key, Val)>> {
+	) -> Result<ScanResult> {
 		// IndxDB does not support versioned queries.
 		if version.is_some() {
 			return Err(Error::UnsupportedVersionedQueries);
@@ -334,7 +330,7 @@ impl Transactable for Transaction {
 					start..rng.end
 				}
 				// Fewer entries than skip -- nothing to return
-				None => return Ok(Vec::new()),
+				None => return Ok(ScanResult::default()),
 			}
 		} else {
 			rng
@@ -348,9 +344,7 @@ impl Transactable for Transaction {
 		// Scan the keys
 		let res = inner.scan(rng, count).await?;
 		// Consume the results
-		let res = consume_vals(&mut res.into_iter(), limit);
-		// Return result
-		Ok(res)
+		Ok(consume_vals(&mut res.into_iter(), limit))
 	}
 
 	/// Retrieve a range of key-value pairs, in reverse
@@ -361,7 +355,7 @@ impl Transactable for Transaction {
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<Vec<(Key, Val)>> {
+	) -> Result<ScanResult> {
 		// IndxDB does not support versioned queries.
 		if version.is_some() {
 			return Err(Error::UnsupportedVersionedQueries);
@@ -381,7 +375,7 @@ impl Transactable for Transaction {
 					rng.start..end
 				}
 				// Fewer entries than skip -- nothing to return
-				None => return Ok(Vec::new()),
+				None => return Ok(ScanResult::default()),
 			}
 		} else {
 			rng
@@ -395,9 +389,7 @@ impl Transactable for Transaction {
 		// Scan the keys in reverse
 		let res = inner.scanr(rng, count).await?;
 		// Consume the results
-		let res = consume_vals(&mut res.into_iter(), limit);
-		// Return result
-		Ok(res)
+		Ok(consume_vals(&mut res.into_iter(), limit))
 	}
 
 	/// Set a new save point on the transaction.
@@ -419,14 +411,15 @@ impl Transactable for Transaction {
 }
 
 // Consume and iterate over keys
-fn consume_keys<I: Iterator<Item = Key>>(iter: &mut I, limit: ScanLimit, skip: u32) -> Vec<Key> {
+fn consume_keys<I: Iterator<Item = Key>>(iter: &mut I, limit: ScanLimit, skip: u32) -> KeysResult {
 	// Skip entries from the pre-fetched iterator
 	for _ in 0..skip {
 		if iter.next().is_none() {
-			return Vec::new();
+			return KeysResult::default();
 		}
 	}
-	match limit {
+	let mut key_bytes = 0u64;
+	let keys = match limit {
 		ScanLimit::Count(c) => {
 			// Create the result set
 			let mut res = Vec::with_capacity(c.min(4096) as usize);
@@ -434,56 +427,59 @@ fn consume_keys<I: Iterator<Item = Key>>(iter: &mut I, limit: ScanLimit, skip: u
 			while res.len() < c as usize {
 				// Check the key
 				if let Some(k) = iter.next() {
+					key_bytes += k.len() as u64;
 					res.push(k);
 				} else {
 					break;
 				}
 			}
-			// Return the result
 			res
 		}
 		ScanLimit::Bytes(b) => {
 			// Create the result set
 			let mut res = Vec::with_capacity((b / ESTIMATED_BYTES_PER_KEY).min(4096) as usize);
-			// Count the bytes fetched
-			let mut bytes_fetched = 0usize;
 			// Check that we don't exceed the byte limit
-			while bytes_fetched < b as usize {
+			while key_bytes < b as u64 {
 				// Check the key
 				if let Some(k) = iter.next() {
-					bytes_fetched += k.len();
+					key_bytes += k.len() as u64;
 					res.push(k);
 				} else {
 					break;
 				}
 			}
-			// Return the result
 			res
 		}
 		ScanLimit::BytesOrCount(b, c) => {
 			// Create the result set
 			let mut res = Vec::with_capacity(c.min(4096) as usize);
-			// Count the bytes fetched
-			let mut bytes_fetched = 0usize;
 			// Check that we don't exceed the count limit AND the byte limit
-			while res.len() < c as usize && bytes_fetched < b as usize {
+			while res.len() < c as usize && key_bytes < b as u64 {
 				// Check the key
 				if let Some(k) = iter.next() {
-					bytes_fetched += k.len();
+					key_bytes += k.len() as u64;
 					res.push(k);
 				} else {
 					break;
 				}
 			}
-			// Return the result
 			res
 		}
+	};
+	KeysResult {
+		keys,
+		key_bytes,
 	}
 }
 
 // Consume and iterate over keys and values
-fn consume_vals<I: Iterator<Item = (Key, Val)>>(iter: &mut I, limit: ScanLimit) -> Vec<(Key, Val)> {
-	match limit {
+fn consume_vals<I: Iterator<Item = (Key, Val)>>(iter: &mut I, limit: ScanLimit) -> ScanResult {
+	// Track the cumulative key/value bytes for the metric. The byte-bounded
+	// limit branches still rely on `bytes_fetched` (key + value bytes) to
+	// decide when to stop, so the two counters are kept separate.
+	let mut key_bytes = 0u64;
+	let mut value_bytes = 0u64;
+	let values = match limit {
 		ScanLimit::Count(c) => {
 			// Create the result set
 			let mut res = Vec::with_capacity(c.min(4096) as usize);
@@ -491,49 +487,61 @@ fn consume_vals<I: Iterator<Item = (Key, Val)>>(iter: &mut I, limit: ScanLimit) 
 			while res.len() < c as usize {
 				// Check the key and value
 				if let Some((k, v)) = iter.next() {
+					key_bytes += k.len() as u64;
+					value_bytes += v.len() as u64;
 					res.push((k, v));
 				} else {
 					break;
 				}
 			}
-			// Return the result
 			res
 		}
 		ScanLimit::Bytes(b) => {
 			// Create the result set
 			let mut res = Vec::with_capacity((b / ESTIMATED_BYTES_PER_KV).min(4096) as usize);
 			// Count the bytes fetched
-			let mut bytes_fetched = 0usize;
+			let mut bytes_fetched = 0u64;
 			// Check that we don't exceed the byte limit
-			while bytes_fetched < b as usize {
+			while bytes_fetched < b as u64 {
 				// Check the key and value
 				if let Some((k, v)) = iter.next() {
-					bytes_fetched += k.len() + v.len();
+					let key_len = k.len() as u64;
+					let value_len = v.len() as u64;
+					bytes_fetched += key_len + value_len;
+					key_bytes += key_len;
+					value_bytes += value_len;
 					res.push((k, v));
 				} else {
 					break;
 				}
 			}
-			// Return the result
 			res
 		}
 		ScanLimit::BytesOrCount(b, c) => {
 			// Create the result set
 			let mut res = Vec::with_capacity(c.min(4096) as usize);
 			// Count the bytes fetched
-			let mut bytes_fetched = 0usize;
+			let mut bytes_fetched = 0u64;
 			// Check that we don't exceed the count limit AND the byte limit
-			while res.len() < c as usize && bytes_fetched < b as usize {
+			while res.len() < c as usize && bytes_fetched < b as u64 {
 				// Check the key and value
 				if let Some((k, v)) = iter.next() {
-					bytes_fetched += k.len() + v.len();
+					let key_len = k.len() as u64;
+					let value_len = v.len() as u64;
+					bytes_fetched += key_len + value_len;
+					key_bytes += key_len;
+					value_bytes += value_len;
 					res.push((k, v));
 				} else {
 					break;
 				}
 			}
-			// Return the result
 			res
 		}
+	};
+	ScanResult {
+		values,
+		key_bytes,
+		value_bytes,
 	}
 }

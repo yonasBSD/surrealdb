@@ -57,6 +57,16 @@ impl Document {
 					// don't retry to
 					if !retryable || self.is_specific_record_id() {
 						ctx.tx().rollback_to_save_point().await?;
+						// Discard any `mutated` signal recorded
+						// during the rolled-back create branch so
+						// the per-statement affected-row counter
+						// does not inflate from work that has been
+						// undone (notably the `stm.ignore` path
+						// below, which surfaces as
+						// `IgnoreError::Ignore` and would otherwise
+						// trip the `doc.mutated` check in
+						// `Document::process`).
+						self.mutated = false;
 
 						// Ignore flag; disables error.
 						// Error::Ignore is never raised to the user.
@@ -86,6 +96,9 @@ impl Document {
 					// if not retryable return the error.
 					if !retryable {
 						ctx.tx().rollback_to_save_point().await?;
+						// Discard any `mutated` signal recorded
+						// during the rolled-back create branch.
+						self.mutated = false;
 
 						// Ignore flag; disables error.
 						// Error::Ignore is never raised to the user.
@@ -108,6 +121,9 @@ impl Document {
 					// we have to rollback to the save point, even though retryable is false.
 					// this is because we have to guarantee atomicity of the insert.
 					ctx.tx().rollback_to_save_point().await?;
+					// Discard any `mutated` signal recorded during
+					// the rolled-back create branch.
+					self.mutated = false;
 
 					return Err(IgnoreError::Error(e));
 				}
@@ -129,6 +145,12 @@ impl Document {
 		// This ensures we can properly handle ON DUPLICATE KEY UPDATE by
 		// rolling back to the state before the failed insert attempt.
 		ctx.tx().rollback_to_save_point().await?;
+		// Discard any `mutated` signal recorded during the rolled-back
+		// create branch (e.g. `store_record_data` succeeded but a
+		// later step returned `IndexExists` from a materialised view's
+		// unique index). `insert_update` will re-mark `mutated` only
+		// if its own `store_record_data` runs.
+		self.mutated = false;
 
 		if ctx.is_done(None).await? {
 			// Don't process the document

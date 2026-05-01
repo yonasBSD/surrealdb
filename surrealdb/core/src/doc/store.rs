@@ -110,7 +110,10 @@ impl Document {
 			// Let's update the stored value for the specified key
 			_ => ctx.tx().set_record(ns, db, &rid.table, &rid.key, doc).await,
 		}?;
-		// Carry on
+		// KV write succeeded; mark the document as mutated so the
+		// per-statement affected-row counter (bumped from
+		// `Document::process`) reflects this row.
+		self.mutated = true;
 		Ok(())
 	}
 }

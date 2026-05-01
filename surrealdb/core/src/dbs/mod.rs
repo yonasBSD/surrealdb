@@ -15,6 +15,7 @@ mod response;
 mod result;
 mod session;
 mod statement;
+mod statement_counters;
 mod store;
 mod variables;
 
@@ -30,6 +31,7 @@ pub(crate) use self::options::{Force, MessageBroker, Options};
 pub use self::response::{QueryResult, QueryResultBuilder, QueryType, Status};
 pub use self::session::{NewPlannerStrategy, Session};
 pub(crate) use self::statement::Statement;
+pub(crate) use self::statement_counters::StatementCounters;
 
 #[cfg(storage)]
 mod file;

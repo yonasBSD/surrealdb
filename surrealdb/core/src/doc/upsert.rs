@@ -67,6 +67,11 @@ impl Document {
 				}
 				Err(e) => {
 					ctx.tx().rollback_to_save_point().await?;
+					// Discard any `mutated` signal recorded during
+					// the rolled-back create branch so the
+					// per-statement affected-row counter does not
+					// inflate from work that has been undone.
+					self.mutated = false;
 					return Err(IgnoreError::Error(e));
 				}
 			},
@@ -83,6 +88,12 @@ impl Document {
 		// Create failed so now fall back to running an update.
 
 		ctx.tx().rollback_to_save_point().await?;
+		// Discard any `mutated` signal recorded during the rolled-back
+		// create branch (e.g. `store_record_data` succeeded before a
+		// later step returned `IndexExists` from a unique-indexed
+		// view). `upsert_update` will re-mark `mutated` only if its
+		// own `store_record_data` runs.
+		self.mutated = false;
 
 		if ctx.is_done(None).await? {
 			return Err(IgnoreError::Ignore);

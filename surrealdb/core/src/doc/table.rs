@@ -682,7 +682,7 @@ impl Document {
 				tempfiles: false,
 			};
 
-			let value = recalc_stmt.compute(stk, ctx, opt, None).await?;
+			let value = stk.run(|stk| recalc_stmt.compute(stk, ctx, opt, None)).await?;
 
 			let Value::Array(Array(values)) = value else {
 				fail!("Aggregate recalculation select statement return an invalid result");
@@ -1092,7 +1092,7 @@ impl Document {
 				tempfiles: false,
 			};
 
-			let value = recalc_stmt.compute(stk, ctx, opt, None).await?;
+			let value = stk.run(|stk| recalc_stmt.compute(stk, ctx, opt, None)).await?;
 
 			let Value::Array(Array(values)) = value else {
 				fail!("Aggregate recalculation select statement return an invalid result");
@@ -1236,6 +1236,7 @@ impl Document {
 			initial_reduced: CursorDoc::new(None, None, Value::None),
 			record_strategy: RecordStrategy::KeysAndValues,
 			input_data: None,
+			mutated: false,
 			id: Some(id),
 		};
 

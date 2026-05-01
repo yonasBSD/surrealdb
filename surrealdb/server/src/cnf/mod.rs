@@ -195,10 +195,6 @@ pub static RUNTIME_MAX_BLOCKING_THREADS: LazyLock<usize> =
 pub static TELEMETRY_PROVIDER: LazyLock<String> =
 	lazy_env_parse!("SURREAL_TELEMETRY_PROVIDER", String);
 
-/// If set then use this as value for the namespace label when sending telemetry
-pub static TELEMETRY_NAMESPACE: LazyLock<Option<String>> =
-	lazy_env_parse!("SURREAL_TELEMETRY_NAMESPACE", Option<String>);
-
 /// Whether to disable sending traces to the OpenTelemetry collector (default:
 /// false)
 pub static TELEMETRY_DISABLE_TRACING: LazyLock<bool> =
@@ -208,6 +204,35 @@ pub static TELEMETRY_DISABLE_TRACING: LazyLock<bool> =
 /// false)
 pub static TELEMETRY_DISABLE_METRICS: LazyLock<bool> =
 	lazy_env_parse!("SURREAL_TELEMETRY_DISABLE_METRICS", bool);
+
+/// Whether to expose a Prometheus `/metrics` endpoint on the main HTTP port
+/// (default: true).
+///
+/// When enabled:
+/// - Unauthenticated scrapes receive the subset of metrics named in
+///   [`crate::observe::public::PUBLIC_METRICS`].
+/// - Requests carrying a root-level session receive the full community registry plus the extended
+///   registry when a composer extension has contributed one.
+///
+/// Multi-tenant deployments (e.g. Spectron) that do not want to expose any
+/// workload signals should set this to `false` and, if scraping is needed,
+/// front the server with an auth-aware reverse proxy.
+pub static METRICS_ENABLED: LazyLock<bool> = lazy_env_parse!("SURREAL_METRICS_ENABLED", bool, true);
+
+/// Cadence (in seconds) at which the cached process snapshot used by the
+/// `surrealdb.process.{memory,cpu_percent}` observable gauges is refreshed.
+///
+/// A background task runs while metrics are enabled (Prometheus and / or
+/// OTLP) and calls
+/// [`surrealdb_core::observe::refresh_process_snapshot`] on this cadence
+/// so OTLP-only deployments do not see flat-lined process metrics
+/// between exports. The default of `5` seconds gives stable CPU%
+/// readings (sysinfo computes CPU% as a delta since the last refresh,
+/// so very short intervals amplify scheduler jitter) while keeping the
+/// per-refresh overhead well under 0.05% of one core. Operators
+/// running tighter or looser metric pipelines can override.
+pub static PROCESS_METRICS_REFRESH_INTERVAL: LazyLock<u64> =
+	lazy_env_parse!("SURREAL_PROCESS_METRICS_REFRESH_INTERVAL", u64, 5);
 
 /// The version identifier of this build
 pub static PKG_VERSION: LazyLock<String> = LazyLock::new(|| {

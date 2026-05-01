@@ -10,6 +10,10 @@ use crate::dbs::capabilities::{ExperimentalTarget, MethodTarget};
 use crate::dbs::{QueryResult, QueryType, Session};
 use crate::iam::token::Token;
 use crate::kvs::{Datastore, LockType, TransactionType};
+use crate::observe::{
+	AuthAction, AuthEvent, AuthEventSafe, AuthScope, Outcome, RpcEvent, RpcEventSafe,
+	TenantIdentity,
+};
 use crate::rpc::args::extract_args;
 use crate::rpc::{
 	DbResult, Method, bad_lq_config, invalid_params, method_not_allowed, method_not_found,
@@ -42,6 +46,21 @@ fn singular(value: &PublicValue) -> bool {
 		PublicValue::Object(_) => true,
 		PublicValue::RecordId(t) => !matches!(t.key, PublicRecordIdKey::Range(_)),
 		_ => false,
+	}
+}
+
+/// Map an RPC [`Method`] to an [`AuthAction`] when it represents an auth
+/// lifecycle operation. Returns `None` for non-auth methods so the caller can
+/// skip emitting an [`AuthEvent`] without branching on every variant.
+const fn method_to_auth_action(method: Method) -> Option<AuthAction> {
+	match method {
+		Method::Signup => Some(AuthAction::Signup),
+		Method::Signin => Some(AuthAction::Signin),
+		Method::Authenticate => Some(AuthAction::Authenticate),
+		Method::Refresh => Some(AuthAction::Refresh),
+		Method::Invalidate => Some(AuthAction::Invalidate),
+		Method::Revoke => Some(AuthAction::Revoke),
+		_ => None,
 	}
 }
 
@@ -163,6 +182,15 @@ pub trait RpcProtocol {
 	/// is the raw value from the client request (`None` when the client did
 	/// not specify one). Session-management methods (`attach`, `detach`) use
 	/// `client_session` to reject calls with no explicit session ID.
+	///
+	/// Wraps the dispatch in a timer and fires an
+	/// [`crate::observe::RpcEvent`] on completion regardless of outcome. The
+	/// safe half of the event carries only the bounded [`Method`] and the
+	/// outcome label; the context half carries the current session's
+	/// namespace/database/user (ignored by the community metrics observer
+	/// but consumed by enterprise audit sinks). Auth-related methods
+	/// additionally fan out an [`AuthEvent`] so auth attempt counters can
+	/// be broken out by action/scope/outcome.
 	async fn execute(
 		&self,
 		txn: Option<Uuid>,
@@ -171,57 +199,102 @@ pub trait RpcProtocol {
 		method: Method,
 		params: PublicArray,
 	) -> Result<DbResult, surrealdb_types::Error> {
-		// Check if capabilities allow executing the requested RPC method
-		if !self.kvs().allows_rpc_method(&MethodTarget {
-			method,
-		}) {
-			warn!("Capabilities denied RPC method call attempt, target: '{method}'");
-			return Err(method_not_allowed(method.to_string()));
+		let start = web_time::Instant::now();
+		let result: Result<DbResult, surrealdb_types::Error> = async {
+			// Check if capabilities allow executing the requested RPC method
+			if !self.kvs().allows_rpc_method(&MethodTarget {
+				method,
+			}) {
+				warn!("Capabilities denied RPC method call attempt, target: '{method}'");
+				return Err(method_not_allowed(method.to_string()));
+			}
+			// Execute the desired method
+			match method {
+				Method::Ping => Ok(DbResult::Other(PublicValue::None)),
+				Method::Info => self.info(txn, session).await,
+				Method::Use => self.yuse(session, params).await,
+				Method::Signup => self.signup(session, params).await,
+				Method::Signin => self.signin(session, params).await,
+				Method::Authenticate => self.authenticate(session, params).await,
+				Method::Refresh => self.refresh(session, params).await,
+				Method::Invalidate => self.invalidate(session).await,
+				Method::Revoke => self.revoke(params).await,
+				Method::Reset => self.reset(session).await,
+				Method::Kill => self.kill(txn, session, params).await,
+				Method::Live => self.live(txn, session, params).await,
+				Method::Set => self.set(session, params).await,
+				Method::Unset => self.unset(session, params).await,
+				Method::Query => self.query(txn, session, params).await,
+				Method::Version => self.version(txn, params).await,
+				Method::Begin => self.begin(txn, session).await,
+				Method::Commit => self.commit(txn, session, params).await,
+				Method::Cancel => self.cancel(txn, session, params).await,
+				Method::Sessions => self.sessions().await,
+				Method::Attach => match client_session {
+					Some(id) => self.attach(id).await,
+					None => Err(invalid_params("Expected a session ID")),
+				},
+				Method::Detach => match client_session {
+					Some(id) => self.detach(id).await,
+					None => Err(invalid_params("Expected a session ID")),
+				},
+				// Deprecated methods
+				Method::Select => self.select(txn, session, params).await,
+				Method::Insert => self.insert(txn, session, params).await,
+				Method::Create => self.create(txn, session, params).await,
+				Method::Upsert => self.upsert(txn, session, params).await,
+				Method::Update => self.update(txn, session, params).await,
+				Method::Merge => self.merge(txn, session, params).await,
+				Method::Patch => self.patch(txn, session, params).await,
+				Method::Delete => self.delete(txn, session, params).await,
+				Method::Relate => self.relate(txn, session, params).await,
+				Method::Run => self.run(txn, session, params).await,
+				Method::InsertRelation => self.insert_relation(txn, session, params).await,
+				_ => Err(method_not_found(method.to_string())),
+			}
 		}
-		// Execute the desired method
-		match method {
-			Method::Ping => Ok(DbResult::Other(PublicValue::None)),
-			Method::Info => self.info(txn, session).await,
-			Method::Use => self.yuse(session, params).await,
-			Method::Signup => self.signup(session, params).await,
-			Method::Signin => self.signin(session, params).await,
-			Method::Authenticate => self.authenticate(session, params).await,
-			Method::Refresh => self.refresh(session, params).await,
-			Method::Invalidate => self.invalidate(session).await,
-			Method::Revoke => self.revoke(params).await,
-			Method::Reset => self.reset(session).await,
-			Method::Kill => self.kill(txn, session, params).await,
-			Method::Live => self.live(txn, session, params).await,
-			Method::Set => self.set(session, params).await,
-			Method::Unset => self.unset(session, params).await,
-			Method::Query => self.query(txn, session, params).await,
-			Method::Version => self.version(txn, params).await,
-			Method::Begin => self.begin(txn, session).await,
-			Method::Commit => self.commit(txn, session, params).await,
-			Method::Cancel => self.cancel(txn, session, params).await,
-			Method::Sessions => self.sessions().await,
-			Method::Attach => match client_session {
-				Some(id) => self.attach(id).await,
-				None => Err(invalid_params("Expected a session ID")),
+		.await;
+		let outcome = Outcome::from(&result);
+		// Resolve session context for the observer event. An unknown
+		// session ID yields an empty `TenantIdentity` rather than an
+		// error, keeping the metrics path infallible. We capture the
+		// scope inside the same lock acquisition to avoid a second
+		// lookup for auth events. Routing through
+		// `TenantIdentity::from_session` applies the documented
+		// record/anonymous collapsing rule (anon -> `None`,
+		// record-access -> `<record>` sentinel) so per-tenant /
+		// dimensional dashboards stay bounded and audit destinations
+		// never receive raw record-access principal ids.
+		let (identity, scope) = match self.get_session(&session) {
+			Ok(session_lock) => {
+				let s = session_lock.read().await;
+				let scope = AuthScope::from(s.au.level());
+				(TenantIdentity::from_session(&s), scope)
+			}
+			Err(_) => (TenantIdentity::default(), AuthScope::None),
+		};
+		let observer = self.kvs().observer();
+		observer.on_rpc_complete(&RpcEvent {
+			safe: RpcEventSafe {
+				method,
+				outcome,
+				duration: start.elapsed(),
+				error_class: None,
 			},
-			Method::Detach => match client_session {
-				Some(id) => self.detach(id).await,
-				None => Err(invalid_params("Expected a session ID")),
-			},
-			// Deprecated methods
-			Method::Select => self.select(txn, session, params).await,
-			Method::Insert => self.insert(txn, session, params).await,
-			Method::Create => self.create(txn, session, params).await,
-			Method::Upsert => self.upsert(txn, session, params).await,
-			Method::Update => self.update(txn, session, params).await,
-			Method::Merge => self.merge(txn, session, params).await,
-			Method::Patch => self.patch(txn, session, params).await,
-			Method::Delete => self.delete(txn, session, params).await,
-			Method::Relate => self.relate(txn, session, params).await,
-			Method::Run => self.run(txn, session, params).await,
-			Method::InsertRelation => self.insert_relation(txn, session, params).await,
-			_ => Err(method_not_found(method.to_string())),
+			ctx: identity.to_rpc_ctx(),
+		});
+		if let Some(action) = method_to_auth_action(method) {
+			observer.on_auth_event(&AuthEvent {
+				safe: AuthEventSafe {
+					action,
+					scope,
+					outcome,
+					error_class: None,
+				},
+				ctx: identity.to_auth_ctx(),
+			});
 		}
+		result
 	}
 
 	// ------------------------------

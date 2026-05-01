@@ -19,6 +19,7 @@ use super::config::ConfigCheck;
 use crate::dbs;
 use crate::dbs::StartCommandDbsOptions;
 use crate::ntw::RouterFactory;
+use crate::observe::ObservabilityRuntime;
 
 #[derive(Args, Debug)]
 pub struct McpCommandArguments {
@@ -63,7 +64,11 @@ pub struct McpCommandArguments {
 
 /// Start the MCP server over stdio.
 pub async fn init<
-	C: TransactionBuilderFactory + RouterFactory + ConfigCheck + BucketStoreProvider,
+	C: TransactionBuilderFactory
+		+ RouterFactory
+		+ ConfigCheck
+		+ BucketStoreProvider
+		+ crate::observe::ObservabilityProvider,
 >(
 	composer: C,
 	McpCommandArguments {
@@ -74,6 +79,7 @@ pub async fn init<
 		password: pass,
 		dbs: dbs_opts,
 	}: McpCommandArguments,
+	runtime: ObservabilityRuntime,
 ) -> Result<()> {
 	// Install the rustls process-default crypto provider before any TLS
 	// operations occur. Under `feature = "fips"` this asserts FIPS mode is
@@ -106,8 +112,19 @@ pub async fn init<
 
 	crate::env::init()?;
 
+	// MCP stdio has no `/metrics` HTTP endpoint, so we skip building a
+	// `MetricsObserver`. Composer-contributed observers (audit,
+	// slow-query, ...) still wire through `create_observer_with_runtime`
+	// so they reach the runtime's audit logger / meter providers,
+	// mirroring the `METRICS_ENABLED=false` branch in
+	// `start::build_observability`.
+	let observer = <C as crate::observe::ObservabilityProvider>::create_observer_with_runtime(
+		&composer, &runtime,
+	);
+
 	let canceller = CancellationToken::new();
-	let (datastore, _recv) = dbs::init::<C>(composer, &config, canceller.clone(), dbs_opts).await?;
+	let (datastore, _recv) =
+		dbs::init::<C>(composer, &config, canceller.clone(), observer, dbs_opts).await?;
 	let datastore = Arc::new(datastore);
 
 	// The STDIO transport is a locally-trusted, in-process connection: the

@@ -32,7 +32,7 @@ use std::time::Duration;
 use anyhow::Result;
 use axum::response::Redirect;
 use axum::routing::get;
-use axum::{Router, middleware};
+use axum::{Extension, Router, middleware};
 use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
 use http::header;
@@ -46,7 +46,6 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 use tower_http::ServiceBuilderExt;
 use tower_http::add_extension::AddExtensionLayer;
-use tower_http::auth::AsyncRequireAuthorizationLayer;
 use tower_http::compression::CompressionLayer;
 use tower_http::compression::predicate::{NotForContentType, Predicate, SizeAbove};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
@@ -59,8 +58,8 @@ use tower_http::trace::TraceLayer;
 use crate::cli::Config;
 use crate::cnf;
 use crate::ntw::signals::graceful_shutdown;
+use crate::observe::{HttpMetricsLayer, MetricsState};
 use crate::rpc::{RpcState, notifications};
-use crate::telemetry::metrics::HttpMetricsLayer;
 
 const LOG: &str = "surrealdb::net";
 
@@ -295,6 +294,25 @@ impl SurrealRouter {
 		notifications: Receiver<Notification>,
 		ct: CancellationToken,
 	) -> Result<Self> {
+		Self::build_with_metrics::<F>(opt, ds, notifications, ct, None).await
+	}
+
+	/// Build a fully-configured [`SurrealRouter`], optionally mounting the
+	/// Prometheus `/metrics` endpoint.
+	///
+	/// When `metrics` is `Some(..)` the `/metrics` route is merged into the
+	/// router tree before HTTP middleware is applied, so it participates in
+	/// the standard auth/trace stack. Unauthenticated scrapers still succeed
+	/// (the auth middleware allows anonymous sessions); the `/metrics`
+	/// handler itself is responsible for filtering the response based on
+	/// whether the session is authenticated as a root operator.
+	pub async fn build_with_metrics<F: RouterFactory>(
+		opt: impl Into<RouterOptions>,
+		ds: Arc<Datastore>,
+		notifications: Receiver<Notification>,
+		ct: CancellationToken,
+		metrics: Option<MetricsState>,
+	) -> Result<Self> {
 		let opt = opt.into();
 		let app_state = AppState {
 			client_ip: opt.client_ip,
@@ -368,6 +386,21 @@ impl SurrealRouter {
 			]
 		};
 
+		// Clone the community observer once up-front so the RPC state can
+		// adjust the LIVE-query gauge / notification counter without going
+		// through the fan-out (those are community-side only).
+		let prometheus_observer = metrics.as_ref().map(|m| m.observer.clone());
+		// Source the HTTP tower layer's observer from the datastore so
+		// `NetworkBytesEvent`s reach whichever observer the embedder
+		// installed -- audit composers in particular contribute a
+		// non-noop observer regardless of whether `/metrics` is mounted.
+		// Sourcing from `metrics.events_observer` would cause HTTP byte
+		// events to be dropped when `SURREAL_METRICS_ENABLED=false`,
+		// while WebSocket bytes (which already read
+		// `datastore.observer()`) continue to flow -- producing an
+		// asymmetric audit trail.
+		let events_observer = Some(ds.observer().clone());
+
 		let service = service
 			.layer(AddExtensionLayer::new(app_state))
 			.layer(middleware::from_fn(client_ip::client_ip_middleware))
@@ -379,9 +412,9 @@ impl SurrealRouter {
 					.on_response(tracer::HttpTraceLayerHooks)
 					.on_failure(tracer::HttpTraceLayerHooks),
 			)
-			.layer(HttpMetricsLayer)
+			.layer(HttpMetricsLayer::new(events_observer))
 			.layer(SetSensitiveResponseHeadersLayer::from_shared(headers))
-			.layer(AsyncRequireAuthorizationLayer::new(auth::SurrealAuth))
+			.layer(auth::SurrealAuthLayer)
 			.layer(headers::add_server_header(!opt.no_identification_headers)?)
 			.layer(headers::add_version_header(!opt.no_identification_headers)?)
 			// Apply CORS headers to relevant responses
@@ -408,11 +441,24 @@ impl SurrealRouter {
 		// Build the route tree from the RouterFactory
 		let axum_app = F::configure_router();
 
+		// Optionally merge the `/metrics` endpoint before applying middleware
+		// so it inherits the standard auth/trace layers. The `MetricsState`
+		// is exposed via an `Extension` layer applied to the full merged
+		// router (other handlers simply ignore it).
+		let axum_app = if let Some(ms) = metrics {
+			axum_app.merge(crate::observe::router::router()).layer(Extension(ms))
+		} else {
+			axum_app
+		};
+
 		// Apply middleware
 		let axum_app = axum_app.layer(service);
 
-		// Create RpcState with persistent HTTP handler
-		let rpc_state = Arc::new(RpcState::new(ds.clone()));
+		// Create RpcState with persistent HTTP handler. The Prometheus observer
+		// (if metrics are enabled) is threaded through so the WebSocket I/O
+		// paths can increment per-protocol byte counters without grabbing any
+		// global state.
+		let rpc_state = Arc::new(RpcState::new_with_metrics(ds.clone(), prometheus_observer));
 
 		// Apply state
 		let axum_app = axum_app.with_state(rpc_state.clone());
@@ -519,8 +565,26 @@ pub async fn init<F: RouterFactory>(
 	recv: Receiver<Notification>,
 	ct: CancellationToken,
 ) -> Result<()> {
+	init_with_metrics::<F>(opt, ds, recv, ct, None).await
+}
+
+/// Initialize and run the SurrealDB HTTP server with optional Prometheus
+/// `/metrics` support.
+///
+/// When `metrics` is `Some(..)`, the `/metrics` route is mounted on the main
+/// HTTP listener with the provided [`MetricsState`] available as an
+/// `Extension`. Pass `None` to keep the endpoint disabled.
+///
+/// See [`init`] for the full startup flow and parameter semantics.
+pub async fn init_with_metrics<F: RouterFactory>(
+	opt: &Config,
+	ds: Arc<Datastore>,
+	recv: Receiver<Notification>,
+	ct: CancellationToken,
+	metrics: Option<MetricsState>,
+) -> Result<()> {
 	// Build the fully-configured router
-	let surreal = SurrealRouter::build::<F>(opt, ds, recv, ct).await?;
+	let surreal = SurrealRouter::build_with_metrics::<F>(opt, ds, recv, ct, metrics).await?;
 
 	// Get a new server handler
 	let handle = Handle::new();

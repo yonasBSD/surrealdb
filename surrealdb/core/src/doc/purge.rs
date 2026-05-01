@@ -23,7 +23,7 @@ use crate::val::{RecordId, Value};
 
 impl Document {
 	pub(super) async fn purge(
-		&self,
+		&mut self,
 		stk: &mut Stk,
 		ctx: &FrozenContext,
 		opt: &Options,
@@ -41,6 +41,10 @@ impl Document {
 			let (ns, db) = ctx.expect_ns_db_ids(opt).await?;
 			// Purge the record data
 			txn.del_record(ns, db, &rid.table, &rid.key).await?;
+			// KV write succeeded; mark the document as mutated.
+			// Edge / reference cleanup that follows is bookkeeping
+			// for the same row and must not change the count.
+			self.mutated = true;
 			// Purge the record edges
 			self.purge_edges(stk, ctx, opt, rid.as_ref()).await?;
 			// Purge any record references

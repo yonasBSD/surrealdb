@@ -48,7 +48,7 @@ pub(crate) mod slowlog;
 pub(crate) mod tasklease;
 pub(crate) mod version;
 
-pub use api::{ScanLimit, Transactable};
+pub use api::{GetMultiResult, KeysResult, ScanLimit, ScanResult, Transactable};
 pub use consts::{
 	COUNT_BATCH_SIZE, ESTIMATED_BYTES_PER_KEY, ESTIMATED_BYTES_PER_KV, INDEXING_BATCH_SIZE,
 	NORMAL_BATCH_SIZE,

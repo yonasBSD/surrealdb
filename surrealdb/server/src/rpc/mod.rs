@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::stream::FuturesUnordered;
-use opentelemetry::Context as TelemetryContext;
 use surrealdb_core::channel::Receiver;
 #[cfg(feature = "graphql")]
 use surrealdb_core::gql::NotificationRouter;
@@ -22,7 +21,6 @@ use uuid::Uuid;
 #[cfg(feature = "graphql")]
 use crate::cnf::GQL_SUBSCRIPTION_CHANNEL_CAPACITY;
 use crate::rpc::websocket::Websocket;
-use crate::telemetry::metrics::ws::NotificationContext;
 
 static CONN_CLOSED_ERR: &str = "Connection closed normally";
 /// A type alias for an RPC Connection
@@ -39,16 +37,28 @@ pub struct RpcState {
 	pub live_queries: LiveQueries,
 	/// HTTP RPC handler with persistent sessions
 	pub http: Arc<crate::rpc::http::Http>,
+	/// Prometheus observer for per-protocol network byte counters. `None`
+	/// when `SURREAL_METRICS_ENABLED=false` so the byte counter path is
+	/// entirely inert for unconfigured deployments.
+	pub metrics_observer: Option<Arc<crate::observe::metrics::MetricsObserver>>,
 	#[cfg(feature = "graphql")]
 	pub(crate) notification_router: Arc<NotificationRouter>,
 }
 
 impl RpcState {
 	pub fn new(datastore: Arc<surrealdb_core::kvs::Datastore>) -> Self {
+		Self::new_with_metrics(datastore, None)
+	}
+
+	pub fn new_with_metrics(
+		datastore: Arc<surrealdb_core::kvs::Datastore>,
+		metrics_observer: Option<Arc<crate::observe::metrics::MetricsObserver>>,
+	) -> Self {
 		Self {
 			web_sockets: RwLock::new(HashMap::new()),
 			live_queries: RwLock::new(HashMap::new()),
 			http: Arc::new(crate::rpc::http::Http::new(datastore)),
+			metrics_observer,
 			#[cfg(feature = "graphql")]
 			notification_router: Arc::new(NotificationRouter::new(
 				*GQL_SUBSCRIPTION_CHANNEL_CAPACITY,
@@ -110,7 +120,14 @@ pub async fn notifications(
 					.copied();
 				if let Some((ws_id, session_id)) = live_query
 					&& let Some(rpc) = state.web_sockets.read().await.get(&ws_id).cloned() {
-						let live_id = notification.id.to_string();
+						// Count the notification once we know it will
+						// actually be delivered to a client. We
+						// deliberately avoid counting drops (unknown
+						// LQ id or disconnected WS) so the metric
+						// mirrors end-to-end deliveries.
+						if let Some(obs) = state.metrics_observer.as_ref() {
+							obs.record_live_query_notification();
+						}
 						// Hide the connection's implicit session UUID from the
 						// client: when a LIVE query was registered without an
 						// explicit session_id it resolves to `rpc.id`, which
@@ -124,13 +141,9 @@ pub async fn notifications(
 							wire_session_id,
 							DbResult::Live(notification),
 						);
-						let cx = TelemetryContext::new();
-						let not_ctx =
-							NotificationContext::default().with_live_id(live_id);
-						let cx = Arc::new(cx.with_value(not_ctx));
 						let format = rpc.format;
 						let sender = rpc.channel.clone();
-						let future = crate::rpc::response::send(message, cx, format, sender);
+						let future = crate::rpc::response::send(message, format, sender);
 						futures.push(future);
 				}
 			},

@@ -37,6 +37,18 @@ pub(crate) struct Document {
 	pub(super) current_reduced: CursorDoc,
 	pub(super) record_strategy: RecordStrategy,
 	pub(super) input_data: Option<ComputedData>,
+	/// Whether this document mutated the underlying KV store during
+	/// processing. Set to `true` after `store_record_data` /
+	/// `purge` complete a real KV write; consumed by
+	/// [`crate::doc::Document::process`] to bump the per-statement
+	/// affected-row counter exactly once per real mutation.
+	///
+	/// Stays `false` on pre-mutation `IgnoreError::Ignore` paths
+	/// (`check_record_exists`, `check_where_condition`, permission
+	/// gates, `ctx.is_done` short-circuits) and on no-op `set_record`
+	/// calls suppressed by `!self.changed()`, so the counter never
+	/// inflates from rows that were filtered or unchanged.
+	pub(super) mutated: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -282,6 +294,7 @@ impl Document {
 			initial_reduced: CursorDoc::new(id, ir, val),
 			record_strategy: rs,
 			input_data: None,
+			mutated: false,
 		}
 	}
 

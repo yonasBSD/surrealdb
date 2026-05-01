@@ -8,11 +8,13 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use futures::stream::FuturesUnordered;
 use futures::{Sink, SinkExt, StreamExt};
-use opentelemetry::Context as TelemetryContext;
-use opentelemetry::trace::FutureExt;
 use surrealdb_core::dbs::Session;
 use surrealdb_core::kvs::{Datastore, LockType, Transaction, TransactionType};
 use surrealdb_core::mem::ALLOC;
+use surrealdb_core::observe::{
+	NetworkBytesEvent, NetworkBytesEventCtx, NetworkBytesEventSafe, NetworkDirection,
+	SessionAction, SessionEvent, SessionEventCtx, SessionEventSafe, SessionProtocol,
+};
 use surrealdb_core::rpc::format::Format;
 use surrealdb_core::rpc::{DbResponse, DbResult, Method, RpcProtocol};
 use surrealdb_types::{Array, Error as TypesError, HashMap, Value};
@@ -31,8 +33,6 @@ use crate::cnf::{
 };
 use crate::rpc::CONN_CLOSED_ERR;
 use crate::rpc::format::WsFormat;
-use crate::telemetry;
-use crate::telemetry::metrics::ws::RequestContext;
 use crate::telemetry::traces::rpc::span_for_request;
 
 /// An error string sent when the server is out of memory
@@ -86,6 +86,9 @@ impl Websocket {
 	) {
 		// Log the succesful WebSocket connection
 		trace!("WebSocket {id} connected");
+		// Record the connect timestamp so we can emit the session lifetime
+		// alongside the disconnect event further down.
+		let connected_at = web_time::Instant::now();
 		// Create a channel for sending messages
 		let (sender, receiver) = channel(*WEBSOCKET_RESPONSE_CHANNEL_SIZE);
 		let rec_limit = datastore.config().max_object_parsing_depth as usize;
@@ -107,8 +110,23 @@ impl Websocket {
 		rpc.set_session(id, Arc::new(RwLock::new(session)));
 		// Add this WebSocket to the list
 		state.web_sockets.write().await.insert(id, rpc.clone());
-		// Start telemetry metrics for this connection
-		telemetry::metrics::ws::on_connect();
+		// Emit a session connect event so observability sinks can track
+		// simultaneous connections without consulting the datastore.
+		// The OTel `rpc.server.active_connections` and
+		// `rpc.server.connection.count` instruments are recorded by
+		// `OtelObserver::on_session_event` from the same dispatch.
+		rpc.datastore.observer().on_session_event(&SessionEvent {
+			safe: SessionEventSafe {
+				action: SessionAction::Connect,
+				protocol: SessionProtocol::WebSocket,
+				duration: None,
+			},
+			ctx: SessionEventCtx {
+				session_id: Some(id),
+				service_name: None,
+				..Default::default()
+			},
+		});
 		// Store all concurrent spawned tasks
 		let mut tasks = JoinSet::new();
 		// Buffer the WebSocket response stream
@@ -146,8 +164,23 @@ impl Websocket {
 		rpc.cleanup_all_lqs().await;
 		// Remove this WebSocket from the list
 		state.web_sockets.write().await.remove(&id);
-		// Stop telemetry metrics for this connection
-		telemetry::metrics::ws::on_disconnect();
+		// Emit a session disconnect event including the full session
+		// lifetime so histogram-based observers can summarise dwell
+		// time. The OTel `rpc.server.active_connections` decrement
+		// flows through `OtelObserver::on_session_event` from this
+		// dispatch.
+		rpc.datastore.observer().on_session_event(&SessionEvent {
+			safe: SessionEventSafe {
+				action: SessionAction::Disconnect,
+				protocol: SessionProtocol::WebSocket,
+				duration: Some(connected_at.elapsed()),
+			},
+			ctx: SessionEventCtx {
+				session_id: Some(id),
+				service_name: None,
+				..Default::default()
+			},
+		});
 	}
 
 	/// Send Ping messages to the client
@@ -206,15 +239,23 @@ impl Websocket {
 				_ = canceller.cancelled() => break,
 				// Retrieve a response from the channel
 				Some(res) = internal_receiver.recv() => {
+					// Capture the byte length before the message is moved
+					// into the sink so we can fold it into the outbound
+					// Prometheus counter when metrics are enabled.
+					let out_bytes = match &res {
+						Message::Text(msg) => msg.len(),
+						Message::Binary(msg) => msg.len(),
+						_ => 0,
+					};
 					// Check if the socket is buffered
-					let res = match buffer {
+					let result = match buffer {
 						// Send the message to the socket buffer
 						true => socket.feed(res).await,
 						// Send the message direct to the socket
 						false => socket.send(res).await
 					};
 					// Check if there was an error
-					if let Err(err) = res {
+					if let Err(err) = result {
 						// Output any errors if not a close error
 						if err.to_string() != CONN_CLOSED_ERR {
 							trace!("WebSocket error: {err}");
@@ -223,6 +264,23 @@ impl Websocket {
 						canceller.cancel();
 						// Exit out of the loop
 						break;
+					}
+					// Record outbound bytes on success. We deliberately avoid
+					// double-counting on the error path above. `ctx` carries
+					// `(namespace, database, user)` from the bound session;
+					// record-access principals collapse to the `<record>`
+					// sentinel in `NetworkBytesEventCtx::from_session` to keep
+					// dimensional cardinality bounded.
+					if out_bytes > 0 {
+						let ctx = rpc.default_network_ctx().await;
+						rpc.datastore.observer().on_network_bytes(&NetworkBytesEvent {
+							safe: NetworkBytesEventSafe {
+								direction: NetworkDirection::Sent,
+								protocol: SessionProtocol::WebSocket,
+								bytes: out_bytes as u64,
+							},
+							ctx,
+						});
 					}
 				},
 				// Wait for a short period of time
@@ -349,26 +407,48 @@ impl Websocket {
 			Message::Binary(ref msg) => msg.len(),
 			_ => 0,
 		};
-		// Prepare span and otel context
+		// Record inbound bytes by dispatching a network event through the
+		// fan-out observer. Ping / Pong / Close / Raw frames report 0 and
+		// the dispatch short-circuits inside each observer. `ctx` is built
+		// from the bound session via `default_network_ctx`; record-access
+		// principals collapse to a `<record>` sentinel to bound dimensional
+		// label cardinality.
+		if len > 0 {
+			let ctx = rpc.default_network_ctx().await;
+			rpc.datastore.observer().on_network_bytes(&NetworkBytesEvent {
+				safe: NetworkBytesEventSafe {
+					direction: NetworkDirection::Received,
+					protocol: SessionProtocol::WebSocket,
+					bytes: len as u64,
+				},
+				ctx,
+			});
+		}
+		// Prepare the per-request tracing span. RPC duration / outcome
+		// is now recorded centrally by `core::rpc::protocol` via
+		// [`RpcEvent`], so we no longer thread an OTel context through
+		// the response path: the tracing span is the only telemetry
+		// frame we keep here.
 		let span = span_for_request(&rpc.id);
+		// `len` is the inbound frame size in bytes. Surfaced through
+		// `NetworkBytesEvent` above, no longer attached to a per-RPC
+		// telemetry context.
+		let _ = len;
 		// Parse the request
 		async move {
 			let span = Span::current();
-			let req_cx = RequestContext::default();
-			let otel_cx = Arc::new(TelemetryContext::new().with_value(req_cx.clone()));
 			// Parse the RPC request structure
 			match rpc.format.req_ws(msg,rec_limit) {
 				Ok(req) => {
-					// Now that we know the method, we can update the span and create otel context
+					// Now that we know the method, update the tracing
+					// span so structured fields show up on the
+					// surrounding span and on any OTel-bridged trace.
 					span.record("rpc.method", req.method.to_str());
 					span.record("otel.name", format!("surrealdb.rpc/{}", req.method));
 					span.record(
 						"rpc.request_id",
 						req.id.clone().map(|id| format!("{id:?}")).unwrap_or_default(),
 					);
-					let otel_cx = Arc::new(TelemetryContext::current_with_value(
-						req_cx.with_method(req.method.to_str()).with_size(len),
-					));
 					// Capture the request id, session id and a cloned channel handle up-front so we
 					// can still build a `DbResponse::failure` if the cancel branch wins the
 					// select below — by the time it fires, `req` and `chn` will have been moved
@@ -376,7 +456,6 @@ impl Websocket {
 					let req_id = req.id.clone();
 					let req_session_id = req.session_id;
 					let cancel_chn = chn.clone();
-					let cancel_otel_cx = otel_cx.clone();
 					let cancel_format = rpc.format;
 					// Process the message
 					tokio::select! {
@@ -391,12 +470,9 @@ impl Websocket {
 						_ = canceller.cancelled() => {
 							crate::rpc::response::send(
 								DbResponse::failure(req_id, req_session_id.map(Into::into), TypesError::internal(REQUEST_CANCELLED.to_string())),
-								cancel_otel_cx.clone(),
 								cancel_format,
 								cancel_chn
-							)
-								.with_context(cancel_otel_cx.as_ref().clone())
-								.await;
+							).await;
 						},
 						// Wait for the message to be processed
 						_ = async move {
@@ -405,24 +481,18 @@ impl Websocket {
 								// Process the response
 								crate::rpc::response::send(
 									DbResponse::failure(req.id, req.session_id.map(Into::into), TypesError::internal(SERVER_SHUTTING_DOWN.to_string())),
-									otel_cx.clone(),
 									rpc.format,
 									chn
-								)
-									.with_context(otel_cx.as_ref().clone())
-									.await;
+								).await;
 							}
 							// Check to see whether we have available memory
 							else if ALLOC.is_beyond_threshold() {
 								// Process the response
 								crate::rpc::response::send(
 									DbResponse::failure(req.id, req.session_id.map(Into::into), TypesError::internal(SERVER_OVERLOADED.to_string())),
-									otel_cx.clone(),
 									rpc.format,
 									chn
-								)
-									.with_context(otel_cx.as_ref().clone())
-									.await;
+								).await;
 							}
 							// Otherwise process the request message
 							else {
@@ -444,12 +514,9 @@ impl Websocket {
 										Ok(result) => DbResponse::success(req.id, req.session_id.map(Into::into), result),
 										Err(err) => DbResponse::failure(req.id, req.session_id.map(Into::into), err),
 									},
-									otel_cx.clone(),
 									rpc.format,
 									chn
-								)
-									.with_context(otel_cx.as_ref().clone())
-									.await;
+								).await;
 							}
 						} => (),
 					}
@@ -458,12 +525,9 @@ impl Websocket {
 					// Process the response
 					crate::rpc::response::send(
 						DbResponse::failure(None, None, err),
-						otel_cx.clone(),
 						rpc.format,
 						chn
-					)
-						.with_context(otel_cx.as_ref().clone())
-						.await;
+					).await;
 				}
 			}
 		}
@@ -509,6 +573,27 @@ impl Websocket {
 		};
 		// Cancel the WebSocket tasks
 		rpc.canceller.cancel();
+	}
+
+	/// Snapshot the connection's default session into a
+	/// [`NetworkBytesEventCtx`] for tenant attribution. Short-circuits
+	/// to the default ctx when the installed observer is a no-op so
+	/// community builds without an audit/dimensional observer pay
+	/// nothing on the byte-counting hot path.
+	///
+	/// The session may flip namespace/database via `USE NS … DB …`
+	/// during the connection's lifetime, so the snapshot is taken
+	/// per-event rather than cached. The cost is at most three
+	/// `String` clones plus a fast read-lock acquire — negligible
+	/// compared to the actual frame transfer.
+	async fn default_network_ctx(&self) -> NetworkBytesEventCtx {
+		if self.datastore.observer().is_noop() {
+			return NetworkBytesEventCtx::default();
+		}
+		match self.get_session(&self.id) {
+			Ok(lock) => NetworkBytesEventCtx::from_session(&*lock.read().await),
+			Err(_) => NetworkBytesEventCtx::default(),
+		}
 	}
 }
 
@@ -624,20 +709,36 @@ impl RpcProtocol for Websocket {
 	/// Live queries are enabled on WebSockets
 	const LQ_SUPPORT: bool = true;
 
-	/// Handles the execution of a LIVE statement
+	/// Handles the execution of a LIVE statement.
+	///
+	/// Increments the Prometheus `surrealdb_live_query_active` gauge when
+	/// metrics are enabled so operators can alert on runaway subscriber counts
+	/// without peeking at internal datastructures.
 	async fn handle_live(&self, lqid: &Uuid, session_id: Uuid) {
 		self.state.live_queries.write().await.insert(*lqid, (self.id, session_id));
+		if let Some(obs) = self.state.metrics_observer.as_ref() {
+			obs.adjust_live_query_active(1);
+		}
 		trace!("Registered live query {lqid} on websocket {}", self.id);
 	}
 
-	/// Handles the execution of a KILL statement
+	/// Handles the execution of a KILL statement.
+	///
+	/// Decrements the active LIVE query gauge only when a registration was
+	/// actually removed so duplicate kills do not drift the counter negative.
 	async fn handle_kill(&self, lqid: &Uuid) {
 		if let Some((id, session_id)) = self.state.live_queries.write().await.remove(lqid) {
+			if let Some(obs) = self.state.metrics_observer.as_ref() {
+				obs.adjust_live_query_active(-1);
+			}
 			trace!("Unregistered live query {lqid} on websocket {id} for session {session_id}");
 		}
 	}
 
-	/// Handles the cleanup of live queries
+	/// Handles the cleanup of live queries for a given session.
+	///
+	/// Batches the gauge update by the number of LIVE queries that were
+	/// actually garbage collected.
 	async fn cleanup_lqs(&self, session_id: &Uuid) {
 		let mut gc = Vec::new();
 		// Find all live queries for to this connection
@@ -649,13 +750,21 @@ impl RpcProtocol for Websocket {
 			}
 			true
 		});
+		if let Some(obs) = self.state.metrics_observer.as_ref() {
+			// `gc.len() as i64` is safe: bounded by the number of live queries
+			// we could plausibly register per session.
+			obs.adjust_live_query_active(-(gc.len() as i64));
+		}
 		// Garbage collect the live queries on this connection
 		if let Err(err) = self.kvs().delete_queries(gc).await {
 			error!("Error handling RPC connection: {err}");
 		}
 	}
 
-	/// Handles the cleanup of live queries
+	/// Handles the cleanup of live queries on WebSocket close.
+	///
+	/// Drops the gauge by the number of LIVE queries attached to this
+	/// connection so the metric tracks the live map exactly.
 	async fn cleanup_all_lqs(&self) {
 		let mut gc = Vec::new();
 		// Find all live queries for to this connection
@@ -667,6 +776,9 @@ impl RpcProtocol for Websocket {
 			}
 			true
 		});
+		if let Some(obs) = self.state.metrics_observer.as_ref() {
+			obs.adjust_live_query_active(-(gc.len() as i64));
+		}
 		// Garbage collect the live queries on this connection
 		if let Err(err) = self.kvs().delete_queries(gc).await {
 			error!("Error handling RPC connection: {err}");
@@ -754,5 +866,118 @@ impl RpcProtocol for Websocket {
 
 		// Return success
 		Ok(DbResult::Other(Value::None))
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::sync::{Arc, Mutex};
+
+	use surrealdb_core::iam::{Auth, Role};
+	use surrealdb_core::kvs::Datastore;
+	use surrealdb_core::observe::{
+		AuthEvent, ExecutionObserver, NetworkBytesEvent, QueryEvent, RpcEvent, SessionEvent,
+		StatementEvent, TransactionEvent,
+	};
+
+	use super::*;
+
+	/// Trivial non-noop observer used to exercise the populated-ctx
+	/// branch of `default_network_ctx`. The default `is_noop` impl
+	/// returns `false`, which is exactly what we need.
+	#[derive(Default)]
+	struct CapturingObserver {
+		events: Mutex<Vec<NetworkBytesEvent>>,
+	}
+
+	impl ExecutionObserver for CapturingObserver {
+		fn on_statement_complete(&self, _e: &StatementEvent) {}
+		fn on_query_complete(&self, _e: &QueryEvent) {}
+		fn on_transaction_complete(&self, _e: &TransactionEvent) {}
+		fn on_rpc_complete(&self, _e: &RpcEvent) {}
+		fn on_auth_event(&self, _e: &AuthEvent) {}
+		fn on_session_event(&self, _e: &SessionEvent) {}
+		fn on_network_bytes(&self, e: &NetworkBytesEvent) {
+			self.events.lock().unwrap().push(e.clone());
+		}
+	}
+
+	async fn ws_with_observer(observer: Option<Arc<dyn ExecutionObserver>>) -> Arc<Websocket> {
+		let mut builder = Datastore::builder();
+		if let Some(obs) = observer {
+			builder = builder.with_observer(obs);
+		}
+		let ds = Arc::new(builder.build_with_path("memory").await.unwrap());
+		let state = Arc::new(crate::rpc::RpcState::new(ds.clone()));
+		let id = Uuid::new_v4();
+		let (tx, _rx) = channel::<Message>(8);
+		Arc::new(Websocket {
+			id,
+			format: Format::Json,
+			state,
+			datastore: ds,
+			sessions: HashMap::new(),
+			transactions: DashMap::new(),
+			shutdown: CancellationToken::new(),
+			canceller: CancellationToken::new(),
+			channel: tx,
+		})
+	}
+
+	#[tokio::test]
+	async fn default_network_ctx_short_circuits_on_noop_observer() {
+		// Default `Datastore` builds with a `NoopObserver`; the helper
+		// must skip the lock entirely and return the default ctx so
+		// community builds pay nothing on the byte hot path. We
+		// install a fully-populated session under the connection id;
+		// if the helper bypassed the noop check it would surface the
+		// session fields, so an empty ctx proves the short-circuit
+		// path was taken.
+		let rpc = ws_with_observer(None).await;
+		let sess = Session {
+			au: Arc::new(Auth::for_root(Role::Owner)),
+			..Session::default()
+		}
+		.with_ns("acme")
+		.with_db("prod");
+		rpc.session_map().insert(rpc.id, Arc::new(RwLock::new(sess)));
+
+		let ctx = rpc.default_network_ctx().await;
+		assert!(ctx.namespace.is_none(), "noop observer must not consult the session");
+		assert!(ctx.database.is_none());
+		assert!(ctx.user.is_none());
+	}
+
+	#[tokio::test]
+	async fn default_network_ctx_reads_session_under_active_observer() {
+		// With a non-noop observer, the helper must read
+		// `(ns, db, user)` from the connection's default session.
+		let observer: Arc<dyn ExecutionObserver> = Arc::new(CapturingObserver::default());
+		let rpc = ws_with_observer(Some(observer)).await;
+		let sess = Session {
+			au: Arc::new(Auth::for_root(Role::Owner)),
+			..Session::default()
+		}
+		.with_ns("acme")
+		.with_db("prod");
+		rpc.session_map().insert(rpc.id, Arc::new(RwLock::new(sess)));
+
+		let ctx = rpc.default_network_ctx().await;
+		assert_eq!(ctx.namespace.as_deref(), Some("acme"));
+		assert_eq!(ctx.database.as_deref(), Some("prod"));
+		assert_eq!(ctx.user.as_deref(), Some("system_auth"));
+	}
+
+	#[tokio::test]
+	async fn default_network_ctx_with_missing_session_returns_default() {
+		// Active observer but no session under `self.id` (corner case
+		// during disconnect/teardown). The helper must fall back to
+		// the default ctx rather than panic or block.
+		let observer: Arc<dyn ExecutionObserver> = Arc::new(CapturingObserver::default());
+		let rpc = ws_with_observer(Some(observer)).await;
+		let ctx = rpc.default_network_ctx().await;
+		assert!(ctx.namespace.is_none());
+		assert!(ctx.database.is_none());
+		assert!(ctx.user.is_none());
 	}
 }

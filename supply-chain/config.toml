@@ -1131,6 +1131,10 @@ criteria = "safe-to-deploy"
 version = "0.31.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.opentelemetry-prometheus-text-exporter]]
+version = "0.2.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.opentelemetry-proto]]
 version = "0.31.0"
 criteria = "safe-to-deploy"

@@ -312,14 +312,26 @@ impl Stream for Scanner<'_, Key> {
 	fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Result<Vec<Key>>>> {
 		let (store, version) = (self.store, self.version);
 		match self.dir {
+			// The streaming scanner only needs the materialised keys; the
+			// per-call key/value byte counts on the underlying result are
+			// already attributed to the parent transaction's metrics by the
+			// time we get here, so we discard them.
 			Direction::Forward => self.next_poll(
 				cx,
-				move |range, limit, skip| Box::pin(store.keys(range, limit, skip, version)),
+				move |range, limit, skip| {
+					Box::pin(async move {
+						store.keys(range, limit, skip, version).await.map(|r| r.keys)
+					})
+				},
 				|v| v,
 			),
 			Direction::Backward => self.next_poll(
 				cx,
-				move |range, limit, skip| Box::pin(store.keysr(range, limit, skip, version)),
+				move |range, limit, skip| {
+					Box::pin(async move {
+						store.keysr(range, limit, skip, version).await.map(|r| r.keys)
+					})
+				},
 				|v| v,
 			),
 		}
@@ -334,14 +346,24 @@ impl Stream for Scanner<'_, (Key, Val)> {
 	) -> Poll<Option<Result<Vec<(Key, Val)>>>> {
 		let (store, version) = (self.store, self.version);
 		match self.dir {
+			// As above for the key-value variant: discard the per-batch byte
+			// counts since the transactor already records them.
 			Direction::Forward => self.next_poll(
 				cx,
-				move |range, limit, skip| Box::pin(store.scan(range, limit, skip, version)),
+				move |range, limit, skip| {
+					Box::pin(async move {
+						store.scan(range, limit, skip, version).await.map(|r| r.values)
+					})
+				},
 				|v| &v.0,
 			),
 			Direction::Backward => self.next_poll(
 				cx,
-				move |range, limit, skip| Box::pin(store.scanr(range, limit, skip, version)),
+				move |range, limit, skip| {
+					Box::pin(async move {
+						store.scanr(range, limit, skip, version).await.map(|r| r.values)
+					})
+				},
 				|v| &v.0,
 			),
 		}

@@ -11,7 +11,7 @@ pub use cnf::MemoryConfig;
 use surrealmx::{Database, DatabaseOptions, KeyIterator, ScanIterator, Transaction as Tx};
 use tokio::sync::RwLock;
 
-use super::api::ScanLimit;
+use super::api::{GetMultiResult, KeysResult, ScanLimit, ScanResult};
 #[cfg(not(target_family = "wasm"))]
 use super::config::{AolMode, SnapshotMode, SyncMode};
 use super::err::{Error, Result};
@@ -196,7 +196,7 @@ impl Transactable for Transaction {
 
 	/// Fetch multiple keys from the database.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(keys = keys.sprint()))]
-	async fn getm(&self, keys: Vec<Key>, version: Option<u64>) -> Result<Vec<Option<Val>>> {
+	async fn getm(&self, keys: Vec<Key>, version: Option<u64>) -> Result<GetMultiResult> {
 		// Check to see if transaction is closed
 		if self.closed() {
 			return Err(Error::TransactionFinished);
@@ -208,8 +208,25 @@ impl Transactable for Transaction {
 			Some(ts) => inner.getm_at_version(keys, ts)?,
 			None => inner.getm(keys)?,
 		};
-		// Return result
-		Ok(res.into_iter().map(|opt| opt.map(Val::from)).collect())
+		// Materialise once, accumulating the hit count and value bytes during
+		// the same pass so callers do not need to re-walk the result.
+		let mut records = 0u64;
+		let mut value_bytes = 0u64;
+		let values = res
+			.into_iter()
+			.map(|opt| {
+				opt.map(|v| {
+					records += 1;
+					value_bytes += v.len() as u64;
+					Val::from(v)
+				})
+			})
+			.collect();
+		Ok(GetMultiResult {
+			values,
+			records,
+			value_bytes,
+		})
 	}
 
 	/// Insert or update a key in the database.
@@ -411,7 +428,7 @@ impl Transactable for Transaction {
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<Vec<Key>> {
+	) -> Result<KeysResult> {
 		// Check to see if transaction is closed
 		if self.closed() {
 			return Err(Error::TransactionFinished);
@@ -427,9 +444,7 @@ impl Transactable for Transaction {
 			None => inner.keys_iter(beg..end)?,
 		};
 		// Consume the iterator
-		let res = consume_keys(&mut iter, limit, skip);
-		// Return result
-		Ok(res)
+		Ok(consume_keys(&mut iter, limit, skip))
 	}
 
 	/// Retrieve a range of keys, in reverse.
@@ -440,7 +455,7 @@ impl Transactable for Transaction {
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<Vec<Key>> {
+	) -> Result<KeysResult> {
 		// Check to see if transaction is closed
 		if self.closed() {
 			return Err(Error::TransactionFinished);
@@ -456,9 +471,7 @@ impl Transactable for Transaction {
 			None => inner.keys_iter_reverse(beg..end)?,
 		};
 		// Consume the iterator
-		let res = consume_keys(&mut iter, limit, skip);
-		// Return result
-		Ok(res)
+		Ok(consume_keys(&mut iter, limit, skip))
 	}
 
 	/// Retrieve a range of key-value pairs.
@@ -469,7 +482,7 @@ impl Transactable for Transaction {
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<Vec<(Key, Val)>> {
+	) -> Result<ScanResult> {
 		// Check to see if transaction is closed
 		if self.closed() {
 			return Err(Error::TransactionFinished);
@@ -485,9 +498,7 @@ impl Transactable for Transaction {
 			None => inner.scan_iter(beg..end)?,
 		};
 		// Consume the iterator
-		let res = consume_vals(&mut iter, limit, skip);
-		// Return result
-		Ok(res)
+		Ok(consume_vals(&mut iter, limit, skip))
 	}
 
 	/// Retrieve a range of key-value pairs, in reverse.
@@ -498,7 +509,7 @@ impl Transactable for Transaction {
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<Vec<(Key, Val)>> {
+	) -> Result<ScanResult> {
 		// Check to see if transaction is closed
 		if self.closed() {
 			return Err(Error::TransactionFinished);
@@ -514,9 +525,7 @@ impl Transactable for Transaction {
 			None => inner.scan_iter_reverse(beg..end)?,
 		};
 		// Consume the iterator
-		let res = consume_vals(&mut iter, limit, skip);
-		// Return result
-		Ok(res)
+		Ok(consume_vals(&mut iter, limit, skip))
 	}
 
 	/// Set a new save point on the transaction.
@@ -591,121 +600,141 @@ impl TimeStampImpl for SurrealMxTimeStampImpl {
 }
 
 // Consume and iterate over only keys
-fn consume_keys(cursor: &mut KeyIterator<'_>, limit: ScanLimit, skip: u32) -> Vec<Key> {
+fn consume_keys(cursor: &mut KeyIterator<'_>, limit: ScanLimit, skip: u32) -> KeysResult {
 	// Skip entries efficiently without allocation
 	for _ in 0..skip {
 		if cursor.next().is_none() {
-			return Vec::new();
+			return KeysResult::default();
 		}
 	}
-	match limit {
+	let mut key_bytes = 0u64;
+	let keys = match limit {
 		ScanLimit::Count(c) => {
 			// Create the result set
 			let mut res = Vec::with_capacity(c.min(4096) as usize);
 			// Check that we don't exceed the count limit
 			while res.len() < c as usize {
 				if let Some(k) = cursor.next() {
+					key_bytes += k.len() as u64;
 					res.push(k.to_vec());
 				} else {
 					break;
 				}
 			}
-			// Return the result
 			res
 		}
 		ScanLimit::Bytes(b) => {
 			// Create the result set
 			let mut res = Vec::with_capacity((b / ESTIMATED_BYTES_PER_KEY).min(4096) as usize);
-			// Count the bytes fetched
-			let mut bytes_fetched = 0usize;
 			// Check that we don't exceed the byte limit
-			while bytes_fetched < b as usize {
+			while key_bytes < b as u64 {
 				if let Some(k) = cursor.next() {
-					bytes_fetched += k.len();
+					key_bytes += k.len() as u64;
 					res.push(k.to_vec());
 				} else {
 					break;
 				}
 			}
-			// Return the result
 			res
 		}
 		ScanLimit::BytesOrCount(b, c) => {
 			// Create the result set
 			let mut res = Vec::with_capacity(c.min(4096) as usize);
-			// Count the bytes fetched
-			let mut bytes_fetched = 0usize;
 			// Check that we don't exceed the count limit AND the byte limit
-			while res.len() < c as usize && bytes_fetched < b as usize {
+			while res.len() < c as usize && key_bytes < b as u64 {
 				if let Some(k) = cursor.next() {
-					bytes_fetched += k.len();
+					key_bytes += k.len() as u64;
 					res.push(k.to_vec());
 				} else {
 					break;
 				}
 			}
-			// Return the result
 			res
 		}
+	};
+	KeysResult {
+		keys,
+		key_bytes,
 	}
 }
 
 // Consume and iterate over keys and values
-fn consume_vals(cursor: &mut ScanIterator<'_>, limit: ScanLimit, skip: u32) -> Vec<(Key, Val)> {
+fn consume_vals(cursor: &mut ScanIterator<'_>, limit: ScanLimit, skip: u32) -> ScanResult {
 	// Skip entries efficiently without allocation
 	for _ in 0..skip {
 		if cursor.next().is_none() {
-			return Vec::new();
+			return ScanResult::default();
 		}
 	}
-	match limit {
+	// Track the cumulative key/value bytes for the metric. The byte-bounded limit
+	// branches still rely on `bytes_fetched` (key + value bytes) to decide
+	// when to stop, so the two counters are kept separate.
+	let mut key_bytes = 0u64;
+	let mut value_bytes = 0u64;
+	let values = match limit {
 		ScanLimit::Count(c) => {
 			// Create the result set
 			let mut res = Vec::with_capacity(c.min(4096) as usize);
 			// Check that we don't exceed the count limit
 			while res.len() < c as usize {
 				if let Some((k, v)) = cursor.next() {
+					key_bytes += k.len() as u64;
+					value_bytes += v.len() as u64;
 					res.push((k.to_vec(), v.to_vec()));
 				} else {
 					break;
 				}
 			}
-			// Return the result
 			res
 		}
 		ScanLimit::Bytes(b) => {
 			// Create the result set
 			let mut res = Vec::with_capacity((b / ESTIMATED_BYTES_PER_KV).min(4096) as usize);
 			// Count the bytes fetched
-			let mut bytes_fetched = 0usize;
+			let mut bytes_fetched = 0u64;
 			// Check that we don't exceed the byte limit
-			while bytes_fetched < b as usize {
+			while bytes_fetched < b as u64 {
 				if let Some((k, v)) = cursor.next() {
-					bytes_fetched += k.len() + v.len();
+					let key_len = k.len() as u64;
+					let value_len = v.len() as u64;
+
+					bytes_fetched += key_len + value_len;
+					key_bytes += key_len;
+					value_bytes += value_len;
+
 					res.push((k.to_vec(), v.to_vec()));
 				} else {
 					break;
 				}
 			}
-			// Return the result
 			res
 		}
 		ScanLimit::BytesOrCount(b, c) => {
 			// Create the result set
 			let mut res = Vec::with_capacity(c.min(4096) as usize);
 			// Count the bytes fetched
-			let mut bytes_fetched = 0usize;
+			let mut bytes_fetched = 0u64;
 			// Check that we don't exceed the count limit AND the byte limit
-			while res.len() < c as usize && bytes_fetched < b as usize {
+			while res.len() < c as usize && bytes_fetched < b as u64 {
 				if let Some((k, v)) = cursor.next() {
-					bytes_fetched += k.len() + v.len();
+					let key_len = k.len() as u64;
+					let value_len = v.len() as u64;
+
+					bytes_fetched += key_len + value_len;
+					key_bytes += key_len;
+					value_bytes += value_len;
+
 					res.push((k.to_vec(), v.to_vec()));
 				} else {
 					break;
 				}
 			}
-			// Return the result
 			res
 		}
+	};
+	ScanResult {
+		values,
+		key_bytes,
+		value_bytes,
 	}
 }

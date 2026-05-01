@@ -18,7 +18,7 @@ use surrealkv::{
 };
 use tokio::sync::RwLock;
 
-use super::api::ScanLimit;
+use super::api::{KeysResult, ScanLimit, ScanResult};
 use super::config::SyncMode;
 use super::err::{Error, Result};
 use super::{Direction, ESTIMATED_BYTES_PER_KEY, ESTIMATED_BYTES_PER_KV};
@@ -533,7 +533,7 @@ impl Transactable for Transaction {
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<Vec<Key>> {
+	) -> Result<KeysResult> {
 		// Versioned queries require a versioned datastore
 		if !self.versioned && version.is_some() {
 			return Err(Error::UnsupportedVersionedQueries);
@@ -587,7 +587,7 @@ impl Transactable for Transaction {
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<Vec<Key>> {
+	) -> Result<KeysResult> {
 		// Versioned queries require a versioned datastore
 		if !self.versioned && version.is_some() {
 			return Err(Error::UnsupportedVersionedQueries);
@@ -641,7 +641,7 @@ impl Transactable for Transaction {
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<Vec<(Key, Val)>> {
+	) -> Result<ScanResult> {
 		// Versioned queries require a versioned datastore
 		if !self.versioned && version.is_some() {
 			return Err(Error::UnsupportedVersionedQueries);
@@ -695,7 +695,7 @@ impl Transactable for Transaction {
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<Vec<(Key, Val)>> {
+	) -> Result<ScanResult> {
 		// Versioned queries require a versioned datastore
 		if !self.versioned && version.is_some() {
 			return Err(Error::UnsupportedVersionedQueries);
@@ -984,14 +984,15 @@ impl Cursor for HistoryCursor<'_> {
 }
 
 // Consume and iterate over only keys
-fn consume_keys(cursor: &mut impl Cursor, limit: ScanLimit, skip: u32) -> Result<Vec<Key>> {
+fn consume_keys(cursor: &mut impl Cursor, limit: ScanLimit, skip: u32) -> Result<KeysResult> {
 	// Skip entries efficiently by discarding cursor results
 	for _ in 0..skip {
 		if cursor.next_key()?.is_none() {
-			return Ok(Vec::new());
+			return Ok(KeysResult::default());
 		}
 	}
-	match limit {
+	let mut key_bytes = 0u64;
+	let keys = match limit {
 		ScanLimit::Count(c) => {
 			// Create the result set
 			let mut res = Vec::with_capacity(c.min(4096) as usize);
@@ -999,112 +1000,131 @@ fn consume_keys(cursor: &mut impl Cursor, limit: ScanLimit, skip: u32) -> Result
 			while res.len() < c as usize {
 				// Check the key
 				if let Some(key) = cursor.next_key()? {
+					key_bytes += key.len() as u64;
 					res.push(key);
 				} else {
 					break;
 				}
 			}
-			// Return the result
-			Ok(res)
+			res
 		}
 		ScanLimit::Bytes(b) => {
 			// Create the result set
 			let mut res = Vec::with_capacity((b / ESTIMATED_BYTES_PER_KEY).min(4096) as usize);
-			// Count the bytes fetched
-			let mut bytes_fetched = 0usize;
 			// Check that we don't exceed the byte limit
-			while bytes_fetched < b as usize {
+			while key_bytes < b as u64 {
 				// Check the key
 				if let Some(key) = cursor.next_key()? {
-					bytes_fetched += key.len();
+					key_bytes += key.len() as u64;
 					res.push(key);
 				} else {
 					break;
 				}
 			}
-			// Return the result
-			Ok(res)
+			res
 		}
 		ScanLimit::BytesOrCount(b, c) => {
 			// Create the result set
 			let mut res = Vec::with_capacity(c.min(4096) as usize);
-			// Count the bytes fetched
-			let mut bytes_fetched = 0usize;
 			// Check that we don't exceed the count limit AND the byte limit
-			while res.len() < c as usize && bytes_fetched < b as usize {
+			while res.len() < c as usize && key_bytes < b as u64 {
 				// Check the key
 				if let Some(key) = cursor.next_key()? {
-					bytes_fetched += key.len();
+					key_bytes += key.len() as u64;
 					res.push(key);
 				} else {
 					break;
 				}
 			}
-			// Return the result
-			Ok(res)
+			res
 		}
-	}
+	};
+	Ok(KeysResult {
+		keys,
+		key_bytes,
+	})
 }
 
 // Consume and iterate over keys and values
-fn consume_vals(cursor: &mut impl Cursor, limit: ScanLimit, skip: u32) -> Result<Vec<(Key, Val)>> {
+fn consume_vals(cursor: &mut impl Cursor, limit: ScanLimit, skip: u32) -> Result<ScanResult> {
 	// Skip entries efficiently by discarding cursor results
 	for _ in 0..skip {
 		if cursor.next_entry()?.is_none() {
-			return Ok(Vec::new());
+			return Ok(ScanResult::default());
 		}
 	}
-	match limit {
+	// Track the cumulative key/value bytes for the metric. The byte-bounded
+	// limit branches still rely on `bytes_fetched` (key + value bytes) to
+	// decide when to stop, so the two counters are kept separate.
+	let mut key_bytes = 0u64;
+	let mut value_bytes = 0u64;
+	let values = match limit {
 		ScanLimit::Count(c) => {
 			// Create the result set
 			let mut res = Vec::with_capacity(c.min(4096) as usize);
 			// Check that we don't exceed the count limit
 			while res.len() < c as usize {
 				// Check the key and value
-				if let Some(entry) = cursor.next_entry()? {
-					res.push(entry);
+				if let Some((key, value)) = cursor.next_entry()? {
+					key_bytes += key.len() as u64;
+					value_bytes += value.len() as u64;
+					res.push((key, value));
 				} else {
 					break;
 				}
 			}
-			// Return the result
-			Ok(res)
+			res
 		}
 		ScanLimit::Bytes(b) => {
 			// Create the result set
 			let mut res = Vec::with_capacity((b / ESTIMATED_BYTES_PER_KV).min(4096) as usize);
 			// Count the bytes fetched
-			let mut bytes_fetched = 0usize;
+			let mut bytes_fetched = 0u64;
 			// Check that we don't exceed the byte limit
-			while bytes_fetched < b as usize {
+			while bytes_fetched < b as u64 {
 				// Check the key and value
 				if let Some((key, value)) = cursor.next_entry()? {
-					bytes_fetched += key.len() + value.len();
+					let key_len = key.len() as u64;
+					let value_len = value.len() as u64;
+
+					bytes_fetched += key_len + value_len;
+					key_bytes += key_len;
+					value_bytes += value_len;
+
 					res.push((key, value));
 				} else {
 					break;
 				}
 			}
-			// Return the result
-			Ok(res)
+			res
 		}
 		ScanLimit::BytesOrCount(b, c) => {
 			// Create the result set
 			let mut res = Vec::with_capacity(c.min(4096) as usize);
 			// Count the bytes fetched
-			let mut bytes_fetched = 0usize;
+			let mut bytes_fetched = 0u64;
 			// Check that we don't exceed the count limit AND the byte limit
-			while res.len() < c as usize && bytes_fetched < b as usize {
+			while res.len() < c as usize && bytes_fetched < b as u64 {
 				// Check the key and value
 				if let Some((key, value)) = cursor.next_entry()? {
-					bytes_fetched += key.len() + value.len();
+					let key_len = key.len() as u64;
+					let value_len = value.len() as u64;
+
+					bytes_fetched += key_len + value_len;
+					key_bytes += key_len;
+					value_bytes += value_len;
+
 					res.push((key, value));
 				} else {
 					break;
 				}
 			}
-			// Return the result
-			Ok(res)
+			res
 		}
-	}
+	};
+	Ok(ScanResult {
+		values,
+		key_bytes,
+		value_bytes,
+	})
 }

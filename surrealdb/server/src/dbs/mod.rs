@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -10,6 +11,7 @@ use surrealdb_core::buc::BucketStoreProvider;
 use surrealdb_core::channel::Receiver;
 use surrealdb_core::cnf::ConfigMap;
 use surrealdb_core::kvs::{Datastore, TransactionBuilderFactory};
+use surrealdb_core::observe::ExecutionObserver;
 use surrealdb_types::Notification;
 use tokio::time::{Instant, sleep, timeout};
 use tokio_util::sync::CancellationToken;
@@ -728,6 +730,7 @@ pub async fn init<C: TransactionBuilderFactory + BucketStoreProvider>(
 	composer: C,
 	opt: &Config,
 	canceller: CancellationToken,
+	observer: Arc<dyn ExecutionObserver>,
 	#[cfg_attr(not(storage), allow(unused_variables))] StartCommandDbsOptions {
 		strict_mode,
 		query_timeout,
@@ -796,7 +799,8 @@ pub async fn init<C: TransactionBuilderFactory + BucketStoreProvider>(
 		.with_auth(!unauthenticated)
 		.with_capabilities(capabilities)
 		.with_notify(send)
-		.with_shutdown_cancel(canceller);
+		.with_shutdown_cancel(canceller)
+		.with_observer(observer);
 
 	#[cfg(storage)]
 	let builder = builder.with_temporary_directory(temporary_directory);

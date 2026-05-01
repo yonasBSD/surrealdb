@@ -29,6 +29,7 @@ use crate::kvs::index::IndexBuilder;
 use crate::kvs::sequences::Sequences;
 use crate::kvs::slowlog::SlowLog;
 use crate::kvs::{Datastore, TransactionBuilder, TransactionBuilderFactory, TransactionFactory};
+use crate::observe::{ExecutionObserver, NoopObserver};
 #[cfg(feature = "surrealism")]
 use crate::surrealism::cache::SurrealismCache;
 use crate::types::PublicNotification;
@@ -47,6 +48,7 @@ pub struct Builder {
 	config: ConfigMap,
 	#[cfg(feature = "surrealism")]
 	lazy_surrealism: bool,
+	observer: Arc<dyn ExecutionObserver>,
 }
 
 impl Default for Builder {
@@ -70,6 +72,7 @@ impl Builder {
 			config: ConfigMap::empty(),
 			#[cfg(feature = "surrealism")]
 			lazy_surrealism: false,
+			observer: Arc::new(NoopObserver),
 		}
 	}
 
@@ -150,6 +153,13 @@ impl Builder {
 		self
 	}
 
+	/// Install the [`ExecutionObserver`] used for the datastore's lifetime.
+	/// Defaults to [`NoopObserver`].
+	pub fn with_observer(mut self, observer: Arc<dyn ExecutionObserver>) -> Self {
+		self.observer = observer;
+		self
+	}
+
 	pub async fn build_with_path(self, path: &str) -> Result<Datastore> {
 		self.build_with_factory_path(path, CommunityComposer()).await
 	}
@@ -172,8 +182,10 @@ impl Builder {
 		buckets: BucketsManager,
 	) -> Result<Datastore> {
 		let async_event_trigger = Arc::new(Notify::new());
+		let observer = self.observer;
 		let config = Arc::new(self.config.load::<CommonConfig>());
-		let tf = TransactionFactory::new(async_event_trigger.clone(), builder, config.clone());
+		let tf = TransactionFactory::new(async_event_trigger.clone(), builder, config.clone())
+			.with_observer(observer.clone());
 		let id = self.id.unwrap_or_else(Uuid::new_v4);
 		let capabilities = Arc::new(self.capabilities);
 		let dynamic_configuration = DynamicConfiguration::default();
@@ -210,6 +222,7 @@ impl Builder {
 			lazy_surrealism: self.lazy_surrealism,
 			#[cfg(feature = "http")]
 			http_client,
+			observer,
 			config,
 		})
 	}

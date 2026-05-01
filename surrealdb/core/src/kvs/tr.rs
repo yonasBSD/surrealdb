@@ -4,7 +4,7 @@ use std::ops::Range;
 
 use futures::stream::Stream;
 
-use super::api::{ScanLimit, Transactable};
+use super::api::{GetMultiResult, KeysResult, ScanLimit, ScanResult, Transactable};
 use super::batch::Batch;
 use super::scanner::{Direction, Scanner};
 use super::{IntoBytes, Key, Result, Val};
@@ -127,7 +127,7 @@ impl Transactor {
 
 	/// Fetch many keys from the datastore.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::tr", skip_all)]
-	pub async fn getm<K>(&self, keys: Vec<K>, version: Option<u64>) -> Result<Vec<Option<Val>>>
+	pub async fn getm<K>(&self, keys: Vec<K>, version: Option<u64>) -> Result<GetMultiResult>
 	where
 		K: IntoBytes + Debug,
 	{
@@ -140,7 +140,7 @@ impl Transactor {
 	/// This function fetches all matching key-value pairs from the underlying
 	/// datastore in grouped batches.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::tr", skip_all)]
-	pub async fn getp<K>(&self, key: K, version: Option<u64>) -> Result<Vec<(Key, Val)>>
+	pub async fn getp<K>(&self, key: K, version: Option<u64>) -> Result<ScanResult>
 	where
 		K: IntoBytes + Debug,
 	{
@@ -153,7 +153,7 @@ impl Transactor {
 	/// This function fetches all matching key-value pairs from the underlying
 	/// datastore in grouped batches.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::tr", skip_all)]
-	pub async fn getr<K>(&self, rng: Range<K>, version: Option<u64>) -> Result<Vec<(Key, Val)>>
+	pub async fn getr<K>(&self, rng: Range<K>, version: Option<u64>) -> Result<ScanResult>
 	where
 		K: IntoBytes + Debug,
 	{
@@ -318,7 +318,9 @@ impl Transactor {
 	/// Retrieve a specific range of keys from the datastore.
 	///
 	/// This function fetches the full range of keys without values, in a single
-	/// request to the underlying datastore.
+	/// request to the underlying datastore. The returned [`KeysResult`] also
+	/// reports the total key bytes scanned, accumulated by the backend during
+	/// the same iteration that produced the keys.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::tr", skip_all)]
 	pub async fn keys<K>(
 		&self,
@@ -326,14 +328,14 @@ impl Transactor {
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<Vec<Key>>
+	) -> Result<KeysResult>
 	where
 		K: IntoBytes + Debug,
 	{
 		let beg = rng.start.into_vec();
 		let end = rng.end.into_vec();
 		if beg > end {
-			return Ok(vec![]);
+			return Ok(KeysResult::default());
 		}
 		self.inner.keys(beg..end, limit, skip, version).await
 	}
@@ -341,7 +343,9 @@ impl Transactor {
 	/// Retrieve a specific range of keys from the datastore.
 	///
 	/// This function fetches the full range of keys without values, in a single
-	/// request to the underlying datastore.
+	/// request to the underlying datastore. The returned [`KeysResult`] also
+	/// reports the total key bytes scanned, accumulated by the backend during
+	/// the same iteration that produced the keys.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::tr", skip_all)]
 	pub async fn keysr<K>(
 		&self,
@@ -349,14 +353,14 @@ impl Transactor {
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<Vec<Key>>
+	) -> Result<KeysResult>
 	where
 		K: IntoBytes + Debug,
 	{
 		let beg = rng.start.into_vec();
 		let end = rng.end.into_vec();
 		if beg > end {
-			return Ok(vec![]);
+			return Ok(KeysResult::default());
 		}
 		self.inner.keysr(beg..end, limit, skip, version).await
 	}
@@ -364,7 +368,9 @@ impl Transactor {
 	/// Retrieve a specific range of key-value pairs from the datastore.
 	///
 	/// This function fetches the full range of key-value pairs, in a single
-	/// request to the underlying datastore.
+	/// request to the underlying datastore. The returned [`ScanResult`] also
+	/// reports the total value bytes scanned, accumulated by the backend
+	/// during the same iteration that produced the values.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::tr", skip_all)]
 	pub async fn scan<K>(
 		&self,
@@ -372,14 +378,14 @@ impl Transactor {
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<Vec<(Key, Val)>>
+	) -> Result<ScanResult>
 	where
 		K: IntoBytes + Debug,
 	{
 		let beg = rng.start.into_vec();
 		let end = rng.end.into_vec();
 		if beg > end {
-			return Ok(vec![]);
+			return Ok(ScanResult::default());
 		}
 		self.inner.scan(beg..end, limit, skip, version).await
 	}
@@ -387,7 +393,9 @@ impl Transactor {
 	/// Retrieve a specific range of key-value pairs from the datastore.
 	///
 	/// This function fetches the full range of key-value pairs, in a single
-	/// request to the underlying datastore.
+	/// request to the underlying datastore. The returned [`ScanResult`] also
+	/// reports the total value bytes scanned, accumulated by the backend
+	/// during the same iteration that produced the values.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::tr", skip_all)]
 	pub async fn scanr<K>(
 		&self,
@@ -395,14 +403,14 @@ impl Transactor {
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<Vec<(Key, Val)>>
+	) -> Result<ScanResult>
 	where
 		K: IntoBytes + Debug,
 	{
 		let beg = rng.start.into_vec();
 		let end = rng.end.into_vec();
 		if beg > end {
-			return Ok(vec![]);
+			return Ok(ScanResult::default());
 		}
 		self.inner.scanr(beg..end, limit, skip, version).await
 	}

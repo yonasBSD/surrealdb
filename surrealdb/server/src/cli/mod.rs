@@ -238,7 +238,11 @@ impl LogFileRotation {
 ///   - `RouterFactory` (constructs the HTTP router, allowing embedders to customize server routes)
 ///   - `ConfigCheck` (validates configuration before initialization)
 pub async fn init<
-	C: TransactionBuilderFactory + RouterFactory + ConfigCheck + BucketStoreProvider,
+	C: TransactionBuilderFactory
+		+ RouterFactory
+		+ ConfigCheck
+		+ BucketStoreProvider
+		+ crate::observe::ObservabilityProvider,
 >(
 	composer: C,
 ) -> ExitCode {
@@ -291,11 +295,16 @@ pub async fn init<
 		.with_file_name(Some(args.log_file_name.clone()))
 		.with_file_format(args.log_file_format)
 		.with_file_rotation(Some(args.log_file_rotation.as_str().to_string()));
-	// Extract the telemetry log guards
-	let guards = telemetry.init().expect("Unable to configure logs");
+	// Initialise telemetry: install the tracing subscriber and receive
+	// the log guards plus the `ObservabilityRuntime` that carries every
+	// provider observers register against.
+	let crate::telemetry::TelemetryHandles {
+		guards,
+		runtime,
+	} = telemetry.init().expect("Unable to configure logs");
 	// After version warning we can run the respective command
 	let output = match args.command {
-		Commands::Start(args) => start::init::<C>(composer, args).await,
+		Commands::Start(args) => start::init::<C>(composer, args, runtime.clone()).await,
 		Commands::Import(args) => import::init(args).await,
 		Commands::Export(args) => export::init(args).await,
 		Commands::Version(args) => version::init(args).await,
@@ -303,7 +312,7 @@ pub async fn init<
 		#[cfg(feature = "cli")]
 		Commands::Sql(args) => sql::init(args).await,
 		#[cfg(feature = "mcp")]
-		Commands::Mcp(args) => mcp::init::<C>(composer, args).await,
+		Commands::Mcp(args) => mcp::init::<C>(composer, args, runtime.clone()).await,
 		Commands::Ml(args) => ml::init(args).await,
 		#[cfg(feature = "surrealism")]
 		Commands::Module(args) => module::init(args).await,
@@ -312,6 +321,10 @@ pub async fn init<
 		Commands::Fix(args) => fix::init::<C>(args).await,
 		Commands::V2(args) => v2::init(args).await,
 	};
+	// Flush every provider's batch processor so audit / slow-query
+	// records and metric exports are written before the runtime is
+	// dropped.
+	runtime.shutdown();
 	// Save the flamegraph and profile
 	#[cfg(feature = "performance-profiler")]
 	if let Ok(report) = guard.report().build() {

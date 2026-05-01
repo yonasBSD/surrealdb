@@ -30,7 +30,7 @@ use rocksdb::{
 };
 use tokio::sync::{Mutex, MutexGuard};
 
-use super::api::ScanLimit;
+use super::api::{GetMultiResult, KeysResult, ScanLimit, ScanResult};
 use super::config::SyncMode;
 use super::err::{Error, Result};
 use super::{Direction, ESTIMATED_BYTES_PER_KEY, ESTIMATED_BYTES_PER_KV};
@@ -390,8 +390,20 @@ impl Datastore {
 	const BLOCK_CACHE_PINNED_USAGE: &str = "rocksdb.block_cache_pinned_usage";
 	const ESTIMATE_TABLE_READERS_MEM: &str = "rocksdb.estimate_table_readers_mem";
 	const CUR_SIZE_ALL_MEM_TABLES: &str = "rocksdb.cur_size_all_mem_tables";
+	const TOTAL_SST_FILES_SIZE: &str = "rocksdb.total_sst_files_size";
+	const LIVE_SST_FILES_SIZE: &str = "rocksdb.live_sst_files_size";
+	const ESTIMATE_LIVE_DATA_SIZE: &str = "rocksdb.estimate_live_data_size";
+	const ESTIMATE_NUM_KEYS: &str = "rocksdb.estimate_num_keys";
+	const COMPACTION_PENDING: &str = "rocksdb.compaction_pending";
+	const NUM_RUNNING_COMPACTIONS: &str = "rocksdb.num_running_compactions";
+	const NUM_RUNNING_FLUSHES: &str = "rocksdb.num_running_flushes";
 
 	/// Registers metrics for the RocksDB datastore.
+	///
+	/// The first four metrics capture memory usage; the remainder expose
+	/// on-disk size, logical data size, compaction, and flush activity so
+	/// operators can alert on stalled LSM trees. Every metric is a direct
+	/// RocksDB `property_int_value` lookup and is therefore O(1).
 	pub(crate) fn register_metrics(&self) -> Metrics {
 		Metrics {
 			name: "surrealdb.rocksdb",
@@ -412,6 +424,34 @@ impl Datastore {
 					name: Self::CUR_SIZE_ALL_MEM_TABLES,
 					description: "Returns approximate size (in bytes) of active and unflushed immutable memtables",
 				},
+				Metric {
+					name: Self::TOTAL_SST_FILES_SIZE,
+					description: "Total on-disk size (bytes) of all SST files, including obsolete ones that are still referenced by snapshots.",
+				},
+				Metric {
+					name: Self::LIVE_SST_FILES_SIZE,
+					description: "On-disk size (bytes) of SST files referenced by the current LSM tree.",
+				},
+				Metric {
+					name: Self::ESTIMATE_LIVE_DATA_SIZE,
+					description: "Estimated logical live data size (bytes) after applying tombstones.",
+				},
+				Metric {
+					name: Self::ESTIMATE_NUM_KEYS,
+					description: "Estimated number of live keys in the LSM tree.",
+				},
+				Metric {
+					name: Self::COMPACTION_PENDING,
+					description: "1 if a compaction is pending, 0 otherwise.",
+				},
+				Metric {
+					name: Self::NUM_RUNNING_COMPACTIONS,
+					description: "Number of compactions currently running.",
+				},
+				Metric {
+					name: Self::NUM_RUNNING_FLUSHES,
+					description: "Number of memtable flushes currently running.",
+				},
 			],
 		}
 	}
@@ -423,6 +463,13 @@ impl Datastore {
 			Self::BLOCK_CACHE_PINNED_USAGE => Some(properties::BLOCK_CACHE_PINNED_USAGE),
 			Self::ESTIMATE_TABLE_READERS_MEM => Some(properties::ESTIMATE_TABLE_READERS_MEM),
 			Self::CUR_SIZE_ALL_MEM_TABLES => Some(properties::CUR_SIZE_ALL_MEM_TABLES),
+			Self::TOTAL_SST_FILES_SIZE => Some(properties::TOTAL_SST_FILES_SIZE),
+			Self::LIVE_SST_FILES_SIZE => Some(properties::LIVE_SST_FILES_SIZE),
+			Self::ESTIMATE_LIVE_DATA_SIZE => Some(properties::ESTIMATE_LIVE_DATA_SIZE),
+			Self::ESTIMATE_NUM_KEYS => Some(properties::ESTIMATE_NUM_KEYS),
+			Self::COMPACTION_PENDING => Some(properties::COMPACTION_PENDING),
+			Self::NUM_RUNNING_COMPACTIONS => Some(properties::NUM_RUNNING_COMPACTIONS),
+			Self::NUM_RUNNING_FLUSHES => Some(properties::NUM_RUNNING_FLUSHES),
 			_ => None,
 		};
 		metric.map(|metric| {
@@ -862,7 +909,7 @@ impl Transaction {
 		version: Option<u64>,
 		dir: Direction,
 		guard: MutexGuard<'_, Option<TransactionInner>>,
-	) -> Result<Vec<Key>> {
+	) -> Result<KeysResult> {
 		// Get the inner transaction state
 		let inner =
 			guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
@@ -917,7 +964,7 @@ impl Transaction {
 		version: Option<u64>,
 		dir: Direction,
 		guard: MutexGuard<'_, Option<TransactionInner>>,
-	) -> Result<Vec<(Key, Val)>> {
+	) -> Result<ScanResult> {
 		// Get the inner transaction state
 		let inner =
 			guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
@@ -1098,7 +1145,7 @@ impl Transactable for Transaction {
 
 	/// Fetch many keys from the datastore.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(keys = keys.sprint()))]
-	async fn getm(&self, keys: Vec<Key>, version: Option<u64>) -> Result<Vec<Option<Val>>> {
+	async fn getm(&self, keys: Vec<Key>, version: Option<u64>) -> Result<GetMultiResult> {
 		// Versioned queries require a versioned datastore
 		if !self.versioned && version.is_some() {
 			return Err(Error::UnsupportedVersionedQueries);
@@ -1118,10 +1165,27 @@ impl Transactable for Transaction {
 		} else {
 			inner.tx.multi_get_opt(keys, &self.read_options)
 		};
-		// Convert result
-		let res = res.into_iter().map(|r| r.map_err(Into::into)).collect::<Result<_>>()?;
-		// Return result
-		Ok(res)
+		// Convert result, accumulating the hit count and value bytes during
+		// the same pass so callers do not need to re-walk the result.
+		let mut records = 0u64;
+		let mut value_bytes = 0u64;
+		let values = res
+			.into_iter()
+			.map(|r| match r {
+				Ok(Some(v)) => {
+					records += 1;
+					value_bytes += v.len() as u64;
+					Ok(Some(v))
+				}
+				Ok(None) => Ok(None),
+				Err(e) => Err(e.into()),
+			})
+			.collect::<Result<Vec<Option<Val>>>>()?;
+		Ok(GetMultiResult {
+			values,
+			records,
+			value_bytes,
+		})
 	}
 
 	/// Insert or update a key in the database.
@@ -1305,7 +1369,7 @@ impl Transactable for Transaction {
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<Vec<Key>> {
+	) -> Result<KeysResult> {
 		// Versioned queries require a versioned datastore
 		if !self.versioned && version.is_some() {
 			return Err(Error::UnsupportedVersionedQueries);
@@ -1335,7 +1399,7 @@ impl Transactable for Transaction {
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<Vec<Key>> {
+	) -> Result<KeysResult> {
 		// Versioned queries require a versioned datastore
 		if !self.versioned && version.is_some() {
 			return Err(Error::UnsupportedVersionedQueries);
@@ -1365,7 +1429,7 @@ impl Transactable for Transaction {
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<Vec<(Key, Val)>> {
+	) -> Result<ScanResult> {
 		// Versioned queries require a versioned datastore
 		if !self.versioned && version.is_some() {
 			return Err(Error::UnsupportedVersionedQueries);
@@ -1395,7 +1459,7 @@ impl Transactable for Transaction {
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<Vec<(Key, Val)>> {
+	) -> Result<ScanResult> {
 		// Versioned queries require a versioned datastore
 		if !self.versioned && version.is_some() {
 			return Err(Error::UnsupportedVersionedQueries);
@@ -1471,7 +1535,7 @@ fn consume_keys<D: rocksdb::DBAccess>(
 	limit: ScanLimit,
 	skip: u32,
 	dir: Direction,
-) -> Result<Vec<Key>> {
+) -> Result<KeysResult> {
 	// Skip entries efficiently without allocation
 	for _ in 0..skip {
 		if iter.valid() {
@@ -1483,10 +1547,11 @@ fn consume_keys<D: rocksdb::DBAccess>(
 			// Catch any iterator errors
 			iter.status()?;
 			// Return an empty result
-			return Ok(Vec::new());
+			return Ok(KeysResult::default());
 		}
 	}
-	let res = match limit {
+	let mut key_bytes = 0u64;
+	let keys = match limit {
 		ScanLimit::Count(c) => {
 			// Create the result set
 			let mut res = Vec::with_capacity(c.min(4096) as usize);
@@ -1494,6 +1559,7 @@ fn consume_keys<D: rocksdb::DBAccess>(
 			while res.len() < c as usize {
 				// Check the key
 				if let Some(k) = iter.key() {
+					key_bytes += k.len() as u64;
 					res.push(k.to_vec());
 					match dir {
 						Direction::Forward => iter.next(),
@@ -1503,19 +1569,16 @@ fn consume_keys<D: rocksdb::DBAccess>(
 					break;
 				}
 			}
-			// Return the result
 			res
 		}
 		ScanLimit::Bytes(b) => {
 			// Create the result set
 			let mut res = Vec::with_capacity((b / ESTIMATED_BYTES_PER_KEY).min(4096) as usize);
-			// Count the bytes fetched
-			let mut bytes_fetched = 0usize;
 			// Check that we don't exceed the byte limit
-			while bytes_fetched < b as usize {
+			while key_bytes < b as u64 {
 				// Check the key
 				if let Some(k) = iter.key() {
-					bytes_fetched += k.len();
+					key_bytes += k.len() as u64;
 					res.push(k.to_vec());
 					match dir {
 						Direction::Forward => iter.next(),
@@ -1525,19 +1588,16 @@ fn consume_keys<D: rocksdb::DBAccess>(
 					break;
 				}
 			}
-			// Return the result
 			res
 		}
 		ScanLimit::BytesOrCount(b, c) => {
 			// Create the result set
 			let mut res = Vec::with_capacity(c.min(4096) as usize);
-			// Count the bytes fetched
-			let mut bytes_fetched = 0usize;
 			// Check that we don't exceed the count limit AND the byte limit
-			while res.len() < c as usize && bytes_fetched < b as usize {
+			while res.len() < c as usize && key_bytes < b as u64 {
 				// Check the key
 				if let Some(k) = iter.key() {
-					bytes_fetched += k.len();
+					key_bytes += k.len() as u64;
 					res.push(k.to_vec());
 					match dir {
 						Direction::Forward => iter.next(),
@@ -1547,14 +1607,16 @@ fn consume_keys<D: rocksdb::DBAccess>(
 					break;
 				}
 			}
-			// Return the result
 			res
 		}
 	};
 	// Catch any iterator errors
 	iter.status()?;
 	// Return the result
-	Ok(res)
+	Ok(KeysResult {
+		keys,
+		key_bytes,
+	})
 }
 
 // Consume and iterate over keys and values
@@ -1563,7 +1625,7 @@ fn consume_vals<D: rocksdb::DBAccess>(
 	limit: ScanLimit,
 	skip: u32,
 	dir: Direction,
-) -> Result<Vec<(Key, Val)>> {
+) -> Result<ScanResult> {
 	// Skip entries efficiently without allocation
 	for _ in 0..skip {
 		if iter.valid() {
@@ -1575,10 +1637,15 @@ fn consume_vals<D: rocksdb::DBAccess>(
 			// Catch any iterator errors
 			iter.status()?;
 			// Return an empty result
-			return Ok(Vec::new());
+			return Ok(ScanResult::default());
 		}
 	}
-	let res = match limit {
+	// Track the cumulative bytes for the metric. The byte-bounded limit
+	// branches still rely on `bytes_fetched` (key + value bytes) to decide
+	// when to stop, so the two counters are kept separate.
+	let mut key_bytes = 0u64;
+	let mut value_bytes = 0u64;
+	let values = match limit {
 		ScanLimit::Count(c) => {
 			// Create the result set
 			let mut res = Vec::with_capacity(c.min(4096) as usize);
@@ -1586,6 +1653,8 @@ fn consume_vals<D: rocksdb::DBAccess>(
 			while res.len() < c as usize {
 				// Check the key and value
 				if let Some((k, v)) = iter.item() {
+					key_bytes += k.len() as u64;
+					value_bytes += v.len() as u64;
 					res.push((k.to_vec(), v.to_vec()));
 					match dir {
 						Direction::Forward => iter.next(),
@@ -1595,20 +1664,26 @@ fn consume_vals<D: rocksdb::DBAccess>(
 					break;
 				}
 			}
-			// Return the result
 			res
 		}
 		ScanLimit::Bytes(b) => {
 			// Create the result set
 			let mut res = Vec::with_capacity((b / ESTIMATED_BYTES_PER_KV).min(4096) as usize);
 			// Count the bytes fetched
-			let mut bytes_fetched = 0usize;
+			let mut bytes_fetched = 0u64;
 			// Check that we don't exceed the byte limit
-			while bytes_fetched < b as usize {
+			while bytes_fetched < b as u64 {
 				// Check the key and value
 				if let Some((k, v)) = iter.item() {
-					bytes_fetched += k.len() + v.len();
+					let key_len = k.len() as u64;
+					let value_len = v.len() as u64;
+
+					bytes_fetched += key_len + value_len;
+					key_bytes += key_len;
+					value_bytes += value_len;
+
 					res.push((k.to_vec(), v.to_vec()));
+
 					match dir {
 						Direction::Forward => iter.next(),
 						Direction::Backward => iter.prev(),
@@ -1617,20 +1692,26 @@ fn consume_vals<D: rocksdb::DBAccess>(
 					break;
 				}
 			}
-			// Return the result
 			res
 		}
 		ScanLimit::BytesOrCount(b, c) => {
 			// Create the result set
 			let mut res = Vec::with_capacity(c.min(4096) as usize);
 			// Count the bytes fetched
-			let mut bytes_fetched = 0usize;
+			let mut bytes_fetched = 0u64;
 			// Check that we don't exceed the count limit AND the byte limit
-			while res.len() < c as usize && bytes_fetched < b as usize {
+			while res.len() < c as usize && bytes_fetched < b as u64 {
 				// Check the key and value
 				if let Some((k, v)) = iter.item() {
-					bytes_fetched += k.len() + v.len();
+					let key_len = k.len() as u64;
+					let value_len = v.len() as u64;
+
+					bytes_fetched += key_len + value_len;
+					key_bytes += key_len;
+					value_bytes += value_len;
+
 					res.push((k.to_vec(), v.to_vec()));
+
 					match dir {
 						Direction::Forward => iter.next(),
 						Direction::Backward => iter.prev(),
@@ -1639,12 +1720,15 @@ fn consume_vals<D: rocksdb::DBAccess>(
 					break;
 				}
 			}
-			// Return the result
 			res
 		}
 	};
 	// Catch any iterator errors
 	iter.status()?;
 	// Return the result
-	Ok(res)
+	Ok(ScanResult {
+		values,
+		key_bytes,
+		value_bytes,
+	})
 }

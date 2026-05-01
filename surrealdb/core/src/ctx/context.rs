@@ -34,7 +34,9 @@ use crate::dbs::capabilities::ExperimentalTarget;
 use crate::dbs::capabilities::NetTarget;
 #[cfg(all(feature = "http", feature = "surrealism"))]
 use crate::dbs::capabilities::Targets;
-use crate::dbs::{Capabilities, NewPlannerStrategy, Options, Session, Variables};
+use crate::dbs::{
+	Capabilities, NewPlannerStrategy, Options, Session, StatementCounters, Variables,
+};
 use crate::err::Error;
 use crate::exec::function::FunctionRegistry;
 #[cfg(feature = "http")]
@@ -105,6 +107,17 @@ pub struct Context {
 	new_planner_strategy: NewPlannerStrategy,
 	// When true, EXPLAIN ANALYZE omits elapsed durations for deterministic test output
 	redact_volatile_explain_attrs: bool,
+	// Per-statement counters, shared with the executor so it can read the
+	// number of rows affected by the running DML statement when emitting
+	// the corresponding `StatementEvent`. Replaced by the executor before
+	// each top-level statement; `None` outside an active statement.
+	statement_counters: Option<Arc<StatementCounters>>,
+	// Pre-resolved tenant identity (namespace, database, user, session id,
+	// client ip) derived from the active session at `attach_session` time.
+	// Read by the executor and the transaction layer to populate the
+	// `*Ctx` half of every emitted [`crate::observe`] event without
+	// re-walking the session value tree on every emit.
+	tenant_identity: Option<Arc<crate::observe::TenantIdentity>>,
 	// Matches context for index functions (search::highlight, search::score, etc.)
 	matches_context: Option<Arc<crate::exec::function::MatchesContext>>,
 	// KNN context for index functions (vector::distance::knn)
@@ -155,11 +168,13 @@ impl Context {
 			function_registry: parent.function_registry.clone(),
 			new_planner_strategy: NewPlannerStrategy::default(),
 			redact_volatile_explain_attrs: false,
+			statement_counters: None,
 			matches_context: None,
 			knn_context: None,
 			config: parent.config.clone(),
 			#[cfg(feature = "http")]
 			http_client: parent.http_client.clone(),
+			tenant_identity: None,
 		}
 	}
 
@@ -206,11 +221,13 @@ impl Context {
 			function_registry: parent.function_registry.clone(),
 			new_planner_strategy: parent.new_planner_strategy.clone(),
 			redact_volatile_explain_attrs: parent.redact_volatile_explain_attrs,
+			statement_counters: parent.statement_counters.clone(),
 			matches_context: parent.matches_context.clone(),
 			knn_context: parent.knn_context.clone(),
 			config: parent.config.clone(),
 			#[cfg(feature = "http")]
 			http_client,
+			tenant_identity: parent.tenant_identity.clone(),
 		}
 	}
 
@@ -243,11 +260,13 @@ impl Context {
 			function_registry: parent.function_registry.clone(),
 			new_planner_strategy: parent.new_planner_strategy.clone(),
 			redact_volatile_explain_attrs: parent.redact_volatile_explain_attrs,
+			statement_counters: parent.statement_counters.clone(),
 			matches_context: parent.matches_context.clone(),
 			knn_context: parent.knn_context.clone(),
 			config: parent.config.clone(),
 			#[cfg(feature = "http")]
 			http_client: parent.http_client.clone(),
+			tenant_identity: parent.tenant_identity.clone(),
 		}
 	}
 
@@ -287,11 +306,13 @@ impl Context {
 			function_registry: from.function_registry.clone(),
 			new_planner_strategy: from.new_planner_strategy.clone(),
 			redact_volatile_explain_attrs: from.redact_volatile_explain_attrs,
+			statement_counters: from.statement_counters.clone(),
 			matches_context: from.matches_context.clone(),
 			knn_context: from.knn_context.clone(),
 			config: from.config.clone(),
 			#[cfg(feature = "http")]
 			http_client: from.http_client.clone(),
+			tenant_identity: from.tenant_identity.clone(),
 		}
 	}
 
@@ -324,11 +345,13 @@ impl Context {
 			function_registry: from.function_registry.clone(),
 			new_planner_strategy: from.new_planner_strategy.clone(),
 			redact_volatile_explain_attrs: from.redact_volatile_explain_attrs,
+			statement_counters: from.statement_counters.clone(),
 			matches_context: from.matches_context.clone(),
 			knn_context: from.knn_context.clone(),
 			config: from.config.clone(),
 			#[cfg(feature = "http")]
 			http_client: from.http_client.clone(),
+			tenant_identity: from.tenant_identity.clone(),
 		}
 	}
 
@@ -375,11 +398,13 @@ impl Context {
 			function_registry,
 			new_planner_strategy: planner_strategy,
 			redact_volatile_explain_attrs: false,
+			statement_counters: None,
 			matches_context: None,
 			knn_context: None,
 			config,
 			#[cfg(feature = "http")]
 			http_client,
+			tenant_identity: None,
 		};
 		if let Some(timeout) = time_out {
 			ctx.add_timeout(timeout)?;
@@ -415,6 +440,7 @@ impl Context {
 			function_registry: Arc::new(FunctionRegistry::with_builtins()),
 			new_planner_strategy: NewPlannerStrategy::default(),
 			redact_volatile_explain_attrs: false,
+			statement_counters: None,
 			matches_context: None,
 			knn_context: None,
 			config: Default::default(),
@@ -427,6 +453,7 @@ impl Context {
 				)
 				.expect("http client to be created"),
 			),
+			tenant_identity: None,
 		}
 	}
 
@@ -585,6 +612,21 @@ impl Context {
 
 	pub(crate) fn set_transaction(&mut self, txn: Arc<Transaction>) {
 		self.transaction = Some(txn);
+	}
+
+	/// Install the per-statement counter set on this context. Called by the
+	/// executor before each top-level statement so the iterator can record
+	/// the actual number of records affected -- including for DML
+	/// statements with `RETURN NONE`, where the post-RETURN value would
+	/// otherwise be empty.
+	pub(crate) fn set_statement_counters(&mut self, counters: Option<Arc<StatementCounters>>) {
+		self.statement_counters = counters;
+	}
+
+	/// The per-statement counter set, if one is currently installed. Read
+	/// from the iterator's record-result path.
+	pub(crate) fn statement_counters(&self) -> Option<&Arc<StatementCounters>> {
+		self.statement_counters.as_ref()
 	}
 
 	pub(crate) fn tx(&self) -> Arc<Transaction> {
@@ -825,7 +867,16 @@ impl Context {
 		if !session.variables.is_empty() {
 			self.attach_variables(session.variables.clone().into())?;
 		}
+		// Pre-resolve the tenant identity so emit sites do not need to
+		// re-walk the session value tree on every event dispatch.
+		self.tenant_identity =
+			Some(Arc::new(crate::observe::TenantIdentity::from_session(session)));
 		Ok(())
+	}
+
+	/// Pre-resolved tenant identity for the active session.
+	pub(crate) fn tenant_identity(&self) -> Option<&Arc<crate::observe::TenantIdentity>> {
+		self.tenant_identity.as_ref()
 	}
 
 	/// Attach variables to the context.

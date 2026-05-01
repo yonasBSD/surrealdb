@@ -11,6 +11,7 @@ use futures::future::try_join_all;
 use futures::stream::Stream;
 use tokio::sync::{Mutex, MutexGuard, Notify};
 use uuid::Uuid;
+use web_time::Instant;
 
 use super::batch::Batch;
 use super::{Key, Val, util};
@@ -35,6 +36,10 @@ use crate::kvs::index::{BatchId, BatchIdsCleanQueue, SharedIndexKey};
 use crate::kvs::scanner::Direction;
 use crate::kvs::sequences::Sequences;
 use crate::kvs::{BoxTimeStamp, BoxTimeStampImpl, KVKey, KVValue, Transactor, cache};
+use crate::observe::{
+	ExecutionObserver, Outcome, TenantIdentity, TransactionEvent, TransactionEventSafe,
+	TransactionMetrics,
+};
 use crate::val::{RecordId, RecordIdKey, TableName};
 
 /// Controls whether `getm_records` populates the transaction cache on miss.
@@ -56,6 +61,27 @@ pub(crate) enum CachePolicy {
 pub struct Transaction {
 	/// Is this is a local datastore transaction?
 	local: bool,
+	/// The wall-clock instant the transaction was opened. Used to compute
+	/// transaction lifetime when emitting the terminal
+	/// [`crate::observe::TransactionEvent`].
+	started_at: Instant,
+	/// Observability hook fired on commit/cancel. Defaults to
+	/// [`crate::observe::NoopObserver`] and is otherwise supplied by the
+	/// datastore builder.
+	observer: Arc<dyn ExecutionObserver>,
+	/// Per-transaction KV operation counters, updated by the wrapper methods
+	/// on `Transaction` (`get`, `set`, `scan`, ...). Snapshotted once when
+	/// the transaction finishes to populate the emitted event.
+	metrics: TransactionMetrics,
+	/// Pre-resolved tenant identity for this transaction. Sourced from the
+	/// originating session via [`crate::ctx::Context::tenant_identity`] and
+	/// surfaced as the `*Ctx` half of the emitted [`TransactionEvent`].
+	///
+	/// `OnceLock` so callers that wrap the [`Transaction`] in an `Arc` before
+	/// the session is known (e.g. [`crate::kvs::Datastore::execute_with_transaction`])
+	/// can still attach identity after the fact via
+	/// [`Self::set_tenant_identity`].
+	tenant_identity: OnceLock<Arc<TenantIdentity>>,
 	/// The underlying transactor
 	tr: Transactor,
 	/// The query cache for this store
@@ -81,16 +107,26 @@ impl Deref for Transaction {
 }
 
 impl Transaction {
-	/// Create a new query store
+	/// Create a new transaction.
+	///
+	/// `observer` is dispatched to on commit/cancel; pass
+	/// `Arc::new(NoopObserver)` when no observer is configured. `write`
+	/// should match the `TransactionType` used to open the underlying
+	/// transactor so the emitted event carries the correct attribute.
 	pub fn new(
 		local: bool,
 		sequences: Sequences,
 		async_event_trigger: Arc<Notify>,
+		observer: Arc<dyn ExecutionObserver>,
 		tr: Transactor,
 		config: &CommonConfig,
 	) -> Transaction {
 		Transaction {
 			local,
+			started_at: Instant::now(),
+			observer,
+			metrics: TransactionMetrics::new(),
+			tenant_identity: OnceLock::new(),
 			tr,
 			cache: TransactionCache::new(config.transaction_cache_size),
 			sequences,
@@ -99,6 +135,50 @@ impl Transaction {
 			trigger_async_event: AtomicBool::new(false),
 			pending_index_batches: Mutex::new(HashMap::new()),
 		}
+	}
+
+	/// Attach pre-resolved tenant identity so the emitted
+	/// [`TransactionEvent`] carries the active session's namespace,
+	/// database, user, session id, and client IP. Typically called by the
+	/// [`crate::kvs::Datastore`] entry points that create a transaction
+	/// against an authenticated session, before the transaction is enclosed
+	/// in an `Arc`. Idempotent: subsequent calls are silently ignored.
+	pub fn with_tenant_identity(self, identity: Option<Arc<TenantIdentity>>) -> Self {
+		if let Some(id) = identity {
+			let _ = self.tenant_identity.set(id);
+		}
+		self
+	}
+
+	/// Attach pre-resolved tenant identity to a transaction that is already
+	/// wrapped in an `Arc`. Idempotent: subsequent calls are silently
+	/// ignored.
+	pub fn set_tenant_identity(&self, identity: Arc<TenantIdentity>) {
+		let _ = self.tenant_identity.set(identity);
+	}
+
+	/// Emit a [`TransactionEvent`] carrying the current counter snapshot and
+	/// elapsed lifetime. Invoked from [`Self::commit`] and [`Self::cancel`].
+	///
+	/// Short-circuits when the installed observer is a no-op so a
+	/// process running with no observers attached pays exactly nothing
+	/// per commit/cancel beyond the early-return. The `metrics`
+	/// snapshot, the event allocation, and the trait-object dispatch
+	/// are all skipped in that case.
+	fn emit_transaction_event(&self, outcome: Outcome) {
+		if self.observer.is_noop() {
+			return;
+		}
+		self.observer.on_transaction_complete(&TransactionEvent {
+			safe: TransactionEventSafe {
+				outcome,
+				write: self.tr.writeable(),
+				duration: self.started_at.elapsed(),
+				metrics: self.metrics.snapshot(),
+				error_class: None,
+			},
+			ctx: self.tenant_identity.get().map(|t| t.to_transaction_ctx()).unwrap_or_default(),
+		});
 	}
 
 	pub(super) async fn lock_pending_index_batches<'a>(
@@ -138,8 +218,12 @@ impl Transaction {
 		}
 		// Enqueue pending index batches for deferred cleanup
 		self.cleanup_index_batches().await;
-		// Cancel the transaction
-		Ok(self.tr.cancel().await.map_err(Error::from)?)
+		// Cancel the underlying transactor. Emit a transaction event on
+		// either outcome so counters and durations are always reported
+		// even when cancel itself reports a driver-level error.
+		let result = self.tr.cancel().await.map_err(Error::from);
+		self.emit_transaction_event(Outcome::from(&result));
+		Ok(result?)
 	}
 
 	/// Commit a transaction.
@@ -147,23 +231,25 @@ impl Transaction {
 	/// This attempts to commit all changes made within the transaction.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip_all)]
 	pub async fn commit(&self) -> Result<()> {
-		// Store any buffered changefeed entries
+		// Store any buffered changefeed entries. Failure here falls into
+		// `cancel`, which itself emits the transaction event, so avoid
+		// double-emission from this path.
 		if let Err(e) = self.store_changes().await {
-			// Cancel the transaction if failure
 			let _ = self.cancel().await;
-			// Return the error
 			return Err(e);
 		}
 		// Commit the transaction
 		if let Err(e) = self.tr.commit().await {
 			// Enqueue pending index batches for deferred cleanup after commit failure.
 			self.cleanup_index_batches().await;
+			self.emit_transaction_event(Outcome::Error);
 			anyhow::bail!(e);
 		}
 		if self.trigger_async_event.load(Ordering::Relaxed) {
 			// Notify after commit so queued events are visible to workers.
 			self.async_event_trigger.notify_one();
 		}
+		self.emit_transaction_event(Outcome::Success);
 		Ok(())
 	}
 
@@ -186,7 +272,10 @@ impl Transaction {
 		K: KVKey + Debug,
 	{
 		let key = key.encode_key()?;
-		Ok(self.tr.exists(key, version).await.map_err(Error::from)?)
+		let key_bytes = key.len() as u64;
+		let found = self.tr.exists(key, version).await.map_err(Error::from)?;
+		self.metrics.record_get(u64::from(found), key_bytes, 0);
+		Ok(found)
 	}
 
 	/// Fetch a key from the datastore.
@@ -196,7 +285,13 @@ impl Transaction {
 		K: KVKey + Debug,
 	{
 		let key = key.encode_key()?;
+		let key_bytes = key.len() as u64;
 		let val = self.tr.get(key, version).await.map_err(Error::from)?;
+		let (keys_found, value_bytes) = match &val {
+			Some(v) => (1, v.len() as u64),
+			None => (0, 0),
+		};
+		self.metrics.record_get(keys_found, key_bytes, value_bytes);
 		val.map(K::ValueType::kv_decode_value).transpose()
 	}
 
@@ -211,10 +306,16 @@ impl Transaction {
 		K: KVKey + Debug,
 	{
 		let keys = keys.iter().map(|k| k.encode_key()).collect::<Result<Vec<_>>>()?;
-		self.tr
-			.getm(keys, version)
-			.await
-			.map_err(Error::from)?
+		// Sum the encoded input key lengths once, before they're moved into
+		// the transactor. The backend doesn't repeat this work because the
+		// caller already knows the inputs.
+		let key_bytes: u64 = keys.iter().map(|k| k.len() as u64).sum();
+		let res = self.tr.getm(keys, version).await.map_err(Error::from)?;
+		// On a decode failure `Result::collect` short-circuits and the
+		// metric still reflects the totals reported by the backend, which
+		// covers the entire batch. Decoding is purely a caller concern.
+		self.metrics.record_get(res.records, key_bytes, res.value_bytes);
+		res.values
 			.into_iter()
 			.map(|v| match v {
 				Some(v) => K::ValueType::kv_decode_value(v).map(Some),
@@ -233,13 +334,9 @@ impl Transaction {
 		K: KVKey + Debug,
 	{
 		let key = key.encode_key()?;
-		self.tr
-			.getp(key, version)
-			.await
-			.map_err(Error::from)?
-			.into_iter()
-			.map(|(k, v)| Ok((k, K::ValueType::kv_decode_value(v)?)))
-			.collect()
+		let res = self.tr.getp(key, version).await.map_err(Error::from)?;
+		self.metrics.record_scan(res.values.len() as u64, res.key_bytes, res.value_bytes);
+		res.values.into_iter().map(|(k, v)| Ok((k, K::ValueType::kv_decode_value(v)?))).collect()
 	}
 
 	/// Retrieve a specific range of keys from the datastore.
@@ -257,13 +354,9 @@ impl Transaction {
 	{
 		let beg = rng.start.encode_key()?;
 		let end = rng.end.encode_key()?;
-		self.tr
-			.getr(beg..end, version)
-			.await
-			.map_err(Error::from)?
-			.into_iter()
-			.map(|(k, v)| Ok((k, K::ValueType::kv_decode_value(v)?)))
-			.collect()
+		let res = self.tr.getr(beg..end, version).await.map_err(Error::from)?;
+		self.metrics.record_scan(res.values.len() as u64, res.key_bytes, res.value_bytes);
+		res.values.into_iter().map(|(k, v)| Ok((k, K::ValueType::kv_decode_value(v)?))).collect()
 	}
 
 	/// Fetch many records by ID in a single batch, with cache awareness.
@@ -377,7 +470,10 @@ impl Transaction {
 		K: KVKey + Debug,
 	{
 		let key = key.encode_key()?;
-		Ok(self.tr.del(key).await.map_err(Error::from)?)
+		let key_bytes = key.len() as u64;
+		self.tr.del(key).await.map_err(Error::from)?;
+		self.metrics.record_del(1, key_bytes);
+		Ok(())
 	}
 
 	/// Delete a key from the datastore if the current value matches a
@@ -388,8 +484,11 @@ impl Transaction {
 		K: KVKey + Debug,
 	{
 		let key = key.encode_key()?;
+		let key_bytes = key.len() as u64;
 		let chk = chk.map(|v| v.kv_encode_value()).transpose()?;
-		Ok(self.tr.delc(key, chk).await.map_err(Error::from)?)
+		self.tr.delc(key, chk).await.map_err(Error::from)?;
+		self.metrics.record_del(1, key_bytes);
+		Ok(())
 	}
 
 	/// Delete a range of keys from the datastore.
@@ -403,7 +502,11 @@ impl Transaction {
 	{
 		let beg = rng.start.encode_key()?;
 		let end = rng.end.encode_key()?;
-		Ok(self.tr.delr(beg..end).await.map_err(Error::from)?)
+		self.tr.delr(beg..end).await.map_err(Error::from)?;
+		// Range/prefix deletes don't report the number of affected keys or
+		// their byte size.
+		self.metrics.record_del(0, 0);
+		Ok(())
 	}
 
 	/// Delete a prefix of keys from the datastore.
@@ -416,7 +519,9 @@ impl Transaction {
 		K: KVKey + Debug,
 	{
 		let key = key.encode_key()?;
-		Ok(self.tr.delp(key).await.map_err(Error::from)?)
+		self.tr.delp(key).await.map_err(Error::from)?;
+		self.metrics.record_del(0, 0);
+		Ok(())
 	}
 
 	/// Delete all versions of a key from the datastore.
@@ -426,7 +531,10 @@ impl Transaction {
 		K: KVKey + Debug,
 	{
 		let key = key.encode_key()?;
-		Ok(self.tr.clr(key).await.map_err(Error::from)?)
+		let key_bytes = key.len() as u64;
+		self.tr.clr(key).await.map_err(Error::from)?;
+		self.metrics.record_del(1, key_bytes);
+		Ok(())
 	}
 
 	/// Delete all versions of a key from the datastore if the current value
@@ -437,8 +545,11 @@ impl Transaction {
 		K: KVKey + Debug,
 	{
 		let key = key.encode_key()?;
+		let key_bytes = key.len() as u64;
 		let chk = chk.map(|v| v.kv_encode_value()).transpose()?;
-		Ok(self.tr.clrc(key, chk).await.map_err(Error::from)?)
+		self.tr.clrc(key, chk).await.map_err(Error::from)?;
+		self.metrics.record_del(1, key_bytes);
+		Ok(())
 	}
 
 	/// Delete all versions of a range of keys from the datastore.
@@ -452,7 +563,9 @@ impl Transaction {
 	{
 		let beg = rng.start.encode_key()?;
 		let end = rng.end.encode_key()?;
-		Ok(self.tr.clrr(beg..end).await.map_err(Error::from)?)
+		self.tr.clrr(beg..end).await.map_err(Error::from)?;
+		self.metrics.record_del(0, 0);
+		Ok(())
 	}
 
 	/// Delete all versions of a prefix of keys from the datastore.
@@ -465,7 +578,9 @@ impl Transaction {
 		K: KVKey + Debug,
 	{
 		let key = key.encode_key()?;
-		Ok(self.tr.clrp(key).await.map_err(Error::from)?)
+		self.tr.clrp(key).await.map_err(Error::from)?;
+		self.metrics.record_del(0, 0);
+		Ok(())
 	}
 
 	/// Insert or update a key in the datastore.
@@ -476,7 +591,11 @@ impl Transaction {
 	{
 		let key = key.encode_key()?;
 		let val = val.kv_encode_value()?;
-		Ok(self.tr.set(key, val).await.map_err(Error::from)?)
+		let key_bytes = key.len() as u64;
+		let value_bytes = val.len() as u64;
+		self.tr.set(key, val).await.map_err(Error::from)?;
+		self.metrics.record_set(key_bytes, value_bytes);
+		Ok(())
 	}
 
 	/// Insert a key if it doesn't exist in the datastore.
@@ -487,7 +606,11 @@ impl Transaction {
 	{
 		let key = key.encode_key()?;
 		let val = val.kv_encode_value()?;
-		Ok(self.tr.put(key, val).await.map_err(Error::from)?)
+		let key_bytes = key.len() as u64;
+		let value_bytes = val.len() as u64;
+		self.tr.put(key, val).await.map_err(Error::from)?;
+		self.metrics.record_put(key_bytes, value_bytes);
+		Ok(())
 	}
 
 	/// Update a key in the datastore if the current value matches a condition.
@@ -504,7 +627,11 @@ impl Transaction {
 		let key = key.encode_key()?;
 		let val = val.kv_encode_value()?;
 		let chk = chk.map(|v| v.kv_encode_value()).transpose()?;
-		Ok(self.tr.putc(key, val, chk).await.map_err(Error::from)?)
+		let key_bytes = key.len() as u64;
+		let value_bytes = val.len() as u64;
+		self.tr.putc(key, val, chk).await.map_err(Error::from)?;
+		self.metrics.record_put(key_bytes, value_bytes);
+		Ok(())
 	}
 
 	/// Insert or replace a key in the datastore.
@@ -515,7 +642,11 @@ impl Transaction {
 	{
 		let key = key.encode_key()?;
 		let val = val.kv_encode_value()?;
-		Ok(self.tr.replace(key, val).await.map_err(Error::from)?)
+		let key_bytes = key.len() as u64;
+		let value_bytes = val.len() as u64;
+		self.tr.replace(key, val).await.map_err(Error::from)?;
+		self.metrics.record_put(key_bytes, value_bytes);
+		Ok(())
 	}
 
 	// --------------------------------------------------
@@ -540,7 +671,9 @@ impl Transaction {
 		let beg = rng.start.encode_key()?;
 		let end = rng.end.encode_key()?;
 		let limit = limit.into();
-		Ok(self.tr.keys(beg..end, limit, skip, version).await.map_err(Error::from)?)
+		let res = self.tr.keys(beg..end, limit, skip, version).await.map_err(Error::from)?;
+		self.metrics.record_scan(res.keys.len() as u64, res.key_bytes, 0);
+		Ok(res.keys)
 	}
 
 	/// Retrieve a specific range of keys from the datastore in reverse order.
@@ -561,7 +694,9 @@ impl Transaction {
 		let beg = rng.start.encode_key()?;
 		let end = rng.end.encode_key()?;
 		let limit = limit.into();
-		Ok(self.tr.keysr(beg..end, limit, skip, version).await.map_err(Error::from)?)
+		let res = self.tr.keysr(beg..end, limit, skip, version).await.map_err(Error::from)?;
+		self.metrics.record_scan(res.keys.len() as u64, res.key_bytes, 0);
+		Ok(res.keys)
 	}
 
 	/// Retrieve a specific range of keys from the datastore.
@@ -582,7 +717,9 @@ impl Transaction {
 		let beg = rng.start.encode_key()?;
 		let end = rng.end.encode_key()?;
 		let limit = limit.into();
-		Ok(self.tr.scan(beg..end, limit, skip, version).await.map_err(Error::from)?)
+		let res = self.tr.scan(beg..end, limit, skip, version).await.map_err(Error::from)?;
+		self.metrics.record_scan(res.values.len() as u64, res.key_bytes, res.value_bytes);
+		Ok(res.values)
 	}
 
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip_all)]
@@ -599,7 +736,9 @@ impl Transaction {
 		let beg = rng.start.encode_key()?;
 		let end = rng.end.encode_key()?;
 		let limit = limit.into();
-		Ok(self.tr.scanr(beg..end, limit, skip, version).await.map_err(Error::from)?)
+		let res = self.tr.scanr(beg..end, limit, skip, version).await.map_err(Error::from)?;
+		self.metrics.record_scan(res.values.len() as u64, res.key_bytes, res.value_bytes);
+		Ok(res.values)
 	}
 
 	/// Count the total number of keys within a range in the datastore.
@@ -613,7 +752,10 @@ impl Transaction {
 	{
 		let beg = rng.start.encode_key()?;
 		let end = rng.end.encode_key()?;
-		Ok(self.tr.count(beg..end, version).await.map_err(Error::from)?)
+		let n = self.tr.count(beg..end, version).await.map_err(Error::from)?;
+		// `count` only reports the number of keys, not their byte size.
+		self.metrics.record_scan(n as u64, 0, 0);
+		Ok(n)
 	}
 
 	// --------------------------------------------------

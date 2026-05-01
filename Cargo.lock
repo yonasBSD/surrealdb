@@ -4715,6 +4715,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "opentelemetry-prometheus-text-exporter"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "897906366b17a89bec845f6051e0c3474049402a09a0711eea180941293bd013"
+dependencies = [
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "smartstring",
+]
+
+[[package]]
 name = "opentelemetry-proto"
 version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6954,6 +6965,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "smartstring"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3fb72c633efbaa2dd666986505016c32c3044395ceaf881518399d2f4127ee29"
+dependencies = [
+ "autocfg",
+ "static_assertions",
+ "version_check",
+]
+
+[[package]]
 name = "snap"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7048,6 +7070,12 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "static_assertions"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "static_assertions_next"
@@ -7526,6 +7554,7 @@ dependencies = [
  "num_cpus",
  "opentelemetry",
  "opentelemetry-otlp",
+ "opentelemetry-prometheus-text-exporter",
  "opentelemetry-proto",
  "opentelemetry_sdk",
  "pin-project-lite",

@@ -17,7 +17,7 @@ use crate::catalog::providers::{CatalogProvider, NamespaceProvider, RootProvider
 use crate::ctx::reason::Reason;
 use crate::ctx::{Context, FrozenContext};
 use crate::dbs::response::QueryResult;
-use crate::dbs::{Force, Options, QueryType};
+use crate::dbs::{Force, Options, QueryType, StatementCounters};
 use crate::doc::DefaultBroker;
 use crate::err::Error;
 use crate::exec::planner::try_plan_expr;
@@ -29,6 +29,10 @@ use crate::expr::{Base, ControlFlow, Expr, FlowResult, TopLevelExpr};
 use crate::iam::{Action, ResourceKind};
 use crate::kvs::slowlog::SlowLogVisit;
 use crate::kvs::{Datastore, LockType, Transaction, TransactionType};
+use crate::observe::{
+	Outcome, QueryCounters, QueryEvent, QueryEventSafe, StatementEvent, StatementEventCtx,
+	StatementEventSafe, StatementType,
+};
 use crate::rpc::types_error_from_anyhow;
 use crate::types::PublicNotification;
 use crate::val::{Array, Value, convert_value_to_public_value};
@@ -73,6 +77,47 @@ impl Executor {
 		}
 	}
 
+	/// Install a fresh [`StatementCounters`] on the executor's context for
+	/// the next statement and return a clone of the handle so the caller
+	/// can read the counts after the statement returns. The iterator
+	/// (deep in the execution path) inherits the same handle through the
+	/// child contexts it derives from `self.ctx`.
+	///
+	/// Between statements the executor holds the only strong reference to
+	/// `self.ctx`, so `Arc::get_mut` succeeds. If it ever fails — i.e.
+	/// some child kept a strong reference past statement completion —
+	/// the iterator would record into the previous statement's
+	/// counters (or `None`) while `count_result_rows` reads zero from
+	/// the new one, silently underreporting `RETURN NONE` DML row
+	/// counts (the very case `StatementCounters` exists to fix).
+	///
+	/// We treat that as a programmer error: in debug builds it
+	/// panics so tests fail loud; in release builds it logs a `warn`
+	/// (deduped per process) so production telemetry surfaces the bug
+	/// without turning a row-count discrepancy into an outage.
+	fn install_statement_counters(&mut self) -> Arc<StatementCounters> {
+		let counters = StatementCounters::new();
+		if let Some(ctx) = Arc::get_mut(&mut self.ctx) {
+			ctx.set_statement_counters(Some(counters.clone()));
+		} else {
+			debug_assert!(
+				false,
+				"install_statement_counters: ctx Arc was contended at statement boundary"
+			);
+			static WARNED: std::sync::atomic::AtomicBool =
+				std::sync::atomic::AtomicBool::new(false);
+			if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+				tracing::warn!(
+					target: "surrealdb::core::dbs",
+					"install_statement_counters: ctx Arc contended at statement boundary; \
+					 result_rows on RETURN NONE DML may underreport. This is a bug — \
+					 future occurrences will not log."
+				);
+			}
+		}
+		counters
+	}
+
 	fn execute_option_statement(&mut self, stmt: OptionStatement) -> Result<()> {
 		// Allowed to run?
 		self.opt.is_allowed(Action::Edit, ResourceKind::Option, &Base::Db)?;
@@ -99,6 +144,161 @@ impl Executor {
 	fn check_slow_log<S: SlowLogVisit + ToSql>(&self, start: &Instant, stm: &S) {
 		if let Some(slow_log) = self.ctx.slow_log() {
 			slow_log.check_log(&self.ctx, start, stm);
+		}
+	}
+
+	/// Dispatch a [`QueryEvent`] to the datastore's installed observer at
+	/// the boundary of a query batch.
+	///
+	/// Aggregates per-statement outcomes captured by the executor while
+	/// running the batch. Counters are derived from `results`: any
+	/// `QueryResult` whose `result` is `Err` is classified as a statement
+	/// error, and the batch outcome is [`Outcome::Error`] if any
+	/// statement errored, otherwise [`Outcome::Success`]. Callers pass
+	/// the slice of [`QueryResult`]s produced by the current batch
+	/// (excluding any from outer batches).
+	fn emit_query_event_for_results(
+		&self,
+		kvs: &Datastore,
+		batch_start: Instant,
+		results: &[QueryResult],
+	) {
+		let total = results.len() as u32;
+		let err = results.iter().filter(|r| r.result.is_err()).count() as u32;
+		let ok = total - err;
+		let outcome = if err > 0 {
+			Outcome::Error
+		} else {
+			Outcome::Success
+		};
+		kvs.observer().on_query_complete(&QueryEvent {
+			safe: QueryEventSafe {
+				outcome,
+				duration: batch_start.elapsed(),
+				counters: QueryCounters {
+					total,
+					ok,
+					err,
+				},
+				error_class: None,
+			},
+			ctx: self.ctx.tenant_identity().map(|t| t.to_query_ctx()).unwrap_or_default(),
+		});
+	}
+
+	/// Dispatch a [`StatementEvent`] to the datastore's installed observer.
+	///
+	/// Classification fields (`kind`, `read_only`, optional `sql`) are
+	/// captured up-front by the caller before the originating expression is
+	/// moved into the execution path. This keeps `on_statement_complete`
+	/// reachable from every control-flow branch (early `return`, `continue`,
+	/// or fall-through) without re-examining the consumed statement.
+	///
+	/// `result_rows` is the number of rows the statement returned (SELECT)
+	/// or affected (CREATE / UPDATE / UPSERT / DELETE / RELATE / INSERT).
+	/// Non-DML statements pass `0`. For DML statements with `RETURN NONE`
+	/// the post-RETURN value is empty; the actual affected count is
+	/// captured by the iterator on a per-statement [`StatementCounters`]
+	/// and supplied here by the caller.
+	#[allow(clippy::too_many_arguments)]
+	fn emit_statement_event_cached(
+		&self,
+		kvs: &Datastore,
+		kind: StatementType,
+		read_only: bool,
+		sql: Option<String>,
+		start: &Instant,
+		outcome: Outcome,
+		result_rows: u64,
+	) {
+		kvs.observer().on_statement_complete(&StatementEvent {
+			safe: StatementEventSafe {
+				kind,
+				outcome,
+				duration: start.elapsed(),
+				read_only,
+				result_rows,
+				error_class: None,
+			},
+			ctx: self.ctx.tenant_identity().map(|t| t.to_statement_ctx(sql.clone())).unwrap_or(
+				StatementEventCtx {
+					sql,
+					..Default::default()
+				},
+			),
+		});
+	}
+
+	/// Emit a `StatementEvent` for a statement that was rejected
+	/// before execution (transaction-create failure, parent-batch
+	/// timeout, ctx cancellation, …). Centralised so every
+	/// `QueryResult::Err(NotExecuted | TimedOut | Cancelled)` push
+	/// has a matching telemetry event and dashboards do not undercount
+	/// `surrealdb_statement_total{outcome="error"}` on these paths.
+	///
+	/// Duration is `Duration::ZERO` because the statement never ran;
+	/// `read_only` is conservatively `false` because we cannot inspect
+	/// the consumed expression.
+	fn emit_statement_event_unexecuted(
+		&self,
+		kvs: &Datastore,
+		kind: StatementType,
+		error_class: &'static str,
+	) {
+		kvs.observer().on_statement_complete(&StatementEvent {
+			safe: StatementEventSafe {
+				kind,
+				outcome: Outcome::Error,
+				duration: Duration::ZERO,
+				read_only: false,
+				result_rows: 0,
+				error_class: Some(error_class),
+			},
+			ctx: self.ctx.tenant_identity().map(|t| t.to_statement_ctx(None)).unwrap_or_default(),
+		});
+	}
+
+	/// Compute the row count for a completed statement based on its kind,
+	/// the per-statement counter snapshot, and the result the executor
+	/// produced.
+	///
+	/// For DML statements (CREATE / UPDATE / UPSERT / DELETE / RELATE /
+	/// INSERT) the iterator-side [`StatementCounters::affected`] is the
+	/// source of truth: it correctly reports records mutated even when
+	/// `RETURN NONE` (or a mode whose per-document value happens to be
+	/// `Value::None`) suppresses the post-RETURN payload. The value
+	/// shape is consulted only when no counter snapshot is available,
+	/// which never happens on the production hot path but keeps the
+	/// helper safe to call.
+	///
+	/// For non-DML statements the counter is not consulted and the value
+	/// shape is interpreted as before:
+	///
+	/// - `Value::Array` — `array.len()` (SELECT rows after START/LIMIT);
+	/// - `Value::None` / `Value::Null` — `0`;
+	/// - anything else — `1`;
+	/// - `None` (error path with no value to inspect) — `0`.
+	fn count_result_rows(
+		kind: StatementType,
+		counters: Option<&StatementCounters>,
+		value: Option<&Value>,
+	) -> u64 {
+		if kind.is_dml() {
+			if let Some(counters) = counters {
+				return counters.affected();
+			}
+			// Fallback to the value-shape heuristic if no counter was
+			// installed (legacy / test paths).
+			return match value {
+				Some(Value::Array(arr)) => arr.len() as u64,
+				Some(Value::None) | Some(Value::Null) | None => 0,
+				Some(_) => 1,
+			};
+		}
+		match value {
+			Some(Value::Array(arr)) => arr.len() as u64,
+			Some(Value::None) | Some(Value::Null) | None => 0,
+			Some(_) => 1,
 		}
 	}
 
@@ -609,7 +809,11 @@ impl Executor {
 		} else {
 			TransactionType::Write
 		};
-		let txn = Arc::new(kvs.transaction(transaction_type, LockType::Optimistic).await?);
+		let txn = Arc::new(
+			kvs.transaction(transaction_type, LockType::Optimistic)
+				.await?
+				.with_tenant_identity(self.ctx.tenant_identity().cloned()),
+		);
 		let receiver = self.prepare_broker();
 
 		let exec_result = match kvs.transaction_timeout() {
@@ -683,7 +887,11 @@ impl Executor {
 	where
 		S: Stream<Item = Result<TopLevelExpr>>,
 	{
-		let Ok(txn) = kvs.transaction(TransactionType::Write, LockType::Optimistic).await else {
+		let Ok(txn) = kvs
+			.transaction(TransactionType::Write, LockType::Optimistic)
+			.await
+			.map(|tx| tx.with_tenant_identity(self.ctx.tenant_identity().cloned()))
+		else {
 			// couldn't create a transaction.
 			// Fast forward until we hit CANCEL or COMMIT
 			while let Some(stmt) = stream.next().await {
@@ -693,6 +901,7 @@ impl Executor {
 					return Ok(());
 				}
 
+				let kind = StatementType::from_top_level(&stmt);
 				self.results.push(QueryResult {
 					time: Duration::ZERO,
 					result: Err(TypesError::query(
@@ -702,6 +911,7 @@ impl Executor {
 					)),
 					query_type: QueryType::Other,
 				});
+				self.emit_statement_event_unexecuted(kvs, kind, "txn_create_failed");
 			}
 
 			// Ran out of statements but still didn't hit a COMMIT or CANCEL
@@ -716,13 +926,14 @@ impl Executor {
 				let start_results = self.results.len();
 				match tokio::time::timeout(
 					timeout,
-					self.execute_begin_statement_inner(txn.clone(), stream),
+					self.execute_begin_statement_inner(kvs, txn.clone(), stream),
 				)
 				.await
 				{
 					Ok(result) => result,
 					Err(_) => {
 						let _ = txn.cancel().await;
+						let timed_out_count = self.results.len().saturating_sub(start_results);
 						for res in &mut self.results[start_results..] {
 							res.query_type = QueryType::Other;
 							res.result = Err(TypesError::query(
@@ -735,16 +946,30 @@ impl Executor {
 								}),
 							));
 						}
+						// Emit one statement event per result that the
+						// timeout retroactively turned into a failure.
+						// We don't have the original statement kind any
+						// more (the ast was consumed), so collapse to
+						// `Other`; consumers care primarily about the
+						// `error_class` and the `outcome` here.
+						for _ in 0..timed_out_count {
+							self.emit_statement_event_unexecuted(
+								kvs,
+								StatementType::Other,
+								"txn_timeout",
+							);
+						}
 						bail!(Error::TransactionTimedout(timeout.into()))
 					}
 				}
 			}
-			None => self.execute_begin_statement_inner(txn, stream).await,
+			None => self.execute_begin_statement_inner(kvs, txn, stream).await,
 		}
 	}
 
 	async fn execute_begin_statement_inner<S>(
 		&mut self,
+		kvs: &Datastore,
 		txn: Arc<Transaction>,
 		mut stream: Pin<&mut S>,
 	) -> Result<()>
@@ -775,6 +1000,7 @@ impl Executor {
 				// results and then return.
 				let _ = txn.cancel().await;
 
+				let cancelled_count = self.results.len().saturating_sub(start_results);
 				for res in &mut self.results[start_results..] {
 					res.query_type = QueryType::Other;
 					res.result = Err(TypesError::query(
@@ -782,10 +1008,18 @@ impl Executor {
 						Some(QueryError::Cancelled),
 					));
 				}
+				let cancel_class = match done {
+					Reason::Timedout(_) => "ctx_timeout",
+					Reason::Canceled => "ctx_cancelled",
+				};
+				for _ in 0..cancelled_count {
+					self.emit_statement_event_unexecuted(kvs, StatementType::Other, cancel_class);
+				}
 
 				while let Some(stmt) = stream.next().await {
 					yield_now!();
 					let stmt = stmt?;
+					let kind = StatementType::from_top_level(&stmt);
 					match stmt {
 						TopLevelExpr::Commit => {
 							// After timeout/cancel the txn is already gone: COMMIT cannot succeed.
@@ -809,6 +1043,7 @@ impl Executor {
 								}),
 								query_type: QueryType::Other,
 							});
+							self.emit_statement_event_unexecuted(kvs, kind, cancel_class);
 							return Ok(());
 						}
 						ref stmt => {
@@ -830,6 +1065,7 @@ impl Executor {
 								result,
 								query_type: QueryType::Other,
 							});
+							self.emit_statement_event_unexecuted(kvs, kind, cancel_class);
 							if matches!(stmt, TopLevelExpr::Cancel) {
 								return Ok(());
 							}
@@ -853,7 +1089,20 @@ impl Executor {
 				_ => QueryType::Other,
 			};
 
+			// Capture classification up-front so we can emit a
+			// `StatementEvent` regardless of which control-flow branch the
+			// match below takes. The statement itself is moved into the
+			// match, so anything the observer needs must be derived here.
+			let statement_type = StatementType::from_top_level(&stmt);
+			let statement_read_only = stmt.read_only();
+			let sql_text = kvs.observer().needs_statement_text().then(|| stmt.to_sql());
+
 			let before = Instant::now();
+			// Row count populated by the `stmt =>` arm below before it
+			// consumes the internal `Value`. Every other arm of the
+			// match either returns early or contributes a non-DML
+			// statement, so 0 is the right default.
+			let mut stmt_result_rows: u64 = 0;
 			let result = match stmt {
 				TopLevelExpr::Begin => {
 					let _ = txn.cancel().await;
@@ -880,6 +1129,16 @@ impl Executor {
 					});
 
 					self.opt.broker = None;
+
+					self.emit_statement_event_cached(
+						kvs,
+						statement_type,
+						statement_read_only,
+						sql_text,
+						&before,
+						Outcome::Error,
+						0,
+					);
 
 					while let Some(stmt) = stream.next().await {
 						yield_now!();
@@ -940,6 +1199,16 @@ impl Executor {
 						query_type: QueryType::Other,
 					});
 
+					self.emit_statement_event_cached(
+						kvs,
+						statement_type,
+						statement_read_only,
+						sql_text,
+						&before,
+						Outcome::Success,
+						0,
+					);
+
 					return Ok(());
 				}
 				TopLevelExpr::Commit => {
@@ -971,6 +1240,16 @@ impl Executor {
 							query_type: QueryType::Other,
 						});
 
+						self.emit_statement_event_cached(
+							kvs,
+							statement_type,
+							statement_read_only,
+							sql_text,
+							&before,
+							Outcome::Success,
+							0,
+						);
+
 						return Ok(());
 					};
 
@@ -996,6 +1275,16 @@ impl Executor {
 						query_type: QueryType::Other,
 					});
 
+					self.emit_statement_event_cached(
+						kvs,
+						statement_type,
+						statement_read_only,
+						sql_text,
+						&before,
+						Outcome::Error,
+						0,
+					);
+
 					return Ok(());
 				}
 				TopLevelExpr::Option(stmt) => match self.execute_option_statement(stmt) {
@@ -1006,6 +1295,15 @@ impl Executor {
 							result: Ok(convert_value_to_public_value(Value::None)?),
 							query_type: QueryType::Other,
 						});
+						self.emit_statement_event_cached(
+							kvs,
+							statement_type,
+							statement_read_only,
+							sql_text,
+							&before,
+							Outcome::Success,
+							0,
+						);
 						continue;
 					}
 					Err(e) => Err(TypesError::internal(e.to_string())),
@@ -1014,47 +1312,62 @@ impl Executor {
 					// reintroduce planner later.
 					let plan = stmt;
 
-					let r = match self.execute_plan_in_transaction(txn.clone(), &before, plan).await
-					{
-						Ok(x) => Ok(x),
-						Err(ControlFlow::Return(value)) => {
-							skip_remaining = true;
-							Ok(value)
-						}
-						Err(ControlFlow::Break) | Err(ControlFlow::Continue) => {
-							Err(anyhow!(Error::InvalidControlFlow))
-						}
-						Err(ControlFlow::Err(e)) => {
-							for res in &mut self.results[start_results..] {
-								res.query_type = QueryType::Other;
-								res.result = Err(TypesError::query(
-									"The query was not executed due to a failed transaction"
-										.to_string(),
-									Some(QueryError::NotExecuted),
-								));
+					// Install fresh per-statement counters so DML
+					// iterators inside this BEGIN/COMMIT block can
+					// surface affected-row counts independently of the
+					// post-RETURN value shape.
+					let counters = self.install_statement_counters();
+					let r: Result<Value> =
+						match self.execute_plan_in_transaction(txn.clone(), &before, plan).await {
+							Ok(x) => Ok(x),
+							Err(ControlFlow::Return(value)) => {
+								skip_remaining = true;
+								Ok(value)
 							}
+							Err(ControlFlow::Break) | Err(ControlFlow::Continue) => {
+								Err(anyhow!(Error::InvalidControlFlow))
+							}
+							Err(ControlFlow::Err(e)) => {
+								for res in &mut self.results[start_results..] {
+									res.query_type = QueryType::Other;
+									res.result = Err(TypesError::query(
+										"The query was not executed due to a failed transaction"
+											.to_string(),
+										Some(QueryError::NotExecuted),
+									));
+								}
 
-							// statement return an error. Consume all the other statement until
-							// we hit a cancel or commit.
-							self.results.push(QueryResult {
-								time: before.elapsed(),
-								result: Err(types_error_from_anyhow(e)),
-								query_type,
-							});
+								// statement return an error. Consume all the other statement until
+								// we hit a cancel or commit.
+								self.results.push(QueryResult {
+									time: before.elapsed(),
+									result: Err(types_error_from_anyhow(e)),
+									query_type,
+								});
 
-							let _ = txn.cancel().await;
+								self.emit_statement_event_cached(
+									kvs,
+									statement_type,
+									statement_read_only,
+									sql_text,
+									&before,
+									Outcome::Error,
+									0,
+								);
 
-							self.opt.broker = None;
+								let _ = txn.cancel().await;
 
-							while let Some(stmt) = stream.next().await {
-								yield_now!();
-								let stmt = stmt?;
-								match stmt {
-									TopLevelExpr::Commit => {
-										// Aborted txn: COMMIT must error (same intent as
-										// `txn.commit()` failure above — descriptive
-										// `Cannot COMMIT:` prefix) (#7207).
-										self.results.push(QueryResult {
+								self.opt.broker = None;
+
+								while let Some(stmt) = stream.next().await {
+									yield_now!();
+									let stmt = stmt?;
+									match stmt {
+										TopLevelExpr::Commit => {
+											// Aborted txn: COMMIT must error (same intent as
+											// `txn.commit()` failure above — descriptive
+											// `Cannot COMMIT:` prefix) (#7207).
+											self.results.push(QueryResult {
 												time: Duration::ZERO,
 												result: Err(TypesError::query(
 													"Cannot COMMIT: the transaction was aborted due to a prior error"
@@ -1063,13 +1376,13 @@ impl Executor {
 												)),
 												query_type: QueryType::Other,
 											});
-										return Ok(());
-									}
-									TopLevelExpr::Cancel => {
-										return Ok(());
-									}
-									_ => {
-										self.results.push(QueryResult {
+											return Ok(());
+										}
+										TopLevelExpr::Cancel => {
+											return Ok(());
+										}
+										_ => {
+											self.results.push(QueryResult {
 												time: Duration::ZERO,
 												result: Err(TypesError::query(
 													"The query was not executed due to a cancelled transaction"
@@ -1078,15 +1391,28 @@ impl Executor {
 												)),
 												query_type: QueryType::Other,
 											});
+										}
 									}
 								}
-							}
 
-							// ran out of statements before the transaction ended.
-							// Just break as we have nothing else we can do.
-							return Ok(());
-						}
-					};
+								// ran out of statements before the transaction ended.
+								// Just break as we have nothing else we can do.
+								return Ok(());
+							}
+						};
+
+					// Count rows from the internal Value before it's
+					// consumed by the conversion to PublicValue. Non-DML
+					// statement kinds collapse to 0 inside the helper;
+					// DML statements consult the iterator-side counter
+					// so RETURN NONE / fresh CREATE etc. report
+					// accurately.
+					let rows = Self::count_result_rows(
+						statement_type,
+						Some(counters.as_ref()),
+						r.as_ref().ok(),
+					);
+					stmt_result_rows = rows;
 
 					match r {
 						Ok(value) => Ok(convert_value_to_public_value(value)?),
@@ -1094,6 +1420,17 @@ impl Executor {
 					}
 				}
 			};
+
+			let outcome = Outcome::from(&result);
+			self.emit_statement_event_cached(
+				kvs,
+				statement_type,
+				statement_read_only,
+				sql_text,
+				&before,
+				outcome,
+				stmt_result_rows,
+			);
 
 			self.results.push(QueryResult {
 				time: before.elapsed(),
@@ -1130,6 +1467,7 @@ impl Executor {
 	/// Execute a logical plan with an existing transaction
 	#[instrument(level = "debug", name = "executor", target = "surrealdb::core::dbs", skip_all)]
 	pub(crate) async fn execute_plan_with_transaction(
+		kvs: &Datastore,
 		ctx: FrozenContext,
 		opt: Options,
 		plan: LogicalPlan,
@@ -1137,11 +1475,27 @@ impl Executor {
 		// The transaction is already set in the context
 		// Execute each expression with the transaction
 		let tx = ctx.tx();
+		let batch_start = Instant::now();
 		let mut executor = Self::new(ctx, opt);
 		let mut results = Vec::new();
 
 		for expr in plan.expressions {
 			let start = Instant::now();
+			// Capture classification before the expression is moved
+			// into `execute_plan_in_transaction` so we can emit a
+			// matching `StatementEvent` regardless of which control-flow
+			// branch the result lands in (mirrors the cached helper
+			// pattern used in `execute_expr_stream`).
+			let statement_type = StatementType::from_top_level(&expr);
+			let statement_read_only = matches!(expr, TopLevelExpr::Use(_) | TopLevelExpr::Show(_))
+				|| matches!(
+					&expr,
+					TopLevelExpr::Expr(e) if matches!(
+						e,
+						Expr::Select(_) | Expr::Info(_) | Expr::Explain { .. }
+					)
+				);
+			let counters = executor.install_statement_counters();
 			let result = executor.execute_plan_in_transaction(tx.clone(), &start, expr).await;
 
 			let time = start.elapsed();
@@ -1163,9 +1517,28 @@ impl Executor {
 					query_type: QueryType::Other,
 				},
 			};
+			let outcome = Outcome::from(&query_result.result);
+			// Counters are accurate for DML (SELECT row counts come
+			// from the value shape, which we no longer have post
+			// conversion — passing `None` is fine since the helper
+			// short-circuits to counter-driven counts on DML and
+			// returns 0 on non-DML when value is `None`, matching the
+			// previous behaviour for this entry point).
+			let stmt_result_rows =
+				Self::count_result_rows(statement_type, Some(counters.as_ref()), None);
+			executor.emit_statement_event_cached(
+				kvs,
+				statement_type,
+				statement_read_only,
+				None,
+				&start,
+				outcome,
+				stmt_result_rows,
+			);
 			results.push(query_result);
 		}
 
+		executor.emit_query_event_for_results(kvs, batch_start, &results);
 		Ok(results)
 	}
 
@@ -1190,7 +1563,28 @@ impl Executor {
 		.await
 	}
 
-	#[instrument(level = "debug", name = "executor", target = "surrealdb::core::dbs", skip_all)]
+	#[instrument(
+		level = "debug",
+		name = "executor",
+		target = "surrealdb::core::dbs",
+		skip_all,
+		fields(
+			// Pre-declared placeholder fields populated by the
+			// enterprise OTEL enrichment observer. Tracing's
+			// `Span::record(field, value)` only updates fields that
+			// were declared at span-creation time; declaring them as
+			// `tracing::field::Empty` here lets the observer fill in
+			// tenant attributes without touching every executor
+			// internal. Community builds pay zero cost — the
+			// enrichment observer never attaches and the placeholders
+			// stay empty.
+			surrealdb.namespace = tracing::field::Empty,
+			surrealdb.database = tracing::field::Empty,
+			surrealdb.user = tracing::field::Empty,
+			surrealdb.session_id = tracing::field::Empty,
+			surrealdb.statement_type = tracing::field::Empty,
+		),
+	)]
 	pub(crate) async fn execute_expr_stream<S>(
 		kvs: &Datastore,
 		ctx: FrozenContext,
@@ -1201,7 +1595,14 @@ impl Executor {
 	where
 		S: Stream<Item = Result<TopLevelExpr>>,
 	{
+		// Capture batch boundaries up-front so the `QueryEvent` emitted
+		// at every return path measures the full span of the batch even
+		// when an early parse error short-circuits the loop. The slice
+		// of `QueryResult`s the executor produced is the source of
+		// truth for the per-batch counters.
+		let batch_start = Instant::now();
 		let mut this = Executor::new(ctx, opt);
+		let batch_results_start = this.results.len();
 		let mut stream = pin!(stream);
 
 		if skip_success_results {
@@ -1239,9 +1640,25 @@ impl Executor {
 						query_type: QueryType::Other,
 					});
 
+					this.emit_query_event_for_results(
+						kvs,
+						batch_start,
+						&this.results[batch_results_start..],
+					);
 					return Ok(this.results);
 				}
 			};
+
+			// Capture classification up-front so we can emit a
+			// `StatementEvent` from whichever branch of the match consumes
+			// `stmt`. None of these helpers retain any data that could leak
+			// customer values to an unauthenticated sink -- `StatementType`
+			// is a bounded enum and `to_sql` is only invoked when the
+			// installed observer explicitly opts in.
+			let statement_type = StatementType::from_top_level(&stmt);
+			let statement_read_only = stmt.read_only();
+			let sql_text = kvs.observer().needs_statement_text().then(|| stmt.to_sql());
+			let start = Instant::now();
 
 			match stmt {
 				TopLevelExpr::Option(stmt) => {
@@ -1252,7 +1669,18 @@ impl Executor {
 								.to_string()
 						));
 					}
-					this.execute_option_statement(stmt)?;
+					let result = this.execute_option_statement(stmt);
+					let outcome = Outcome::from(&result);
+					this.emit_statement_event_cached(
+						kvs,
+						statement_type,
+						statement_read_only,
+						sql_text,
+						&start,
+						outcome,
+						0,
+					);
+					result?;
 					if !skip_success_results {
 						this.results.push(QueryResult {
 							time: Duration::ZERO,
@@ -1270,25 +1698,61 @@ impl Executor {
 						});
 					}
 
-					if let Err(e) = this.execute_begin_statement(kvs, stream.as_mut()).await {
+					let begin_result = this.execute_begin_statement(kvs, stream.as_mut()).await;
+					let outcome = Outcome::from(&begin_result);
+					this.emit_statement_event_cached(
+						kvs,
+						statement_type,
+						statement_read_only,
+						sql_text,
+						&start,
+						outcome,
+						0,
+					);
+
+					if let Err(e) = begin_result {
 						this.results.push(QueryResult {
 							time: Duration::ZERO,
 							result: Err(types_error_from_anyhow(e)),
 							query_type: QueryType::Other,
 						});
 
+						this.emit_query_event_for_results(
+							kvs,
+							batch_start,
+							&this.results[batch_results_start..],
+						);
 						return Ok(this.results);
 					}
 				}
 				stmt => {
 					let query_type: QueryType = QueryType::for_toplevel_expr(&stmt);
 
-					let now = Instant::now();
-					let result = this.execute_bare_statement(kvs, &now, stmt).await;
+					// Install fresh per-statement counters so DML
+					// iterators can record affected rows independently of
+					// the post-RETURN value shape.
+					let counters = this.install_statement_counters();
+					let result = this.execute_bare_statement(kvs, &start, stmt).await;
+					let outcome = Outcome::from(&result);
+					let result_rows = Self::count_result_rows(
+						statement_type,
+						Some(counters.as_ref()),
+						result.as_ref().ok(),
+					);
+					this.emit_statement_event_cached(
+						kvs,
+						statement_type,
+						statement_read_only,
+						sql_text,
+						&start,
+						outcome,
+						result_rows,
+					);
+
 					if skip_success_results {
 						if let Err(err) = result {
 							this.results.push(QueryResult {
-								time: now.elapsed(),
+								time: start.elapsed(),
 								result: Err(types_error_from_anyhow(err)),
 								query_type,
 							});
@@ -1299,7 +1763,7 @@ impl Executor {
 							Err(err) => Err(types_error_from_anyhow(err)),
 						};
 						this.results.push(QueryResult {
-							time: now.elapsed(),
+							time: start.elapsed(),
 							result,
 							query_type,
 						});
@@ -1308,6 +1772,7 @@ impl Executor {
 			}
 			yield_now!();
 		}
+		this.emit_query_event_for_results(kvs, batch_start, &this.results[batch_results_start..]);
 		Ok(this.results)
 	}
 }
@@ -1625,5 +2090,265 @@ mod tests {
 			err.contains("Cannot change OPTION IMPORT"),
 			"Error should explain that import mode is locked, got: {err}"
 		);
+	}
+
+	mod result_rows_observer {
+		//! Regression coverage for the affected-row contract on
+		//! `StatementEventSafe.result_rows` and the per-batch
+		//! `QueryEvent` dispatch. The iterator-side counter must report
+		//! the actual number of records mutated for DML statements --
+		//! including those that suppress the per-document value via
+		//! `RETURN NONE` or that lack a "before" value (fresh `CREATE`).
+		//! The executor must also emit one `QueryEvent` per query batch
+		//! so authenticated `surrealdb_queries_total` /
+		//! `surrealdb_query_errors_total` /
+		//! `surrealdb_query_duration_seconds` keep advancing under load.
+
+		use std::sync::{Arc, Mutex};
+
+		use crate::dbs::Session;
+		use crate::kvs::Datastore;
+		use crate::observe::{
+			ExecutionObserver, Outcome, QueryEvent, StatementEvent, StatementType,
+		};
+
+		#[derive(Default)]
+		struct CapturingObserver {
+			events: Mutex<Vec<(StatementType, u64)>>,
+			queries: Mutex<Vec<(Outcome, u32, u32, u32)>>,
+		}
+
+		impl CapturingObserver {
+			fn snapshot(&self) -> Vec<(StatementType, u64)> {
+				self.events.lock().unwrap().clone()
+			}
+
+			fn queries(&self) -> Vec<(Outcome, u32, u32, u32)> {
+				self.queries.lock().unwrap().clone()
+			}
+		}
+
+		impl ExecutionObserver for CapturingObserver {
+			fn on_statement_complete(&self, event: &StatementEvent) {
+				self.events.lock().unwrap().push((event.safe.kind, event.safe.result_rows));
+			}
+
+			fn on_query_complete(&self, event: &QueryEvent) {
+				let c = event.safe.counters;
+				self.queries.lock().unwrap().push((event.safe.outcome, c.total, c.ok, c.err));
+			}
+		}
+
+		async fn run(sql: &str) -> Vec<(StatementType, u64)> {
+			let (events, _) = run_capturing(sql).await;
+			events
+		}
+
+		async fn run_capturing(sql: &str) -> (Vec<(StatementType, u64)>, Arc<CapturingObserver>) {
+			let observer = Arc::new(CapturingObserver::default());
+			let obs: Arc<dyn ExecutionObserver> = observer.clone();
+			let ds =
+				Datastore::builder().with_observer(obs).build_with_path("memory").await.unwrap();
+			let sess = Session::default().with_ns("NS").with_db("DB");
+			// The capturing observer also receives the DEFINE bootstrap
+			// events; drain them before running the test SQL so the
+			// assertions only see the statements they care about.
+			ds.execute("DEFINE NAMESPACE NS; USE NS NS; DEFINE DATABASE DB", &sess, None)
+				.await
+				.unwrap();
+			observer.events.lock().unwrap().clear();
+			observer.queries.lock().unwrap().clear();
+			ds.execute(sql, &sess, None).await.unwrap();
+			(observer.snapshot(), observer)
+		}
+
+		fn rows_for(events: &[(StatementType, u64)], kind: StatementType) -> Vec<u64> {
+			events.iter().filter(|(k, _)| *k == kind).map(|(_, n)| *n).collect()
+		}
+
+		#[tokio::test]
+		async fn update_return_none_reports_affected_count() {
+			let events = run("\
+				 CREATE foo:1; CREATE foo:2; CREATE foo:3;\
+				 UPDATE foo SET x = 1 RETURN NONE;\
+				 ")
+			.await;
+			let updates = rows_for(&events, StatementType::Update);
+			assert_eq!(updates, vec![3], "UPDATE RETURN NONE should report 3 affected rows");
+		}
+
+		#[tokio::test]
+		async fn create_return_before_reports_one() {
+			let events = run("CREATE foo:bar RETURN BEFORE;").await;
+			let creates = rows_for(&events, StatementType::Create);
+			assert_eq!(creates, vec![1], "CREATE RETURN BEFORE should report 1 affected row");
+		}
+
+		#[tokio::test]
+		async fn delete_return_none_reports_affected_count() {
+			let events = run("\
+				 CREATE foo:1; CREATE foo:2;\
+				 DELETE foo RETURN NONE;\
+				 ")
+			.await;
+			let deletes = rows_for(&events, StatementType::Delete);
+			assert_eq!(deletes, vec![2], "DELETE RETURN NONE should report 2 affected rows");
+		}
+
+		#[tokio::test]
+		async fn update_where_no_match_reports_zero() {
+			// `WHERE` filter that no row satisfies must report zero
+			// affected rows, even though the iterator visits every
+			// scanned record. Pre-mutation `IgnoreError::Ignore` from
+			// `check_where_condition` must not bump the counter.
+			let events = run("\
+				 CREATE foo:1 SET x = 1; CREATE foo:2 SET x = 2; CREATE foo:3 SET x = 3;\
+				 UPDATE foo SET x = 99 WHERE x = 999;\
+				 ")
+			.await;
+			let updates = rows_for(&events, StatementType::Update);
+			assert_eq!(
+				updates,
+				vec![0],
+				"UPDATE with WHERE matching no rows should report 0 affected rows"
+			);
+		}
+
+		#[tokio::test]
+		async fn update_nonexistent_record_reports_zero() {
+			// Targeting a record id that does not exist makes
+			// `check_record_exists` return `IgnoreError::Ignore`
+			// before any KV write; the counter must stay at zero.
+			let events = run("UPDATE foo:does_not_exist SET x = 1;").await;
+			let updates = rows_for(&events, StatementType::Update);
+			assert_eq!(
+				updates,
+				vec![0],
+				"UPDATE on a non-existent record id should report 0 affected rows"
+			);
+		}
+
+		#[tokio::test]
+		async fn delete_where_no_match_reports_zero() {
+			// DELETE with a WHERE clause that filters every row out
+			// must report zero affected rows even when the iterator
+			// visits each record.
+			let events = run("\
+				 CREATE foo:1 SET x = 1; CREATE foo:2 SET x = 2;\
+				 DELETE foo WHERE x = 999;\
+				 ")
+			.await;
+			let deletes = rows_for(&events, StatementType::Delete);
+			assert_eq!(
+				deletes,
+				vec![0],
+				"DELETE with WHERE matching no rows should report 0 affected rows"
+			);
+		}
+
+		#[tokio::test]
+		async fn update_unchanged_record_reports_zero() {
+			// `set_record` is suppressed when `!self.changed()`, so
+			// no KV write happens and the counter must stay at zero
+			// even though the iterator returned `Ok` from
+			// `Document::process`.
+			let events = run("\
+				 CREATE foo:1 SET x = 1;\
+				 UPDATE foo:1 SET x = 1;\
+				 ")
+			.await;
+			let updates = rows_for(&events, StatementType::Update);
+			assert_eq!(
+				updates,
+				vec![0],
+				"UPDATE that does not change a record should report 0 affected rows"
+			);
+		}
+
+		#[tokio::test]
+		async fn upsert_existing_record_where_no_match_reports_zero() {
+			// Baseline coverage for the UPSERT-falls-back-to-update
+			// path: `upsert_create` fails with `RecordExists` from
+			// `store_record_data` (which returns Err before flipping
+			// `doc.mutated`), the dispatch rolls back the empty
+			// savepoint, and `upsert_update` returns `Ignore` from
+			// `check_where_condition`. No KV write survives, so the
+			// affected-row count must be zero.
+			let events = run("\
+				 CREATE foo:1 SET x = 1;\
+				 UPSERT foo:1 SET x = 99 WHERE x = 999;\
+				 ")
+			.await;
+			let upserts = rows_for(&events, StatementType::Upsert);
+			assert_eq!(
+				upserts,
+				vec![0],
+				"UPSERT on an existing record with an unmatched WHERE should report 0 affected rows"
+			);
+		}
+
+		#[tokio::test]
+		async fn upsert_index_collision_then_where_no_match_reports_zero() {
+			// Direct regression for the rollback-time `mutated`
+			// reset: UPSERT on a fresh id passes
+			// `upsert_create.store_record_data` (which sets
+			// `doc.mutated = true`) and then trips a unique-index
+			// collision in `store_index_data` against an existing
+			// record. The dispatch rolls back the savepoint and
+			// retries as an update against the colliding row, where
+			// a WHERE clause filters it out. Without resetting
+			// `doc.mutated` after the rollback, the stale flag from
+			// the rolled-back create would inflate the affected-row
+			// count even though no net KV write survives.
+			let events = run("\
+				 DEFINE INDEX uniq_x ON foo FIELDS x UNIQUE;\
+				 CREATE foo:a SET x = 1;\
+				 UPSERT foo:b SET x = 1 WHERE x = 999;\
+				 ")
+			.await;
+			let upserts = rows_for(&events, StatementType::Upsert);
+			assert_eq!(
+				upserts,
+				vec![0],
+				"UPSERT that rolls back a unique-index collision and finds no WHERE match must report 0 affected rows"
+			);
+		}
+
+		#[tokio::test]
+		async fn select_unaffected_by_counter_path() {
+			let events = run("\
+				 CREATE foo:1; CREATE foo:2; CREATE foo:3;\
+				 SELECT * FROM foo;\
+				 ")
+			.await;
+			let selects = rows_for(&events, StatementType::Select);
+			assert_eq!(selects, vec![3], "SELECT should still report rows from value-shape");
+		}
+
+		#[tokio::test]
+		async fn query_event_emitted_for_successful_batch() {
+			let (_, observer) = run_capturing("CREATE foo:1; SELECT * FROM foo;").await;
+			let queries = observer.queries();
+			assert_eq!(queries.len(), 1, "expected one QueryEvent per batch");
+			let (outcome, total, ok, err) = queries[0];
+			assert_eq!(outcome, Outcome::Success);
+			assert_eq!(total, 2);
+			assert_eq!(ok, 2);
+			assert_eq!(err, 0);
+		}
+
+		#[tokio::test]
+		async fn query_event_records_errors() {
+			// Use an invalid runtime statement (THROW) so the parse step
+			// still succeeds and the executor reaches the dispatch site.
+			let (_, observer) = run_capturing("CREATE foo:1; THROW 'boom';").await;
+			let queries = observer.queries();
+			assert_eq!(queries.len(), 1, "expected one QueryEvent per batch");
+			let (outcome, total, ok, err) = queries[0];
+			assert_eq!(outcome, Outcome::Error);
+			assert_eq!(total, 2);
+			assert_eq!(ok, 1);
+			assert_eq!(err, 1);
+		}
 	}
 }

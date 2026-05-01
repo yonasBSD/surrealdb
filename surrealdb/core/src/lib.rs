@@ -63,6 +63,7 @@ pub mod idx;
 pub mod kvs;
 pub mod mem;
 pub mod obs;
+pub mod observe;
 pub mod options;
 pub mod rpc;
 pub mod sql;

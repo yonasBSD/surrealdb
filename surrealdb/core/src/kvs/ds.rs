@@ -83,6 +83,7 @@ use crate::kvs::sequences::Sequences;
 use crate::kvs::slowlog::SlowLog;
 use crate::kvs::tasklease::{LeaseHandler, TaskLeaseType};
 use crate::kvs::{KVValue, LockType, NORMAL_BATCH_SIZE, TransactionType};
+use crate::observe::{ExecutionObserver, NoopObserver};
 use crate::sql::Ast;
 #[cfg(feature = "surrealism")]
 use crate::surrealism::cache::SurrealismCache;
@@ -154,6 +155,8 @@ pub struct Datastore {
 	// Http client used to make requests.
 	#[cfg(feature = "http")]
 	http_client: Arc<HttpClient>,
+	/// Observer invoked on significant events. Defaults to [`NoopObserver`].
+	observer: Arc<dyn ExecutionObserver>,
 }
 
 /// Represents a collection of metrics for a specific datastore flavor.
@@ -180,6 +183,10 @@ pub(crate) struct TransactionFactory {
 	builder: Arc<Box<dyn TransactionBuilder>>,
 	// Async event processing trigger
 	async_event_trigger: Arc<Notify>,
+	/// Observer invoked on transaction lifecycle events. Defaults to
+	/// [`NoopObserver`]; replaced by the datastore's observer when one is
+	/// configured.
+	observer: Arc<dyn ExecutionObserver>,
 	config: Arc<CommonConfig>,
 }
 
@@ -192,8 +199,23 @@ impl TransactionFactory {
 		Self {
 			builder: Arc::new(builder),
 			async_event_trigger,
+			observer: Arc::new(NoopObserver),
 			config,
 		}
+	}
+
+	/// Replace the observer. Used by the datastore builder to propagate the
+	/// chosen observer to all transactions created after the swap.
+	pub(crate) fn with_observer(mut self, observer: Arc<dyn ExecutionObserver>) -> Self {
+		self.observer = observer;
+		self
+	}
+
+	/// Access the observer. Transaction instrumentation fires events through
+	/// this handle.
+	#[allow(dead_code)]
+	pub(crate) fn observer(&self) -> &Arc<dyn ExecutionObserver> {
+		&self.observer
 	}
 
 	#[allow(
@@ -224,6 +246,7 @@ impl TransactionFactory {
 			local,
 			sequences,
 			self.async_event_trigger.clone(),
+			self.observer.clone(),
 			Transactor {
 				inner,
 			},
@@ -668,6 +691,15 @@ impl Datastore {
 		self.transaction_factory.collect_u64_metric(metric)
 	}
 
+	/// The currently installed observer. Cheap to clone; internal handle is
+	/// an `Arc`.
+	///
+	/// Exposed so higher layers (server, SDK) can emit transport-layer events
+	/// such as session connect/disconnect that the core engine never sees.
+	pub fn observer(&self) -> &Arc<dyn ExecutionObserver> {
+		&self.observer
+	}
+
 	/// Create a new datastore with the same persistent data (inner), with
 	/// flushed cache. Simulating a server restart
 	pub fn restart(self) -> Self {
@@ -698,6 +730,7 @@ impl Datastore {
 			lazy_surrealism: self.lazy_surrealism,
 			#[cfg(feature = "http")]
 			http_client: self.http_client,
+			observer: self.observer,
 			config: self.config,
 		}
 	}
@@ -2198,15 +2231,24 @@ impl Datastore {
 			ctx.attach_variables(vars.into()).map_err(crate::err::into_types_error)?;
 		}
 
+		// Propagate the resolved tenant identity onto the externally-supplied
+		// transaction so the emitted [`crate::observe::TransactionEvent`]
+		// carries the active session's namespace, database, user, etc.
+		if let Some(identity) = ctx.tenant_identity() {
+			tx.set_tenant_identity(identity.clone());
+		}
+
 		// Set the transaction in the context
 		ctx.set_transaction(tx);
 
 		// Process all statements with the transaction
-		Executor::execute_plan_with_transaction(ctx.freeze(), opt, ast.into()).await.map_err(|e| {
-			e.downcast::<Error>()
-				.map(crate::err::into_types_error)
-				.unwrap_or_else(|e| TypesError::internal(e.to_string()))
-		})
+		Executor::execute_plan_with_transaction(self, ctx.freeze(), opt, ast.into()).await.map_err(
+			|e| {
+				e.downcast::<Error>()
+					.map(crate::err::into_types_error)
+					.unwrap_or_else(|e| TypesError::internal(e.to_string()))
+			},
+		)
 	}
 
 	#[instrument(level = "debug", target = "surrealdb::core::kvs::ds", skip_all)]
@@ -2411,8 +2453,16 @@ impl Datastore {
 		} else {
 			TransactionType::Write
 		};
-		// Start a new transaction
-		let txn = self.transaction(txn_type, Optimistic).await?.enclose();
+		// Start a new transaction. Tenant identity is attached up-front so the
+		// emitted [`crate::observe::TransactionEvent`] carries the session's
+		// namespace, database, user, etc.
+		let txn = self
+			.transaction(txn_type, Optimistic)
+			.await?
+			.with_tenant_identity(Some(Arc::new(crate::observe::TenantIdentity::from_session(
+				sess,
+			))))
+			.enclose();
 		// Store the transaction
 		ctx.set_transaction(txn.clone());
 

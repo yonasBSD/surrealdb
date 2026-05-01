@@ -26,10 +26,13 @@ mod gql;
 /// Make `ntw` public so embedders can access RouterFactory and related networking definitions
 /// when running SurrealDB as a library.
 pub mod ntw;
+/// Observability wiring: community Prometheus registry, `/metrics` handler,
+/// and the allowlists controlling what may leave the server unauthenticated.
+pub mod observe;
 /// Make `rpc` public so embedders can access RpcState and related router definitions
 /// when running SurrealDB as a library.
 pub mod rpc;
-mod telemetry;
+pub mod telemetry;
 /// Process-wide rustls `CryptoProvider` installation. Public so embedders and
 /// downstream binaries (e.g. the Enterprise cluster transport) can install
 /// the same provider — including the FIPS-validated provider when built with
@@ -78,7 +81,13 @@ use surrealdb_core::kvs::TransactionBuilderFactory;
 ///   - `TransactionBuilderFactory` (selects/validates the datastore backend)
 ///   - `RouterFactory` (constructs the HTTP router)
 ///   - `ConfigCheck` (validates configuration before initialization)
-pub fn init<C: TransactionBuilderFactory + RouterFactory + ConfigCheck + BucketStoreProvider>(
+pub fn init<
+	C: TransactionBuilderFactory
+		+ RouterFactory
+		+ ConfigCheck
+		+ BucketStoreProvider
+		+ observe::ObservabilityProvider,
+>(
 	composer: C,
 ) -> ExitCode {
 	with_enough_stack(cli::init::<C>(composer))

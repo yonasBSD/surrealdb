@@ -1216,7 +1216,14 @@ impl Iterator {
 		stk.run(|stk| Document::process(stk, ctx, opt, stm, pro)).await
 	}
 
-	/// Accept a processed record result
+	/// Accept a processed record result.
+	///
+	/// The per-statement affected-row counter is bumped from
+	/// [`crate::doc::Document::process`] (gated on a real KV write via
+	/// `doc.mutated`), so this function only handles fan-out of the
+	/// post-RETURN value into `self.results` and propagating hard errors.
+	/// SELECT row counts are still derived from the post-RETURN value
+	/// shape inside the executor, not from the counter.
 	async fn result(
 		&mut self,
 		stk: &mut Stk,
@@ -1230,6 +1237,11 @@ impl Iterator {
 		// Process the result
 		match res {
 			Err(IgnoreError::Ignore) => {
+				// `RETURN NONE`, `Output::None`, post-mutation
+				// permission denials, and pre-mutation gates all
+				// surface as `Ignore`. The affected-row counter is
+				// already updated (or correctly skipped) inside the
+				// document path, so nothing to do here.
 				return;
 			}
 			Err(IgnoreError::Error(e)) => {
