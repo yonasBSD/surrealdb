@@ -4188,6 +4188,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
+name = "surrealdb-collections"
+version = "3.1.0-alpha"
+dependencies = [
+ "revision",
+ "storekey",
+]
+
+[[package]]
 name = "surrealdb-core"
 version = "3.1.0-alpha"
 dependencies = [
@@ -4258,6 +4266,7 @@ dependencies = [
  "storekey",
  "strsim",
  "subtle",
+ "surrealdb-collections",
  "surrealdb-protocol",
  "surrealdb-rocksdb",
  "surrealdb-strand",

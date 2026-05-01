@@ -1348,10 +1348,6 @@ version = "0.7.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.rand]]
-version = "0.8.6"
-criteria = "safe-to-deploy"
-
-[[exemptions.rand]]
 version = "0.9.4"
 criteria = "safe-to-deploy"
 
@@ -2051,24 +2047,12 @@ criteria = "safe-to-deploy"
 version = "0.2.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.windows-core]]
-version = "0.62.2"
-criteria = "safe-to-deploy"
-
 [[exemptions.windows-future]]
 version = "0.2.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows-numerics]]
 version = "0.2.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows-result]]
-version = "0.4.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows-strings]]
-version = "0.5.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows-threading]]
