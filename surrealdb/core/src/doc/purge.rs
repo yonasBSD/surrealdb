@@ -67,12 +67,12 @@ impl Document {
 		let (ns, db) = ctx.expect_ns_db_ids(opt).await?;
 		if self.initial.doc.is_edge() {
 			// Get the in record id
-			let l = self.initial.doc.as_ref().pick(&*IN);
+			let l = self.initial.doc.as_ref().pick(&IN);
 			let Value::RecordId(ref l) = l else {
 				fail!("Expected a record id for the `in` field, found {}", l.to_sql());
 			};
 			// Get the out record id
-			let r = self.initial.doc.as_ref().pick(&*OUT);
+			let r = self.initial.doc.as_ref().pick(&OUT);
 			let Value::RecordId(ref r) = r else {
 				fail!("Expected a record id for the `out` field, found {}", r.to_sql());
 			};

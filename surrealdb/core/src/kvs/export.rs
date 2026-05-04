@@ -435,8 +435,8 @@ impl Transaction {
 		record.data.def(rid);
 		// Match on the value to determine if it is a graph edge record or a normal record.
 		if record.is_edge()
-			&& let crate::val::Value::RecordId(_) = record.data.pick(&*IN)
-			&& let crate::val::Value::RecordId(_) = record.data.pick(&*OUT)
+			&& let crate::val::Value::RecordId(_) = record.data.pick(&IN)
+			&& let crate::val::Value::RecordId(_) = record.data.pick(&OUT)
 		{
 			// If the value is a graph edge record (indicated by EDGE, IN, and OUT fields):
 			// Write the value to the records_relate string.

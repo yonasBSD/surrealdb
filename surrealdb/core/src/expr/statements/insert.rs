@@ -266,7 +266,7 @@ fn iterable(
 	relation: bool,
 ) -> Result<Iterable> {
 	if relation {
-		let f = match v.pick(&*IN) {
+		let f = match v.pick(&IN) {
 			Value::RecordId(v) => v,
 			v => {
 				bail!(Error::InsertStatementIn {
@@ -274,7 +274,7 @@ fn iterable(
 				})
 			}
 		};
-		let w = match v.pick(&*OUT) {
+		let w = match v.pick(&OUT) {
 			Value::RecordId(v) => v,
 			v => {
 				bail!(Error::InsertStatementOut {

@@ -71,8 +71,8 @@ impl Document {
 			// Store the edges on the record
 			// Mark this record as an edge type in its metadata for efficient identification
 			self.current.doc.set_record_type(RecordType::Edge);
-			self.current.doc.to_mut().put(&*IN, l.clone().into());
-			self.current.doc.to_mut().put(&*OUT, r.clone().into());
+			self.current.doc.to_mut().put(&IN, l.clone().into());
+			self.current.doc.to_mut().put(&OUT, r.clone().into());
 		}
 		// Carry on
 		Ok(())

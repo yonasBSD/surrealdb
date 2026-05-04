@@ -3,7 +3,7 @@ use crate::val::Value;
 
 impl Value {
 	pub fn rid(&self) -> Value {
-		self.pick(&*ID)
+		self.pick(&ID)
 	}
 }
 
