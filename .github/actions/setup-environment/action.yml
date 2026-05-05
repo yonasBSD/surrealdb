@@ -34,6 +34,14 @@ inputs:
     description: 'Whether to free disk space by removing pre-installed software'
     required: false
     default: 'true'
+  enable-sccache:
+    description: 'Whether to compile via sccache (RUSTC_WRAPPER)'
+    required: false
+    default: 'true'
+  depot-runner:
+    description: 'If true, do not enable SCCACHE_GHA_ENABLED (Depot runners use Depot Cache for sccache)'
+    required: false
+    default: 'false'
 
 runs:
   using: 'composite'
@@ -89,6 +97,20 @@ runs:
         components: ${{ inputs.components }}
         targets: ${{ inputs.targets }}
 
+    - name: Setup sccache
+      if: inputs.enable-sccache == 'true'
+      uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+
+    - name: Configure sccache environment
+      if: inputs.enable-sccache == 'true'
+      shell: bash
+      run: |
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+        if [[ '${{ inputs.depot-runner }}' != 'true' ]]; then
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+        fi
+
     - name: Setup cache
       uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       with:
@@ -96,3 +118,4 @@ runs:
         shared-key: ${{ inputs.cache-key }}
         workspaces: ${{ inputs.workspaces }}
         cache-directories: ${{ inputs.cache-directories }}
+        cache-targets: false

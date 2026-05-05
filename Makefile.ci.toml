@@ -70,7 +70,8 @@ description = "Run code quality checks (release)"
 command = "cargo"
 args = [
     "check",
-    "--release",
+    "--profile",
+    "clippy-release",
     "--locked",
     "--workspace",
     "--all-targets",
@@ -121,7 +122,8 @@ args = [
     "clippy",
     "--workspace",
     "--all-targets",
-    "--release",
+    "--profile",
+    "clippy-release",
     "--features",
     "${ALL_FEATURES}",
     "--tests",
@@ -356,6 +358,32 @@ args = [
     "--",
     "graphql_integration",
     "--nocapture",
+]
+
+[tasks.ci-integration-all]
+category = "CI - INTEGRATION TESTS"
+description = "Single compile: CLI, HTTP, WS, ML, and GraphQL integration suites"
+command = "cargo"
+env = { RUST_BACKTRACE = 1 }
+args = [
+    "nextest",
+    "run",
+    "--locked",
+    "--workspace",
+    "--no-default-features",
+    "--features",
+    "storage-mem,storage-surrealkv,http,scripting,jwks,cli,ml,graphql",
+    "--nocapture",
+    "--test",
+    "cli_integration",
+    "--test",
+    "http_integration",
+    "--test",
+    "ws_integration",
+    "--test",
+    "ml_integration",
+    "--test",
+    "graphql_integration",
 ]
 
 # --------------------------------------------------
