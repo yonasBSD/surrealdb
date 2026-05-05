@@ -132,10 +132,15 @@ impl Document {
 
 		// Obtain a stream of keys
 		let mut stream = txn.stream_keys(range.clone(), None, None, 0, ScanDirection::Forward);
+		// Avoid staging a no-op range delete when the reference scan is empty.
+		let mut saw_reference_key = false;
 		// Loop until no more entries
 		while let Some(res) = stream.next().await {
 			// Get the batch of keys
 			let batch = res?;
+			if !batch.is_empty() {
+				saw_reference_key = true;
+			}
 			// Process each key in the batch
 			for key in batch {
 				yield_now!();
@@ -280,8 +285,10 @@ impl Document {
 			}
 		}
 
-		// After all references have been processed, delete them
-		txn.delr(range).await?;
+		// After all references have been processed, remove the reference keys we saw.
+		if saw_reference_key {
+			txn.delr(range).await?;
+		}
 
 		// Carry on
 		Ok(())
