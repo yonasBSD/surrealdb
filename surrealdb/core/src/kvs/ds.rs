@@ -26,7 +26,7 @@ use tokio::spawn;
 use tokio::sync::Notify;
 #[cfg(feature = "jwks")]
 use tokio::sync::RwLock;
-use tokio::time::{Instant, sleep, timeout};
+use tokio::time::{Instant, sleep, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument, trace, warn};
 use uuid::Uuid;
@@ -96,10 +96,106 @@ mod builder;
 pub use builder::Builder;
 
 const TARGET: &str = "surrealdb::core::kvs::ds";
+const NODE_DELETE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The role assigned to the initial user created when starting the server with
 /// credentials for the first time
 const INITIAL_USER_ROLE: &str = "owner";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShutdownNodeDeleteOutcome {
+	Archived,
+	Failed,
+	TimedOut,
+}
+
+async fn await_node_step<T, Fut>(
+	deadline: Instant,
+	timeout_duration: Duration,
+	canceller: Option<&CancellationToken>,
+	step: Fut,
+) -> Result<T>
+where
+	Fut: Future<Output = Result<T>>,
+{
+	if let Some(canceller) = canceller {
+		tokio::select! {
+			biased;
+			_ = canceller.cancelled() => bail!(Error::QueryCancelled),
+			result = timeout_at(deadline, step) => match result {
+				Ok(result) => result,
+				Err(_) => bail!(Error::QueryTimedout(timeout_duration.into())),
+			},
+		}
+	} else {
+		match timeout_at(deadline, step).await {
+			Ok(result) => result,
+			Err(_) => bail!(Error::QueryTimedout(timeout_duration.into())),
+		}
+	}
+}
+
+async fn await_node_tx_step<T, Fut>(
+	txn: &Transaction,
+	deadline: Instant,
+	timeout_duration: Duration,
+	canceller: Option<&CancellationToken>,
+	step: Fut,
+) -> Result<T>
+where
+	Fut: Future<Output = Result<T>>,
+{
+	let result = if let Some(canceller) = canceller {
+		tokio::select! {
+			biased;
+			_ = canceller.cancelled() => {
+				let _ = txn.cancel().await;
+				bail!(Error::QueryCancelled);
+			}
+			result = timeout_at(deadline, step) => result,
+		}
+	} else {
+		timeout_at(deadline, step).await
+	};
+
+	match result {
+		Ok(Ok(value)) => Ok(value),
+		Ok(Err(e)) => {
+			let _ = txn.cancel().await;
+			Err(e)
+		}
+		Err(_) => {
+			let _ = txn.cancel().await;
+			bail!(Error::QueryTimedout(timeout_duration.into()))
+		}
+	}
+}
+
+fn archive_node_for_shutdown(
+	timeout_duration: Duration,
+	result: Result<()>,
+) -> ShutdownNodeDeleteOutcome {
+	match result {
+		Ok(()) => ShutdownNodeDeleteOutcome::Archived,
+		Err(e) => {
+			if matches!(e.downcast_ref::<Error>(), Some(Error::QueryTimedout(_))) {
+				warn!(
+					target: TARGET,
+					timeout = ?timeout_duration,
+					"Timed out archiving node during shutdown; continuing shutdown"
+				);
+				return ShutdownNodeDeleteOutcome::TimedOut;
+			}
+
+			warn!(
+				target: TARGET,
+				error = %e,
+				"Failed to archive node during shutdown; continuing shutdown"
+			);
+			ShutdownNodeDeleteOutcome::Failed
+		}
+	}
+}
 
 /// The underlying datastore instance which stores the dataset.
 pub struct Datastore {
@@ -991,8 +1087,12 @@ impl Datastore {
 	pub async fn shutdown(&self) -> Result<()> {
 		// Output function invocation details to logs
 		trace!(target: TARGET, "Running datastore shutdown operations");
-		// Delete this datastore from the cluster
-		self.delete_node().await?;
+		// Archive this datastore in the cluster, but don't let a blocked
+		// metadata transaction prevent storage engine shutdown.
+		let _ = archive_node_for_shutdown(
+			NODE_DELETE_TIMEOUT,
+			self.delete_node_with_timeout(NODE_DELETE_TIMEOUT).await,
+		);
 		// Run any storage engine shutdown tasks
 		self.transaction_factory.builder.shutdown().await
 	}
@@ -1310,6 +1410,46 @@ impl Datastore {
 		run!(txn, txn.replace(&key, &node).await)
 	}
 
+	/// Updates this node, bounding each step and explicitly cancelling any
+	/// open write transaction before returning on timeout or cancellation.
+	#[instrument(err, level = "trace", target = "surrealdb::core::kvs::ds", skip(self, canceller))]
+	pub async fn update_node_with_timeout(
+		&self,
+		timeout_duration: Duration,
+		canceller: &CancellationToken,
+	) -> Result<()> {
+		trace!(target: TARGET, id = %self.id, timeout = ?timeout_duration, "Updating node in the cluster with timeout");
+
+		let deadline = Instant::now() + timeout_duration;
+
+		await_node_step(deadline, timeout_duration, Some(canceller), async {
+			crate::sys::refresh().await;
+			Ok(())
+		})
+		.await?;
+
+		let txn = await_node_step(
+			deadline,
+			timeout_duration,
+			Some(canceller),
+			self.transaction(Write, Optimistic),
+		)
+		.await?;
+		let key = crate::key::root::nd::new(self.id);
+		let now = self.clock_now();
+		let node = Node::new(self.id, now, false);
+
+		await_node_tx_step(
+			&txn,
+			deadline,
+			timeout_duration,
+			Some(canceller),
+			txn.replace(&key, &node),
+		)
+		.await?;
+		await_node_tx_step(&txn, deadline, timeout_duration, Some(canceller), txn.commit()).await
+	}
+
 	/// Deletes a node from the cluster.
 	///
 	/// This function should be run when a node is shutting down.
@@ -1327,6 +1467,26 @@ impl Datastore {
 		let val = catch!(txn, txn.get_node(self.id).await);
 		let node = val.as_ref().archive();
 		run!(txn, txn.replace(&key, &node).await)
+	}
+
+	/// Archives this node, bounding each step and explicitly cancelling any
+	/// open write transaction before returning on timeout.
+	#[instrument(err, level = "trace", target = "surrealdb::core::kvs::ds", skip(self))]
+	pub async fn delete_node_with_timeout(&self, timeout_duration: Duration) -> Result<()> {
+		trace!(target: TARGET, id = %self.id, timeout = ?timeout_duration, "Archiving node in the cluster with timeout");
+
+		let deadline = Instant::now() + timeout_duration;
+		let txn =
+			await_node_step(deadline, timeout_duration, None, self.transaction(Write, Optimistic))
+				.await?;
+		let key = crate::key::root::nd::new(self.id);
+		let val = await_node_tx_step(&txn, deadline, timeout_duration, None, txn.get_node(self.id))
+			.await?;
+		let node = val.as_ref().archive();
+
+		await_node_tx_step(&txn, deadline, timeout_duration, None, txn.replace(&key, &node))
+			.await?;
+		await_node_tx_step(&txn, deadline, timeout_duration, None, txn.commit()).await
 	}
 
 	/// Expires nodes which have timedout from the cluster.
@@ -1633,6 +1793,13 @@ impl Datastore {
 	// Indexing functions
 	// --------------------------------------------------
 
+	fn ensure_not_cancelled(canceller: &CancellationToken) -> Result<()> {
+		if canceller.is_cancelled() {
+			bail!(Error::QueryCancelled);
+		}
+		Ok(())
+	}
+
 	/// Processes the index compaction queue.
 	///
 	/// This method is called periodically by the index compaction thread to
@@ -1658,35 +1825,40 @@ impl Datastore {
 	/// # Arguments
 	/// * `dbs` - The shared datastore instance, cloned into each compaction task
 	/// * `interval` - The interval between compaction runs, used to calculate the lease duration
+	/// * `canceller` - Token checked before starting each lease, batch, and compaction unit
 	///
 	/// # Returns
 	/// A tuple `(iterations, errors)` where `iterations` is the number of
 	/// compaction batches processed and `errors` is the total number of
 	/// individual index compaction failures across all batches.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::ds", skip(dbs))]
+	#[instrument(level = "trace", target = "surrealdb::core::kvs::ds", skip(dbs, canceller))]
 	pub async fn index_compaction(
 		dbs: Arc<Datastore>,
 		interval: Duration,
+		canceller: CancellationToken,
 	) -> Result<(usize, usize)> {
 		// Output function invocation details to logs
 		trace!(target: TARGET, "Attempting index compaction process");
 		// Create a new lease handler
-		let lh = LeaseHandler::new(
+		let lh = LeaseHandler::new_with_canceller(
 			dbs.sequences.clone(),
 			dbs.id,
 			dbs.transaction_factory.clone(),
 			TaskLeaseType::IndexCompaction,
 			interval * 2,
+			canceller.clone(),
 		)?;
 		let mut count_iteration = 0;
 		let mut count_error = 0;
 		// We continue without interruptions while there are keys and the lease
 		loop {
+			Self::ensure_not_cancelled(&canceller)?;
 			// Attempt to acquire a lease for the IndexCompaction task
 			// If we don't get the lease, another node is handling this task
 			if !lh.has_lease().await? {
 				return Ok((count_iteration, count_error));
 			}
+			Self::ensure_not_cancelled(&canceller)?;
 			// Output function invocation details to logs
 			trace!(target: TARGET, "Running index compaction process");
 			// Read the compaction queue in a short-lived read transaction
@@ -1699,6 +1871,7 @@ impl Datastore {
 				let _ = txn.cancel().await;
 				res?
 			};
+			Self::ensure_not_cancelled(&canceller)?;
 			if items.is_empty() {
 				return Ok((count_iteration, count_error));
 			}
@@ -1706,7 +1879,8 @@ impl Datastore {
 			let keys: Vec<Key> = items.iter().map(|(k, _)| k.clone()).collect();
 			// Process compaction for each index
 			count_iteration += 1;
-			count_error += Self::index_compaction_loop(dbs.clone(), &lh, items).await?;
+			count_error +=
+				Self::index_compaction_loop(dbs.clone(), &lh, items, canceller.clone()).await?;
 			// Delete the processed queue entries in a separate write
 			// transaction. This avoids conflicts with concurrent user
 			// transactions that may enqueue new compaction requests.
@@ -1714,10 +1888,18 @@ impl Datastore {
 			// write to the affected index will naturally trigger a new
 			// compaction request.
 			let txn = dbs.transaction(Write, Optimistic).await?;
+			if let Err(e) = Self::ensure_not_cancelled(&canceller) {
+				let _ = txn.cancel().await;
+				return Err(e);
+			}
 			for k in &keys {
 				if let Err(e) = txn.del(k).await {
 					warn!(target: TARGET, "Failed to delete compaction queue entry: {e}");
 				}
+			}
+			if let Err(e) = Self::ensure_not_cancelled(&canceller) {
+				let _ = txn.cancel().await;
+				return Err(e);
 			}
 			if let Err(e) = txn.commit().await {
 				warn!(target: TARGET, "Failed to commit compaction queue cleanup: {e}");
@@ -1725,6 +1907,36 @@ impl Datastore {
 			}
 		}
 		Ok((count_iteration, count_error))
+	}
+
+	#[cfg(not(target_family = "wasm"))]
+	async fn await_index_compaction_handle(
+		ikb: &IndexKeyBase,
+		handle: &mut tokio::task::JoinHandle<Result<()>>,
+		canceller: &CancellationToken,
+	) {
+		match handle.await {
+			Ok(Ok(())) => {}
+			Ok(Err(e))
+				if canceller.is_cancelled()
+					&& matches!(e.downcast_ref::<Error>(), Some(Error::QueryCancelled)) => {}
+			Ok(Err(e)) => {
+				warn!("Index compaction {ikb} fails while awaiting cancellation: {e}");
+			}
+			Err(e) => {
+				warn!("Index compaction {ikb} join fails while awaiting cancellation: {e}");
+			}
+		}
+	}
+
+	#[cfg(not(target_family = "wasm"))]
+	async fn await_index_compaction_handles(
+		handles: &mut Vec<(IndexKeyBase, tokio::task::JoinHandle<Result<()>>)>,
+		canceller: &CancellationToken,
+	) {
+		while let Some((ikb, mut handle)) = handles.pop() {
+			Self::await_index_compaction_handle(&ikb, &mut handle, canceller).await;
+		}
 	}
 
 	/// Compacts each distinct index found in the queue items.
@@ -1740,21 +1952,47 @@ impl Datastore {
 		dbs: Arc<Datastore>,
 		lh: &LeaseHandler,
 		items: Vec<(Key, Val)>,
+		canceller: CancellationToken,
 	) -> Result<usize> {
-		let mut concurrent_compactions = HashMap::new();
+		let mut compacted_indexes = HashMap::new();
 		for (k, _) in items {
+			Self::ensure_not_cancelled(&canceller)?;
 			lh.try_maintain_lease().await?;
 			let ic = IndexCompactionKey::decode_key(&k)?;
 			let ikb = IndexKeyBase::new(ic.ns, ic.db, ic.tb.as_ref().clone(), ic.ix);
-			if let Entry::Vacant(e) = concurrent_compactions.entry(ikb.clone()) {
-				let dbs = dbs.clone();
-				let jh = spawn(async move { dbs.process_index_compaction(&ikb).await });
-				e.insert(jh);
+			if let Entry::Vacant(e) = compacted_indexes.entry(ikb) {
+				e.insert(());
 			}
 		}
 		let mut error_count = 0;
-		for (ikb, jh) in concurrent_compactions {
-			if let Err(e) = jh.await? {
+		let mut handles: Vec<(IndexKeyBase, tokio::task::JoinHandle<Result<()>>)> =
+			Vec::with_capacity(compacted_indexes.len());
+		for (ikb, _) in compacted_indexes {
+			if let Err(e) = Self::ensure_not_cancelled(&canceller) {
+				Self::await_index_compaction_handles(&mut handles, &canceller).await;
+				return Err(e);
+			}
+			let dbs = dbs.clone();
+			let canceller = canceller.clone();
+			let task_ikb = ikb.clone();
+			let jh = spawn(async move { dbs.process_index_compaction(&task_ikb, canceller).await });
+			handles.push((ikb, jh));
+		}
+		while let Some((ikb, mut jh)) = handles.pop() {
+			let res = tokio::select! {
+				biased;
+				_ = canceller.cancelled() => {
+					Self::await_index_compaction_handle(&ikb, &mut jh, &canceller).await;
+					Self::await_index_compaction_handles(&mut handles, &canceller).await;
+					bail!(Error::QueryCancelled);
+				}
+				res = &mut jh => res?,
+			};
+			if let Err(e) = res {
+				if canceller.is_cancelled() {
+					Self::await_index_compaction_handles(&mut handles, &canceller).await;
+					return Err(e);
+				}
 				error_count += 1;
 				warn!("Index compaction {ikb} fails: {e}");
 			}
@@ -1776,18 +2014,24 @@ impl Datastore {
 		dbs: Arc<Datastore>,
 		lh: &LeaseHandler,
 		items: Vec<(Key, Val)>,
+		canceller: CancellationToken,
 	) -> Result<usize> {
 		let mut seen = HashSet::new();
 		let mut error_count = 0;
 		for (k, _) in items {
+			Self::ensure_not_cancelled(&canceller)?;
 			lh.try_maintain_lease().await?;
 			let ic = IndexCompactionKey::decode_key(&k)?;
 			let ikb = IndexKeyBase::new(ic.ns, ic.db, ic.tb.as_ref().clone(), ic.ix);
 			if !seen.insert(ikb.clone()) {
 				continue;
 			}
-			let res: Result<()> = async { dbs.process_index_compaction(&ikb).await }.await;
+			let res: Result<()> =
+				async { dbs.process_index_compaction(&ikb, canceller.clone()).await }.await;
 			if let Err(e) = res {
+				if canceller.is_cancelled() {
+					return Err(e);
+				}
 				error_count += 1;
 				warn!("Index compaction {ikb} fails: {e}");
 			}
@@ -1802,7 +2046,12 @@ impl Datastore {
 	/// full-text, count, or HNSW. Indexes that are being removed
 	/// (`prepare_remove`), not found, or of an unsupported type are silently
 	/// skipped with a trace log.
-	async fn process_index_compaction(&self, ikb: &IndexKeyBase) -> Result<()> {
+	async fn process_index_compaction(
+		&self,
+		ikb: &IndexKeyBase,
+		canceller: CancellationToken,
+	) -> Result<()> {
+		Self::ensure_not_cancelled(&canceller)?;
 		let ix = {
 			let txn = self.transaction(Read, Optimistic).await?;
 			let res =
@@ -1810,18 +2059,19 @@ impl Datastore {
 			let _ = txn.cancel().await;
 			res?
 		};
+		Self::ensure_not_cancelled(&canceller)?;
 		match ix {
 			Some(ix) if !ix.prepare_remove => match &ix.index {
 				Index::FullText(p) => {
-					self.process_fulltext_compaction(ikb, p).await?;
+					self.process_fulltext_compaction(ikb, p, &canceller).await?;
 				}
 				Index::Count(_) => {
-					self.process_count_compaction(ikb).await?;
+					self.process_count_compaction(ikb, &canceller).await?;
 				}
 				Index::Hnsw(_) => {
 					// HNSW compaction owns its pending-key allocation and pending-range
 					// drain semantics separately from full-text/count compaction.
-					self.process_hnsw_compaction(ikb).await?;
+					self.process_hnsw_compaction(ikb, &canceller).await?;
 				}
 				_ => {
 					trace!(target: TARGET, "Index compaction: Index {:?} does not support compaction, skipping", ikb);
@@ -1840,8 +2090,13 @@ impl Datastore {
 	/// deleted in a short write transaction before graph mutation. If a write
 	/// fails after local graph mutation may have started, the cached HNSW index
 	/// is evicted so later use reloads persisted state.
-	async fn process_hnsw_compaction(&self, ikb: &IndexKeyBase) -> Result<()> {
+	async fn process_hnsw_compaction(
+		&self,
+		ikb: &IndexKeyBase,
+		canceller: &CancellationToken,
+	) -> Result<()> {
 		loop {
+			Self::ensure_not_cancelled(canceller)?;
 			let prepared = {
 				let txn = Arc::new(self.transaction(Read, Optimistic).await?);
 				let res: Result<
@@ -1878,6 +2133,7 @@ impl Datastore {
 				return Ok(());
 			}
 			let has_more = plan.has_more();
+			Self::ensure_not_cancelled(canceller)?;
 
 			let txn = Arc::new(self.transaction(Write, Optimistic).await?);
 			let res: Result<bool> = async {
@@ -1908,6 +2164,15 @@ impl Datastore {
 			.await;
 			match res {
 				Ok(true) => {
+					if let Err(e) = Self::ensure_not_cancelled(canceller) {
+						let _ = txn.cancel().await;
+						if let Err(evict) =
+							self.index_stores.remove_hnsw_index(tb, ikb.clone()).await
+						{
+							warn!(target: TARGET, "Failed to evict HNSW index after compaction cancellation: {evict}");
+						}
+						return Err(e);
+					}
 					if let Err(e) = txn.commit().await {
 						if let Err(evict) =
 							self.index_stores.remove_hnsw_index(tb, ikb.clone()).await
@@ -1929,6 +2194,7 @@ impl Datastore {
 					return Err(e);
 				}
 			}
+			Self::ensure_not_cancelled(canceller)?;
 			if !has_more {
 				return Ok(());
 			}
@@ -1943,8 +2209,10 @@ impl Datastore {
 		&self,
 		ikb: &IndexKeyBase,
 		p: &crate::catalog::FullTextParams,
+		canceller: &CancellationToken,
 	) -> Result<()> {
 		loop {
+			Self::ensure_not_cancelled(canceller)?;
 			let plan = {
 				let txn = self.transaction(Read, Optimistic).await?;
 				let res = IndexOperation::prepare_fulltext_compaction(
@@ -1962,6 +2230,7 @@ impl Datastore {
 				return Ok(());
 			}
 			let has_more = plan.has_more();
+			Self::ensure_not_cancelled(canceller)?;
 
 			let txn = self.transaction(Write, Optimistic).await?;
 			let res = async {
@@ -1988,7 +2257,13 @@ impl Datastore {
 			}
 			.await;
 			match res {
-				Ok(true) => txn.commit().await?,
+				Ok(true) => {
+					if let Err(e) = Self::ensure_not_cancelled(canceller) {
+						let _ = txn.cancel().await;
+						return Err(e);
+					}
+					txn.commit().await?;
+				}
 				Ok(false) => {
 					let _ = txn.cancel().await;
 					return Ok(());
@@ -1998,6 +2273,7 @@ impl Datastore {
 					return Err(e);
 				}
 			}
+			Self::ensure_not_cancelled(canceller)?;
 			if !has_more {
 				return Ok(());
 			}
@@ -2008,8 +2284,13 @@ impl Datastore {
 	///
 	/// The write phase deletes only keys captured in the plan, so concurrent
 	/// `!iu` deltas are preserved and included by later reads/compactions.
-	async fn process_count_compaction(&self, ikb: &IndexKeyBase) -> Result<()> {
+	async fn process_count_compaction(
+		&self,
+		ikb: &IndexKeyBase,
+		canceller: &CancellationToken,
+	) -> Result<()> {
 		loop {
+			Self::ensure_not_cancelled(canceller)?;
 			let plan = {
 				let txn = self.transaction(Read, Optimistic).await?;
 				let res = IndexOperation::prepare_count_compaction(ikb, &txn).await;
@@ -2020,6 +2301,7 @@ impl Datastore {
 				return Ok(());
 			}
 			let has_more = plan.has_more();
+			Self::ensure_not_cancelled(canceller)?;
 
 			let txn = self.transaction(Write, Optimistic).await?;
 			let res = async {
@@ -2035,7 +2317,13 @@ impl Datastore {
 			}
 			.await;
 			match res {
-				Ok(true) => txn.commit().await?,
+				Ok(true) => {
+					if let Err(e) = Self::ensure_not_cancelled(canceller) {
+						let _ = txn.cancel().await;
+						return Err(e);
+					}
+					txn.commit().await?;
+				}
 				Ok(false) => {
 					let _ = txn.cancel().await;
 					return Ok(());
@@ -2045,6 +2333,7 @@ impl Datastore {
 					return Err(e);
 				}
 			}
+			Self::ensure_not_cancelled(canceller)?;
 			if !has_more {
 				return Ok(());
 			}
@@ -2802,11 +3091,119 @@ impl Datastore {
 #[cfg(test)]
 mod test {
 	use std::collections::BTreeMap;
+	use std::future::pending;
 
 	use super::*;
 	use crate::iam::verify::verify_root_creds;
 	use crate::types::{PublicValue, PublicVariables};
 	use crate::val::TableName;
+
+	#[tokio::test]
+	async fn archive_node_for_shutdown_reports_success() {
+		let outcome = archive_node_for_shutdown(Duration::from_secs(60), Ok(()));
+
+		assert_eq!(outcome, ShutdownNodeDeleteOutcome::Archived);
+	}
+
+	#[tokio::test]
+	async fn archive_node_for_shutdown_reports_failure() {
+		let outcome = archive_node_for_shutdown(
+			Duration::from_secs(60),
+			Err(anyhow::anyhow!("delete failed")),
+		);
+
+		assert_eq!(outcome, ShutdownNodeDeleteOutcome::Failed);
+	}
+
+	#[tokio::test]
+	async fn archive_node_for_shutdown_reports_timeout() {
+		let outcome = archive_node_for_shutdown(
+			Duration::from_millis(1),
+			Err(anyhow::Error::new(Error::QueryTimedout(Duration::from_millis(1).into()))),
+		);
+
+		assert_eq!(outcome, ShutdownNodeDeleteOutcome::TimedOut);
+	}
+
+	#[tokio::test]
+	async fn node_tx_step_cancels_after_timeout() {
+		let ds = Datastore::new("memory").await.unwrap();
+		let txn = ds.transaction(Write, Optimistic).await.unwrap();
+		let timeout_duration = Duration::from_millis(10);
+
+		let err = await_node_tx_step(
+			&txn,
+			Instant::now() + timeout_duration,
+			timeout_duration,
+			None,
+			pending::<Result<()>>(),
+		)
+		.await
+		.unwrap_err();
+
+		assert!(matches!(err.downcast_ref::<Error>(), Some(Error::QueryTimedout(_))));
+		assert!(txn.closed());
+	}
+
+	#[tokio::test]
+	async fn node_tx_step_cancels_after_cancellation() {
+		let ds = Datastore::new("memory").await.unwrap();
+		let txn = ds.transaction(Write, Optimistic).await.unwrap();
+		let canceller = CancellationToken::new();
+		canceller.cancel();
+
+		let err = await_node_tx_step(
+			&txn,
+			Instant::now() + Duration::from_secs(60),
+			Duration::from_secs(60),
+			Some(&canceller),
+			pending::<Result<()>>(),
+		)
+		.await
+		.unwrap_err();
+
+		assert!(matches!(err.downcast_ref::<Error>(), Some(Error::QueryCancelled)));
+		assert!(txn.closed());
+	}
+
+	#[tokio::test]
+	async fn node_tx_step_cancels_after_error() {
+		let ds = Datastore::new("memory").await.unwrap();
+		let txn = ds.transaction(Write, Optimistic).await.unwrap();
+
+		let err = await_node_tx_step(
+			&txn,
+			Instant::now() + Duration::from_secs(60),
+			Duration::from_secs(60),
+			None,
+			async { Err::<(), _>(anyhow::anyhow!("step failed")) },
+		)
+		.await
+		.unwrap_err();
+
+		assert_eq!(err.to_string(), "step failed");
+		assert!(txn.closed());
+	}
+
+	#[tokio::test]
+	async fn node_tx_step_success_leaves_transaction_open() {
+		let ds = Datastore::new("memory").await.unwrap();
+		let txn = ds.transaction(Write, Optimistic).await.unwrap();
+
+		await_node_tx_step(
+			&txn,
+			Instant::now() + Duration::from_secs(60),
+			Duration::from_secs(60),
+			None,
+			async { Ok::<_, anyhow::Error>(()) },
+		)
+		.await
+		.unwrap();
+
+		assert!(!txn.closed());
+		txn.commit().await.unwrap();
+		assert!(txn.closed());
+	}
 
 	#[tokio::test]
 	async fn test_setup_superuser() {

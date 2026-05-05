@@ -41,6 +41,16 @@ pub fn anyhow_to_types_error(error: anyhow::Error) -> surrealdb_types::Error {
 	}
 }
 
+/// Returns true if an [`anyhow::Error`] contains a core query-cancellation error.
+pub fn is_query_cancelled(error: &anyhow::Error) -> bool {
+	matches!(error.downcast_ref::<Error>(), Some(Error::QueryCancelled))
+}
+
+/// Returns true if an [`anyhow::Error`] contains a core query-timeout error.
+pub fn is_query_timedout(error: &anyhow::Error) -> bool {
+	matches!(error.downcast_ref::<Error>(), Some(Error::QueryTimedout(_)))
+}
+
 /// An error originating from an embedded SurrealDB database.
 #[derive(Error, Debug)]
 #[allow(clippy::enum_variant_names)]
