@@ -1058,7 +1058,7 @@ impl Building {
 		if !*rc {
 			return Ok(());
 		}
-		IndexOperation::compaction_trigger(&self.ikb, tx, self.opt.id()).await?;
+		IndexOperation::compaction_trigger(&self.ikb, tx, self.ctx.node_id()).await?;
 		*rc = false;
 		Ok(())
 	}

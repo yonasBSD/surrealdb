@@ -421,7 +421,7 @@ impl Document {
 		permitted: Permitted,
 	) -> Result<bool> {
 		// Check if reduction is required
-		if !self.check_reduction_required(opt)? {
+		if !self.check_reduction_required(ctx, opt)? {
 			return Ok(false);
 		}
 
@@ -446,13 +446,17 @@ impl Document {
 		Ok(true)
 	}
 
-	pub(crate) fn check_reduction_required(&self, opt: &Options) -> Result<bool> {
+	pub(crate) fn check_reduction_required(
+		&self,
+		ctx: &FrozenContext,
+		opt: &Options,
+	) -> Result<bool> {
 		// Check if this record exists
 		if self.id.is_none() {
 			return Ok(false);
 		}
 		// Are permissions being skipped?
-		if !opt.check_perms(Action::View)? {
+		if !ctx.check_perms(opt, Action::View)? {
 			return Ok(false);
 		}
 

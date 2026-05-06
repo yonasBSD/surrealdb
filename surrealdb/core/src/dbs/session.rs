@@ -10,7 +10,14 @@ use crate::iam::{Auth, Level, Role};
 use crate::types::{PublicValue, PublicVariables};
 use crate::val::Value;
 
-/// Specifies the current session information when processing a query.
+/// Caller-supplied session input for one WebSocket connection or one HTTP/RPC request.
+///
+/// **Lifetime:** shared by many queries on that connection or request.
+/// **Source of truth:** JWT/basic auth, RPC headers, `USE` namespace/database, variables.
+///
+/// At the start of work, [`crate::kvs::Datastore::setup_options`] derives the stack-local
+/// [`crate::dbs::Options`] frame; [`crate::ctx::Context::attach_session`] copies tenant identity
+/// and realtime capability into ambient [`crate::ctx::Context`].
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Session {
 	/// The current session [`Auth`] information

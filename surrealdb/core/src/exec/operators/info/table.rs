@@ -128,15 +128,8 @@ async fn execute_table_info(
 	structured: bool,
 	version: Option<&dyn PhysicalExpr>,
 ) -> crate::expr::FlowResult<Value> {
-	// Check permissions
-	let root = ctx.root();
-	let opt = root
-		.options
-		.as_ref()
-		.ok_or_else(|| anyhow::anyhow!("Options not available in execution context"))?;
-
 	// Allowed to run?
-	opt.is_allowed(Action::View, ResourceKind::Any, &crate::expr::Base::Db)?;
+	ctx.is_allowed(Action::View, ResourceKind::Any, &crate::expr::Base::Db)?;
 
 	// Get database context
 	let db_ctx = ctx.database()?;

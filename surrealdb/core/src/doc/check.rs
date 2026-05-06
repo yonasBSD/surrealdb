@@ -343,7 +343,7 @@ impl Document {
 		}
 
 		// Should we run permissions checks?
-		if !opt.check_perms(Action::View)? {
+		if !ctx.check_perms(opt, Action::View)? {
 			return Ok(());
 		}
 
@@ -387,6 +387,7 @@ impl Document {
 	)]
 	pub(super) async fn check_permissions_quick(
 		&self,
+		ctx: &FrozenContext,
 		opt: &Options,
 		stm: &Statement<'_>,
 	) -> Result<(), IgnoreError> {
@@ -396,7 +397,7 @@ impl Document {
 		}
 
 		// Should we run permissions checks?
-		if opt.check_perms(stm.into())? {
+		if ctx.check_perms(opt, stm.into())? {
 			// Get the table for this document
 			let table = self.tb().await?;
 			// Get the permissions for this table
@@ -432,7 +433,7 @@ impl Document {
 		}
 
 		// Should we run permissions checks?
-		if !opt.check_perms(stm.into())? {
+		if !ctx.check_perms(opt, stm.into())? {
 			return Ok(());
 		}
 

@@ -130,8 +130,6 @@ pub struct RootContext {
 	pub cancellation: CancellationToken,
 	/// Authentication context for the current session
 	pub auth: Arc<Auth>,
-	/// Whether authentication is enabled on the datastore
-	pub auth_enabled: bool,
 	/// Session information for context-aware functions
 	pub(crate) session: Option<Arc<SessionInfo>>,
 	/// Current value for correlated sub-execution (e.g., graph lookups).
@@ -163,7 +161,6 @@ impl std::fmt::Debug for RootContext {
 			.field("datastore", &self.datastore.as_ref().map(|_| "<Datastore>"))
 			.field("cancellation", &self.cancellation)
 			.field("auth", &self.auth)
-			.field("auth_enabled", &self.auth_enabled)
 			.field("session", &self.session)
 			.field("current_value", &self.current_value.as_ref().map(|_| "<Value>"))
 			.field("skip_fetch_perms", &self.skip_fetch_perms)
@@ -456,7 +453,7 @@ impl ExecutionContext {
 
 	/// Check if authentication is enabled.
 	pub fn auth_enabled(&self) -> bool {
-		self.root().auth_enabled
+		self.root().ctx.auth_enabled()
 	}
 
 	/// Check if permissions should be checked for the given action.
@@ -473,7 +470,7 @@ impl ExecutionContext {
 		let root = self.root();
 
 		// Check if server auth is disabled
-		if !root.auth_enabled && root.auth.is_anon() {
+		if !root.ctx.auth_enabled() && root.auth.is_anon() {
 			return Ok(false);
 		}
 
@@ -520,7 +517,6 @@ impl ExecutionContext {
 				datastore: r.datastore.clone(),
 				cancellation: r.cancellation.clone(),
 				auth: r.auth.clone(),
-				auth_enabled: r.auth_enabled,
 				session: r.session.clone(),
 				current_value: r.current_value.clone(),
 				skip_fetch_perms: r.skip_fetch_perms,
@@ -533,7 +529,6 @@ impl ExecutionContext {
 					datastore: n.root.datastore.clone(),
 					cancellation: n.root.cancellation.clone(),
 					auth: n.root.auth.clone(),
-					auth_enabled: n.root.auth_enabled,
 					session: n.root.session.clone(),
 					current_value: n.root.current_value.clone(),
 					skip_fetch_perms: n.root.skip_fetch_perms,
@@ -549,7 +544,6 @@ impl ExecutionContext {
 						datastore: d.ns_ctx.root.datastore.clone(),
 						cancellation: d.ns_ctx.root.cancellation.clone(),
 						auth: d.ns_ctx.root.auth.clone(),
-						auth_enabled: d.ns_ctx.root.auth_enabled,
 						session: d.ns_ctx.root.session.clone(),
 						current_value: d.ns_ctx.root.current_value.clone(),
 						skip_fetch_perms: d.ns_ctx.root.skip_fetch_perms,
@@ -740,7 +734,7 @@ impl ExecutionContext {
 	/// Check if the current auth is allowed to perform an action on a given resource
 	pub fn is_allowed(&self, action: Action, res: ResourceKind, base: &Base) -> anyhow::Result<()> {
 		if let Some(options) = self.options() {
-			options.is_allowed(action, res, base)
+			self.ctx().is_allowed(options, action, res, base)
 		} else {
 			Ok(())
 		}

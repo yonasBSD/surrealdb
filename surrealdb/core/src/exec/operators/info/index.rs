@@ -120,7 +120,7 @@ async fn execute_index_info(
 		.ok_or_else(|| anyhow::anyhow!("Options not available in execution context"))?;
 
 	// Allowed to run?
-	opt.is_allowed(Action::View, ResourceKind::Actor, &crate::expr::Base::Db)?;
+	ctx.is_allowed(Action::View, ResourceKind::Actor, &crate::expr::Base::Db)?;
 
 	// Evaluate the index and table name expressions
 	let eval_ctx = EvalContext::from_exec_ctx(ctx);

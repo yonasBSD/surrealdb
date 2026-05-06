@@ -31,7 +31,7 @@ pub(crate) struct AlterUserStatement {
 impl AlterUserStatement {
 	#[instrument(level = "trace", name = "AlterUserStatement::compute", skip_all)]
 	pub(crate) async fn compute(&self, ctx: &FrozenContext, opt: &Options) -> Result<Value> {
-		opt.is_allowed(Action::Edit, ResourceKind::Actor, &self.base)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Actor, &self.base)?;
 
 		match self.base {
 			Base::Root => self.compute_root(ctx).await,

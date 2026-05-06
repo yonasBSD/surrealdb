@@ -37,7 +37,7 @@ impl RemoveNamespaceStatement {
 		doc: Option<&CursorDoc>,
 	) -> Result<Value> {
 		// Allowed to run?
-		opt.is_allowed(Action::Edit, ResourceKind::Namespace, &Base::Root)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Namespace, &Base::Root)?;
 		// Get the transaction
 		let txn = ctx.tx();
 		// Compute the name

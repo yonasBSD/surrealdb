@@ -39,7 +39,7 @@ impl Document {
 		opt: &Options,
 		stm: &Statement<'_>,
 	) -> Result<Value, IgnoreError> {
-		self.check_permissions_quick(opt, stm).await?;
+		self.check_permissions_quick(ctx, opt, stm).await?;
 		self.check_table_type(stm).await?;
 		self.check_data_fields(stk, ctx, opt, stm).await?;
 		self.store_edges_data(ctx, opt, stm).await?;
@@ -64,7 +64,7 @@ impl Document {
 		opt: &Options,
 		stm: &Statement<'_>,
 	) -> Result<Value, IgnoreError> {
-		self.check_permissions_quick(opt, stm).await?;
+		self.check_permissions_quick(ctx, opt, stm).await?;
 		self.check_table_type(stm).await?;
 		self.check_pre_update(stk, ctx, opt, stm).await?;
 		self.process_record_data(stk, ctx, opt, stm).await?;

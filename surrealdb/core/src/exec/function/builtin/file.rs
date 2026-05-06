@@ -35,6 +35,7 @@ fn accept_payload(value: Value) -> Result<bytes::Bytes> {
 struct StreamingBucketOps<'a> {
 	bucket: Arc<BucketDefinition>,
 	store: Arc<dyn ObjectStore>,
+	frozen_ctx: &'a crate::ctx::FrozenContext,
 	opt: &'a crate::dbs::Options,
 }
 
@@ -68,6 +69,7 @@ impl<'a> StreamingBucketOps<'a> {
 		Ok(Self {
 			bucket,
 			store,
+			frozen_ctx,
 			opt,
 		})
 	}
@@ -85,7 +87,7 @@ impl<'a> StreamingBucketOps<'a> {
 	/// fall back to checking based on role only.
 	fn check_permission(&self, op: BucketOperation) -> Result<()> {
 		// Check if we should check permissions (uses Options::check_perms like fnc::file)
-		if self.opt.check_perms(op.into())? {
+		if self.frozen_ctx.check_perms(self.opt, op.into())? {
 			// Guest and Record users are not allowed to list files in buckets
 			ensure!(
 				!op.is_list(),

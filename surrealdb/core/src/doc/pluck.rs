@@ -156,7 +156,7 @@ impl Document {
 		// Skip field permissions for COUNT operations - they only need table-level permissions
 		if self.id.is_some() && !matches!(self.record_strategy, RecordStrategy::Count) {
 			// Should we run permissions checks?
-			if opt.check_perms(Action::View)? {
+			if ctx.check_perms(opt, Action::View)? {
 				let table_fields = self.doc_ctx.fd()?;
 
 				// Loop through all field statements
@@ -301,7 +301,7 @@ impl Document {
 		if self.id.is_some() && !matches!(self.record_strategy, RecordStrategy::Count) {
 			let table_fields = self.doc_ctx.fd()?;
 			// Should we run permissions checks?
-			if opt.check_perms(Action::View)? {
+			if ctx.check_perms(opt, Action::View)? {
 				// Loop through all field statements
 				for fd in table_fields.iter() {
 					// Loop over each field in document

@@ -142,7 +142,7 @@ impl Document {
 		doc_ctx: &DocumentContext,
 		cursor_doc: &mut CursorDoc,
 	) -> Result<()> {
-		let node_id = opt.id();
+		let node_id = ctx.node_id();
 		let ts = HlcTimeStamp::next();
 		let db = doc_ctx.db();
 		let tx = ctx.tx();
@@ -244,7 +244,7 @@ impl AsyncEventRecord {
 			ns,
 			db,
 			perms: opt.perms,
-			auth_enabled: opt.auth_enabled,
+			auth_enabled: ctx.auth_enabled(),
 			values: ctx.collect_values(HashMap::new()),
 			auth_with_limit: opt.auth.clone(),
 			event_definition: event_definition.clone(),
@@ -256,6 +256,7 @@ impl AsyncEventRecord {
 	fn build_event_context(&self, ctx: &FrozenContext) -> FrozenContext {
 		let mut ctx = Context::new_child(ctx);
 		ctx.add_values(self.values.clone());
+		ctx.auth_enabled = self.auth_enabled;
 		ctx.freeze()
 	}
 
@@ -284,7 +285,6 @@ impl AsyncEventRecord {
 		let opt = parent_opts.clone();
 		let opt = opt
 			.with_perms(self.perms)
-			.with_auth_enabled(self.auth_enabled)
 			.with_auth(self.auth_with_limit.clone())
 			.with_async_event_depth(self.event_depth)
 			.with_ns(Some(self.ns.clone()))

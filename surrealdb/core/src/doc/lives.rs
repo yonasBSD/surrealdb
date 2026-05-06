@@ -40,7 +40,7 @@ impl Document {
 		}
 
 		// Check if we can send notifications
-		if opt.broker.is_none() {
+		if ctx.broker().is_none() {
 			// no sender, so nothing to do.
 			return Ok(());
 		};
@@ -141,7 +141,7 @@ impl Document {
 		};
 		let opt = opt.with_auth(auth.into());
 
-		let Some(sender) = opt.broker.as_ref() else {
+		let Some(sender) = ctx.broker() else {
 			return Ok(());
 		};
 
@@ -198,7 +198,7 @@ impl Document {
 		// notification rather than aborting the triggering write transaction.
 		//
 		// Store the reduction flag so the DIFF arm can reuse it without a second call.
-		let reduction_required = self.check_reduction_required(&opt)?;
+		let reduction_required = self.check_reduction_required(&ctx, &opt)?;
 		let mut doc = if reduction_required {
 			let target = if is_delete {
 				&self.initial
@@ -272,7 +272,7 @@ impl Document {
 			Err(IgnoreError::Error(e)) => return Err(e),
 			Ok(_) => (),
 		}
-		if !sender.can_be_sent(&opt, &live_subscription)? {
+		if !sender.can_be_sent(ctx.node_id(), &live_subscription)? {
 			return Ok(());
 		}
 		// Let's check what type of statement
@@ -435,7 +435,7 @@ impl Document {
 	) -> Result<(), IgnoreError> {
 		// Should we run permissions checks?
 		// Live queries are always
-		if opt.check_perms(crate::iam::Action::View)? {
+		if ctx.check_perms(opt, crate::iam::Action::View)? {
 			// Get the table
 			let tb = self.tb().await?;
 			// Process the table permissions
@@ -479,8 +479,12 @@ impl DefaultBroker {
 	}
 }
 impl MessageBroker for DefaultBroker {
-	fn can_be_sent(&self, opt: &Options, subscription: &SubscriptionDefinition) -> Result<bool> {
-		Ok(opt.id() == subscription.node)
+	fn can_be_sent(
+		&self,
+		node_id: uuid::Uuid,
+		subscription: &SubscriptionDefinition,
+	) -> Result<bool> {
+		Ok(node_id == subscription.node)
 	}
 
 	fn send(
@@ -507,7 +511,9 @@ mod tests {
 	use crate::kvs::Datastore;
 	use crate::kvs::LockType::Optimistic;
 	use crate::kvs::TransactionType::Write;
-	use crate::types::{PublicNotification, PublicRecordId, PublicRecordIdKey, PublicValue};
+	use crate::types::{
+		PublicAction, PublicNotification, PublicRecordId, PublicRecordIdKey, PublicValue,
+	};
 
 	async fn new_ds_with_broker() -> Result<(Receiver<PublicNotification>, Datastore)> {
 		let (send, recv) = crate::channel::bounded(1000);
@@ -898,6 +904,66 @@ mod tests {
 		let notification =
 			tokio::time::timeout(tokio::time::Duration::from_millis(500), recv.recv()).await;
 		assert!(notification.is_ok(), "expected a notification from the active LIVE query");
+	}
+
+	/// A read-only bare statement in the same batch must not leave a stale broker on `ctx`;
+	/// otherwise the next write's LIVE notifications are dropped into a closed channel (broker
+	/// leak).
+	#[tokio::test]
+	async fn test_live_notification_survives_read_only_preceding_write_in_batch() {
+		let (recv, ds) = new_ds_with_broker().await.unwrap();
+		let (ns, db, tb) = ("test", "test", "person");
+		setup_ns_db_table(&ds, ns, db, tb).await;
+
+		let live_ses = Session::owner().with_ns(ns).with_db(db).with_rt(true);
+		ds.execute(&format!("LIVE SELECT * FROM {tb}"), &live_ses, None).await.unwrap();
+		while recv.try_recv().is_ok() {}
+
+		let owner_ses = Session::owner().with_ns(ns).with_db(db);
+		let res = ds.execute(&format!("RETURN 1; CREATE {tb}:1"), &owner_ses, None).await.unwrap();
+		assert!(res[0].result.is_ok(), "RETURN should succeed");
+		assert!(res[1].result.is_ok(), "CREATE should succeed");
+
+		let notif = tokio::time::timeout(tokio::time::Duration::from_millis(500), recv.recv())
+			.await
+			.expect("CREATE notification must arrive after a preceding read in the same batch")
+			.expect("notification channel should not be closed");
+		assert_eq!(notif.action, PublicAction::Create);
+	}
+
+	/// A failing write must clear the per-statement broker so a later statement in the batch
+	/// still installs a fresh channel for LIVE notifications.
+	#[tokio::test]
+	async fn test_live_notification_survives_failing_write_preceding_success_in_batch() {
+		let (recv, ds) = new_ds_with_broker().await.unwrap();
+		let (ns, db, tb) = ("test", "test", "person");
+		setup_ns_db_table(&ds, ns, db, tb).await;
+
+		let live_ses = Session::owner().with_ns(ns).with_db(db).with_rt(true);
+		ds.execute(&format!("LIVE SELECT * FROM {tb}"), &live_ses, None).await.unwrap();
+		while recv.try_recv().is_ok() {}
+
+		let owner_ses = Session::owner().with_ns(ns).with_db(db);
+		let res = ds
+			.execute(
+				&format!(
+					"CREATE {tb}:dup SET x = 1; CREATE {tb}:dup SET x = 2; CREATE {tb}:ok SET x = 3"
+				),
+				&owner_ses,
+				None,
+			)
+			.await
+			.unwrap();
+		assert_eq!(res.len(), 3);
+		assert!(res[0].result.is_ok(), "first CREATE should succeed");
+		assert!(res[1].result.is_err(), "duplicate CREATE should fail");
+		assert!(res[2].result.is_ok(), "third CREATE should succeed");
+
+		let notif = tokio::time::timeout(tokio::time::Duration::from_millis(500), recv.recv())
+			.await
+			.expect("notification must arrive after a failing write in the same batch")
+			.expect("notification channel should not be closed");
+		assert_eq!(notif.action, PublicAction::Create);
 	}
 
 	/// A LIVE query whose originating session has expired via TTL must not receive

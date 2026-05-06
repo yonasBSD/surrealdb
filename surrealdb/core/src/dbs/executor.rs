@@ -1,5 +1,6 @@
 use std::pin::{Pin, pin};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
@@ -49,20 +50,68 @@ pub struct Executor {
 	/// Cached session info to avoid re-extracting from context on every query.
 	/// Session values don't change between statements in the same executor batch.
 	cached_session: Option<Arc<crate::exec::context::SessionInfo>>,
+	/// Set when [`Executor::prepare_broker`] installs a [`DefaultBroker`]. Left false when a
+	/// broker was already present (higher layer) or this statement skipped installation.
+	/// Drives conditional [`clear_broker`] so we never remove an externally supplied broker.
+	broker_owned_by_executor: bool,
 }
 
 impl Executor {
-	fn prepare_broker(&mut self) -> Option<async_channel::Receiver<PublicNotification>> {
+	/// Install a per-statement notification broker when `writable` is true and the session has
+	/// notifications enabled. Read-only bare statements skip installation — they cannot emit
+	/// LIVE/KILL notifications — avoiding allocation and stale-broker leaks on the hot path.
+	#[inline]
+	fn prepare_broker(
+		&mut self,
+		writable: bool,
+	) -> Option<async_channel::Receiver<PublicNotification>> {
+		if !writable {
+			return None;
+		}
 		if !self.ctx.has_notifications() {
 			return None;
 		}
 		// If a broker is already provided by a higher layer, don't override it here.
-		if self.opt.broker.is_some() {
+		if self.ctx.broker().is_some() {
 			return None;
 		}
 		let (send, recv) = async_channel::unbounded();
-		self.opt.broker = Some(DefaultBroker::new(send));
+		let Some(ctx) = Arc::get_mut(&mut self.ctx) else {
+			debug_assert!(false, "prepare_broker: ctx Arc was contended at statement boundary");
+			static WARNED: AtomicBool = AtomicBool::new(false);
+			if !WARNED.swap(true, Ordering::Relaxed) {
+				tracing::warn!(
+					target: TARGET,
+					"prepare_broker: ctx Arc contended at statement boundary; \
+					 LIVE notifications for this batch will be skipped. This is a bug — \
+					 future occurrences will not log."
+				);
+			}
+			return None;
+		};
+		ctx.set_broker(Some(DefaultBroker::new(send)));
+		self.broker_owned_by_executor = true;
 		Some(recv)
+	}
+
+	#[inline]
+	fn clear_broker(&mut self) {
+		let Some(ctx) = Arc::get_mut(&mut self.ctx) else {
+			debug_assert!(false, "clear_broker: ctx Arc was contended at statement boundary");
+			static WARNED: AtomicBool = AtomicBool::new(false);
+			if !WARNED.swap(true, Ordering::Relaxed) {
+				tracing::warn!(
+					target: TARGET,
+					"clear_broker: ctx Arc contended at statement boundary; \
+					 broker leaked for this batch and may affect notification \
+					 semantics for the next batch. This is a bug — \
+					 future occurrences will not log."
+				);
+			}
+			return;
+		};
+		ctx.set_broker(None);
+		self.broker_owned_by_executor = false;
 	}
 }
 
@@ -74,6 +123,7 @@ impl Executor {
 			opt,
 			ctx,
 			cached_session: None,
+			broker_owned_by_executor: false,
 		}
 	}
 
@@ -120,7 +170,7 @@ impl Executor {
 
 	fn execute_option_statement(&mut self, stmt: OptionStatement) -> Result<()> {
 		// Allowed to run?
-		self.opt.is_allowed(Action::Edit, ResourceKind::Option, &Base::Db)?;
+		self.ctx.is_allowed(&self.opt, Action::Edit, ResourceKind::Option, &Base::Db)?;
 
 		if stmt.name.eq_ignore_ascii_case("IMPORT") {
 			self.opt.set_import(stmt.what);
@@ -434,7 +484,6 @@ impl Executor {
 			datastore: None,
 			cancellation,
 			auth: self.opt.auth.clone(),
-			auth_enabled: self.opt.auth_enabled,
 			session: self.get_session_info(),
 			current_value: None,
 			skip_fetch_perms: false,
@@ -804,6 +853,20 @@ impl Executor {
 		start: &Instant,
 		plan: TopLevelExpr,
 	) -> Result<Value> {
+		self.broker_owned_by_executor = false;
+		let result = self.execute_plan_impl_inner(kvs, start, plan).await;
+		if self.broker_owned_by_executor {
+			self.clear_broker();
+		}
+		result
+	}
+
+	async fn execute_plan_impl_inner(
+		&mut self,
+		kvs: &Datastore,
+		start: &Instant,
+		plan: TopLevelExpr,
+	) -> Result<Value> {
 		let transaction_type = if plan.read_only() {
 			TransactionType::Read
 		} else {
@@ -814,7 +877,7 @@ impl Executor {
 				.await?
 				.with_tenant_identity(self.ctx.tenant_identity().cloned()),
 		);
-		let receiver = self.prepare_broker();
+		let receiver = self.prepare_broker(matches!(transaction_type, TransactionType::Write));
 
 		let exec_result = match kvs.transaction_timeout() {
 			Some(timeout) => {
@@ -850,18 +913,18 @@ impl Executor {
 					});
 				}
 
-				// flush notifications.
-				if let Some(recv) = receiver {
-					self.opt.broker = None;
-					if let Some(sink) = self.ctx.notifications() {
-						spawn(async move {
-							while let Ok(x) = recv.recv().await {
-								if sink.send(x).await.is_err() {
-									break;
-								}
+				// flush notifications (`execute_plan_impl` clears the broker only when we installed
+				// it).
+				if let Some(recv) = receiver
+					&& let Some(sink) = self.ctx.notifications()
+				{
+					spawn(async move {
+						while let Ok(x) = recv.recv().await {
+							if sink.send(x).await.is_err() {
+								break;
 							}
-						});
-					}
+						}
+					});
 				}
 
 				Ok(value)
@@ -880,6 +943,22 @@ impl Executor {
 	/// Execute the begin statement and all statements after which are within a
 	/// transaction block.
 	async fn execute_begin_statement<S>(
+		&mut self,
+		kvs: &Datastore,
+		stream: Pin<&mut S>,
+	) -> Result<()>
+	where
+		S: Stream<Item = Result<TopLevelExpr>>,
+	{
+		self.broker_owned_by_executor = false;
+		let result = self.execute_begin_statement_impl(kvs, stream).await;
+		if self.broker_owned_by_executor {
+			self.clear_broker();
+		}
+		result
+	}
+
+	async fn execute_begin_statement_impl<S>(
 		&mut self,
 		kvs: &Datastore,
 		mut stream: Pin<&mut S>,
@@ -978,7 +1057,7 @@ impl Executor {
 	{
 		// Create a sender for this transaction only if the context allows for
 		// notifications.
-		let receiver = self.prepare_broker();
+		let receiver = self.prepare_broker(true);
 		let start_results = self.results.len();
 		let mut skip_remaining = false;
 
@@ -1128,8 +1207,6 @@ impl Executor {
 						query_type: QueryType::Other,
 					});
 
-					self.opt.broker = None;
-
 					self.emit_statement_event_cached(
 						kvs,
 						statement_type,
@@ -1190,8 +1267,6 @@ impl Executor {
 						));
 					}
 
-					self.opt.broker = None;
-
 					// CANCEL returns NONE
 					self.results.push(QueryResult {
 						time: before.elapsed(),
@@ -1219,18 +1294,17 @@ impl Executor {
 					} else {
 						// Successfully commited. everything is fine.
 
-						// flush notifications.
-						if let Some(recv) = receiver {
-							self.opt.broker = None;
-							if let Some(sink) = self.ctx.notifications() {
-								spawn(async move {
-									while let Ok(x) = recv.recv().await {
-										if sink.send(x).await.is_err() {
-											break;
-										}
+						// flush notifications (`execute_begin_statement` clears only our broker).
+						if let Some(recv) = receiver
+							&& let Some(sink) = self.ctx.notifications()
+						{
+							spawn(async move {
+								while let Ok(x) = recv.recv().await {
+									if sink.send(x).await.is_err() {
+										break;
 									}
-								});
-							}
+								}
+							});
 						}
 
 						// COMMIT returns NONE
@@ -1263,8 +1337,6 @@ impl Executor {
 							Some(QueryError::NotExecuted),
 						));
 					}
-
-					self.opt.broker = None;
 
 					self.results.push(QueryResult {
 						time: before.elapsed(),
@@ -1357,8 +1429,6 @@ impl Executor {
 
 								let _ = txn.cancel().await;
 
-								self.opt.broker = None;
-
 								while let Some(stmt) = stream.next().await {
 									yield_now!();
 									let stmt = stmt?;
@@ -1447,8 +1517,6 @@ impl Executor {
 			res.query_type = QueryType::Other;
 			res.result = Err(TypesError::internal("Missing COMMIT statement".to_string()));
 		}
-
-		self.opt.broker = None;
 
 		Ok(())
 	}

@@ -95,7 +95,7 @@ pub async fn process_api_request_with_stack(
 	let global = global_entry.as_ref().map(|v| v.try_as_api()).transpose()?;
 
 	// Check permissions
-	if opt.check_perms(Action::Edit)? {
+	if ctx.check_perms(opt, Action::Edit)? {
 		let permissions: Vec<&Permission> = method_config
 			.map(|config| &config.permissions)
 			.into_iter()

@@ -1021,9 +1021,8 @@ impl Datastore {
 				pass,
 				INITIAL_USER_ROLE.to_owned(),
 			);
-			let opt =
-				Options::new(self.id, self.dynamic_configuration.clone(), &CommonConfig::default())
-					.with_auth(Arc::new(Auth::for_root(Role::Owner)));
+			let opt = Options::new(&CommonConfig::default())
+				.with_auth(Arc::new(Auth::for_root(Role::Owner)));
 			let mut ctx = self.setup_ctx()?;
 			ctx.set_transaction(txn.clone());
 			let ctx = ctx.freeze();
@@ -2851,16 +2850,14 @@ impl Datastore {
 	}
 
 	pub fn setup_options(&self, sess: &Session) -> Options {
-		Options::new(self.id, self.dynamic_configuration.clone(), &self.config)
-			.with_ns(sess.ns())
-			.with_db(sess.db())
-			.with_live(sess.live())
-			.with_auth(sess.au.clone())
-			.with_auth_enabled(self.auth_enabled)
+		Options::new(&self.config).with_ns(sess.ns()).with_db(sess.db()).with_auth(sess.au.clone())
 	}
 
 	pub fn setup_ctx(&self) -> Result<Context> {
 		let mut ctx = Context::from_ds(
+			self.id,
+			self.auth_enabled,
+			self.dynamic_configuration.clone(),
 			self.dynamic_configuration.get_query_timeout(),
 			self.slow_log.clone(),
 			self.capabilities.clone(),
@@ -3279,11 +3276,9 @@ mod test {
 			.await
 			.unwrap();
 
-		let opt = Options::new(dbs.id(), DynamicConfiguration::default(), &dbs.config())
+		let opt = Options::new(&dbs.config())
 			.with_ns(Some("test".into()))
 			.with_db(Some("test".into()))
-			.with_live(false)
-			.with_auth_enabled(false)
 			.with_max_computation_depth(u32::MAX);
 
 		// Create a default context

@@ -670,7 +670,7 @@ impl FieldEditContext<'_> {
 	/// Process any PERMISSIONS clause for the field definition
 	async fn process_permissions_clause(&mut self, val: Value) -> Result<Value> {
 		// Check for a PERMISSIONS clause
-		if self.opt.check_perms(Action::Edit)? {
+		if self.ctx.check_perms(self.opt, Action::Edit)? {
 			// Get the permission clause
 			let perms = if self.doc.is_new() {
 				&self.def.create_permission

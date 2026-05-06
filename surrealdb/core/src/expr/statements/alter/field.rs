@@ -44,7 +44,7 @@ impl AlterFieldStatement {
 	#[instrument(level = "trace", name = "AlterFieldStatement::compute", skip_all)]
 	pub(crate) async fn compute(&self, ctx: &FrozenContext, opt: &Options) -> Result<Value> {
 		// Allowed to run?
-		opt.is_allowed(Action::Edit, ResourceKind::Field, &Base::Db)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Field, &Base::Db)?;
 		// Get the NS and DB
 		let (ns_name, db_name) = opt.ns_db()?;
 		let (ns, db) = ctx.expect_ns_db_ids(opt).await?;

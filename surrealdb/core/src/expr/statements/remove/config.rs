@@ -19,7 +19,8 @@ impl RemoveConfigStatement {
 	pub(crate) async fn compute(&self, ctx: &FrozenContext, opt: &Options) -> Result<Value> {
 		let base = self.kind.base();
 		// Allowed to run?
-		opt.is_allowed(
+		ctx.is_allowed(
+			opt,
 			Action::Edit,
 			ResourceKind::Config(self.kind.clone()),
 			&base.clone().into(),

@@ -268,7 +268,7 @@ impl<'a> BucketController<'a> {
 		key: Option<&ObjectKey>,
 		target: Option<&ObjectKey>,
 	) -> Result<()> {
-		if self.opt.check_perms(op.into())? {
+		if self.ctx.check_perms(self.opt, op.into())? {
 			// Guest and Record users are not allowed to list files in buckets
 			ensure!(
 				!op.is_list(),

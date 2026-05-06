@@ -15,7 +15,7 @@ impl Document {
 		stm: &Statement<'_>,
 	) -> Result<Value, IgnoreError> {
 		self.check_record_exists().await?;
-		self.check_permissions_quick(opt, stm).await?;
+		self.check_permissions_quick(ctx, opt, stm).await?;
 		self.check_pre_update(stk, ctx, opt, stm).await?;
 		self.process_record_data(stk, ctx, opt, stm).await?;
 		self.default_record_data(ctx, opt, stm).await?;

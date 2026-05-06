@@ -288,7 +288,7 @@ impl FullTextIndex {
 			self.analyzer.analyze_content(stk, ctx, opt, content, FilteringStage::Indexing).await?;
 		let mut set = HashSet::new();
 		let tx = ctx.tx();
-		let nid = opt.id();
+		let nid = ctx.node_id();
 		// Get the doc id (if it exists)
 		let doc_id = self.get_doc_id(&tx, rid).await?;
 		if let Some(doc_id) = doc_id {
@@ -317,7 +317,7 @@ impl FullTextIndex {
 						total_docs_length: -(dl as i128),
 						doc_count: -1,
 					};
-					let key = self.ikb.new_dc_with_id(doc_id, opt.id(), Uuid::now_v7());
+					let key = self.ikb.new_dc_with_id(doc_id, ctx.node_id(), Uuid::now_v7());
 					tx.put(&key, &dcl).await?;
 					*require_compaction = true;
 				}
@@ -350,7 +350,7 @@ impl FullTextIndex {
 		require_compaction: &mut bool,
 	) -> Result<()> {
 		let tx = ctx.tx();
-		let nid = opt.id();
+		let nid = ctx.node_id();
 		// Get the doc id (if it exists)
 		let id = self.doc_ids.resolve_doc_id(ctx, rid.key.clone()).await?;
 		// Collect the tokens.
@@ -368,7 +368,7 @@ impl FullTextIndex {
 		}
 		{
 			// Increase the doc count and total doc length
-			let key = self.ikb.new_dc_with_id(id.doc_id(), opt.id(), Uuid::now_v7());
+			let key = self.ikb.new_dc_with_id(id.doc_id(), ctx.node_id(), Uuid::now_v7());
 			let dcl = DocLengthAndCount {
 				total_docs_length: dl as i128,
 				doc_count: 1,
@@ -1213,7 +1213,6 @@ mod tests {
 	use super::{FullTextIndex, TermDocument};
 	use crate::catalog::{DatabaseId, FullTextParams, IndexId, NamespaceId};
 	use crate::cnf::CommonConfig;
-	use crate::cnf::dynamic::DynamicConfiguration;
 	use crate::ctx::{Context, FrozenContext};
 	use crate::dbs::Options;
 	use crate::expr::statements::DefineAnalyzerStatement;
@@ -1252,8 +1251,7 @@ mod tests {
 			};
 			let mut stack = reblessive::TreeStack::new();
 
-			let opts =
-				Options::new(ds.id(), DynamicConfiguration::default(), &CommonConfig::default());
+			let opts = Options::new(&CommonConfig::default());
 			let stk_ctx = ctx.clone();
 			let az = stack
 				.enter(|stk| async move {
@@ -1300,7 +1298,7 @@ mod tests {
 			});
 			let nid = Uuid::new_v4();
 			let ikb = IndexKeyBase::new(NamespaceId(1), DatabaseId(2), "t".into(), IndexId(3));
-			let opt = Options::new(nid, DynamicConfiguration::default(), &CommonConfig::default())
+			let opt = Options::new(&CommonConfig::default())
 				.with_ns(Some("testns".into()))
 				.with_db(Some("testdb".into()));
 			let fti = Arc::new(

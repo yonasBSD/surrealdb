@@ -120,7 +120,7 @@ impl Document {
 		opt: &Options,
 		stm: &Statement<'_>,
 	) -> Result<Value, IgnoreError> {
-		self.check_permissions_quick(opt, stm).await?;
+		self.check_permissions_quick(ctx, opt, stm).await?;
 		self.process_record_data(stk, ctx, opt, stm).await?;
 		self.generate_record_id()?;
 		self.check_table_type(stm).await?;
@@ -147,7 +147,7 @@ impl Document {
 		opt: &Options,
 		stm: &Statement<'_>,
 	) -> Result<Value, IgnoreError> {
-		self.check_permissions_quick(opt, stm).await?;
+		self.check_permissions_quick(ctx, opt, stm).await?;
 		self.check_table_type(stm).await?;
 		self.check_pre_update(stk, ctx, opt, stm).await?;
 		self.process_record_data(stk, ctx, opt, stm).await?;

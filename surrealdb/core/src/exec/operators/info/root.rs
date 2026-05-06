@@ -116,13 +116,7 @@ async fn execute_root_info(
 	structured: bool,
 	version: Option<&dyn PhysicalExpr>,
 ) -> crate::expr::FlowResult<Value> {
-	let root = ctx.root();
-	let opt = root
-		.options
-		.as_ref()
-		.ok_or_else(|| anyhow::anyhow!("Options not available in execution context"))?;
-
-	opt.is_allowed(Action::View, ResourceKind::Any, &crate::expr::Base::Root)?;
+	ctx.is_allowed(Action::View, ResourceKind::Any, &crate::expr::Base::Root)?;
 
 	let version = match version {
 		Some(v) => {
@@ -150,7 +144,7 @@ async fn execute_root_info(
 			"nodes" => process(txn.all_nodes().await?),
 			"system" => system().await,
 			"users" => process(txn.all_root_users(version).await?),
-			"config" => opt.dynamic_configuration().clone().structure()
+			"config" => ctx.ctx().dynamic_configuration().clone().structure()
 		};
 		Ok(Value::Object(Object::from(object)))
 	} else {
@@ -188,7 +182,7 @@ async fn execute_root_info(
 				out.into()
 			},
 			"config" => {
-				opt.dynamic_configuration().clone().structure()
+				ctx.ctx().dynamic_configuration().clone().structure()
 			}
 		};
 		Ok(Value::Object(Object::from(object)))

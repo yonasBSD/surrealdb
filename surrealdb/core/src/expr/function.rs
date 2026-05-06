@@ -117,7 +117,7 @@ impl Function {
 				let opt = AuthLimit::try_from(&val.auth_limit)?.limit_opt(opt);
 
 				// Check permissions
-				if opt.check_perms(Action::View)? {
+				if ctx.check_perms(&opt, Action::View)? {
 					check_perms(stk, ctx, &opt, doc, &name, &val.permissions).await?;
 				}
 				// Validate the arguments
@@ -162,7 +162,7 @@ impl Function {
 				let val = ctx.tx().get_db_module(ns, db, mod_name.as_str(), opt.version).await?;
 
 				// Check permissions
-				if opt.check_perms(Action::View)? {
+				if ctx.check_perms(opt, Action::View)? {
 					check_perms(stk, ctx, opt, doc, &mod_name, &val.permissions).await?;
 				}
 
@@ -199,7 +199,7 @@ impl Function {
 				let val = ctx.tx().get_db_module(ns, db, mod_name.as_str(), opt.version).await?;
 
 				// Check permissions
-				if opt.check_perms(Action::View)? {
+				if ctx.check_perms(opt, Action::View)? {
 					check_perms(stk, ctx, opt, doc, &mod_name, &val.permissions).await?;
 				}
 

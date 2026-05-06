@@ -271,7 +271,7 @@ impl<'a> IndexOperation<'a> {
 			self.db,
 			&self.ix.table_name,
 			self.ix.index_id,
-			Some((self.opt.id(), uuid::Uuid::now_v7())),
+			Some((self.ctx.node_id(), uuid::Uuid::now_v7())),
 			relative_count > 0,
 			relative_count.unsigned_abs() as u64,
 		);
@@ -423,7 +423,7 @@ impl<'a> IndexOperation<'a> {
 	}
 
 	pub(crate) async fn trigger_compaction(&self) -> Result<()> {
-		IndexOperation::compaction_trigger(&self.ikb, &self.ctx.tx(), self.opt.id()).await
+		IndexOperation::compaction_trigger(&self.ikb, &self.ctx.tx(), self.ctx.node_id()).await
 	}
 
 	/// Triggers index compaction.

@@ -4,6 +4,7 @@
 //! we use channels as a transport layer and executors to process the
 //! operations. This module also gives a `context` to the transaction.
 
+mod broker;
 mod distinct;
 pub mod executor;
 mod group;
@@ -24,10 +25,11 @@ pub mod node;
 
 pub(crate) use variables::{ParameterCapturePass, Variables};
 
+pub(crate) use self::broker::MessageBroker;
 pub use self::capabilities::Capabilities;
 pub(crate) use self::executor::Executor;
 pub(crate) use self::iterator::{Iterable, Iterator, Operable, Processable, Workable};
-pub(crate) use self::options::{Force, MessageBroker, Options};
+pub(crate) use self::options::{Force, Options};
 pub use self::response::{QueryResult, QueryResultBuilder, QueryType, Status};
 pub use self::session::{NewPlannerStrategy, Session};
 pub(crate) use self::statement::Statement;

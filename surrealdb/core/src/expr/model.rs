@@ -76,7 +76,7 @@ impl Model {
 			get_model_path(ns, db, &self.name, &self.version, &val.hash)
 		};
 		// Check permissions
-		if opt.check_perms(Action::View)? {
+		if ctx.check_perms(opt, Action::View)? {
 			match &val.permissions {
 				Permission::Full => (),
 				Permission::None => {

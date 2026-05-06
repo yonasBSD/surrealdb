@@ -135,7 +135,7 @@ pub fn should_check_perms(db_ctx: &DatabaseContext, action: Action) -> Result<bo
 	let root = &db_ctx.ns_ctx.root;
 
 	// Check if server auth is disabled
-	if !root.auth_enabled && root.auth.is_anon() {
+	if !root.ctx.auth_enabled() && root.auth.is_anon() {
 		return Ok(false);
 	}
 

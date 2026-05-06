@@ -84,11 +84,11 @@ impl LiveStatement {
 		doc: Option<&CursorDoc>,
 	) -> Result<Value> {
 		// Is realtime enabled?
-		opt.realtime()?;
+		ctx.realtime()?;
 		// Valid options?
 		opt.valid_for_db()?;
 		// Get the Node ID
-		let nid = opt.id();
+		let nid = ctx.node_id();
 
 		let mut vars = Variables::new();
 		let mut pass = ParameterCapturePass {

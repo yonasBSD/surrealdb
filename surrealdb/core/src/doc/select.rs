@@ -26,7 +26,7 @@ impl Document {
 		omit: &[Idiom],
 	) -> Result<Value, IgnoreError> {
 		self.check_record_exists().await?;
-		check_select_permissions_quick(opt, self.doc_ctx.tb().ok())?;
+		check_select_permissions_quick(ctx, opt, self.doc_ctx.tb().ok())?;
 		check_select_permissions_table(stk, ctx, opt, self.doc_ctx.tb().ok(), &self.current)
 			.await?;
 		self.check_select_where_condition(stk, ctx, opt, stmt).await?;
@@ -39,11 +39,12 @@ impl Document {
 	instrument(level = "trace", name = "Document::check_select_permissions_quick", skip_all)
 )]
 fn check_select_permissions_quick(
+	ctx: &FrozenContext,
 	opt: &Options,
 	table: Option<&Arc<TableDefinition>>,
 ) -> Result<(), IgnoreError> {
 	// Should we run permissions checks?
-	if !opt.check_perms(Action::View)? {
+	if !ctx.check_perms(opt, Action::View)? {
 		return Ok(());
 	}
 
@@ -75,7 +76,7 @@ pub(super) async fn check_select_permissions_table(
 	table: Option<&Arc<TableDefinition>>,
 	current: &CursorDoc,
 ) -> Result<(), IgnoreError> {
-	if !opt.check_perms(Action::View)? {
+	if !ctx.check_perms(opt, Action::View)? {
 		return Ok(());
 	}
 

@@ -30,7 +30,7 @@ impl KillStatement {
 		_doc: Option<&CursorDoc>,
 	) -> Result<Value> {
 		// Is realtime enabled?
-		opt.realtime()?;
+		ctx.realtime()?;
 		// Valid options?
 		opt.valid_for_db()?;
 		// Resolve live query id
@@ -48,7 +48,7 @@ impl KillStatement {
 			Ok(id) => id,
 		};
 		// Get the Node ID
-		let nid = opt.id();
+		let nid = ctx.node_id();
 		// Get the LIVE ID
 		let lid = lid.0;
 		// Get the transaction
@@ -61,7 +61,7 @@ impl KillStatement {
 				// Verify that the requesting user is the owner of this live query.
 				// Root-level users may kill any live query; all other users may only
 				// kill live queries they themselves created.
-				if opt.auth_enabled && !opt.auth.is_root() {
+				if ctx.auth_enabled() && !opt.auth.is_root() {
 					let table_key = crate::key::table::lq::new(live.ns, live.db, &live.tb, lid);
 					let subscription: Option<SubscriptionDefinition> =
 						txn.get(&table_key, None).await?;
@@ -114,7 +114,7 @@ impl KillStatement {
 				});
 			}
 		}
-		if let Some(sender) = opt.broker.as_ref() {
+		if let Some(sender) = ctx.broker() {
 			sender
 				.send(PublicNotification::new(
 					lid.into(),

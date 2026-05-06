@@ -38,7 +38,7 @@ impl RemoveDatabaseStatement {
 		doc: Option<&CursorDoc>,
 	) -> Result<Value> {
 		// Allowed to run?
-		opt.is_allowed(Action::Edit, ResourceKind::Database, &Base::Ns)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Database, &Base::Ns)?;
 		// Get the transaction
 		let txn = ctx.tx();
 

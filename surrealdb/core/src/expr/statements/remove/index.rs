@@ -40,7 +40,7 @@ impl RemoveIndexStatement {
 		doc: Option<&CursorDoc>,
 	) -> Result<Value> {
 		// Allowed to run?
-		opt.is_allowed(Action::Edit, ResourceKind::Index, &Base::Db)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Index, &Base::Db)?;
 		// Compute the name
 		let name = expr_to_ident(stk, ctx, opt, doc, &self.name, "index name").await?;
 		// Compute the what

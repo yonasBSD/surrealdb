@@ -41,7 +41,7 @@ impl RemoveTableStatement {
 		doc: Option<&CursorDoc>,
 	) -> Result<Value> {
 		// Allowed to run?
-		opt.is_allowed(Action::Edit, ResourceKind::Table, &Base::Db)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Table, &Base::Db)?;
 		// Compute the name
 		let name =
 			TableName::new(expr_to_ident(stk, ctx, opt, doc, &self.name, "table name").await?);
@@ -134,7 +134,7 @@ impl RemoveTableStatement {
 				.await?;
 			}
 		}
-		if let Some(sender) = opt.broker.as_ref() {
+		if let Some(sender) = ctx.broker() {
 			for lv in lvs.iter() {
 				sender
 					.send(PublicNotification::new(

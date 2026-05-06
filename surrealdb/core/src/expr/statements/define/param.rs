@@ -33,7 +33,7 @@ impl DefineParamStatement {
 		doc: Option<&CursorDoc>,
 	) -> Result<Value> {
 		// Allowed to run?
-		opt.is_allowed(Action::Edit, ResourceKind::Parameter, &Base::Db)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Parameter, &Base::Db)?;
 
 		let value = stk.run(|stk| self.value.compute(stk, ctx, opt, doc)).await.catch_return()?;
 

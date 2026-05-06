@@ -73,7 +73,7 @@ impl DefineTableStatement {
 		doc: Option<&CursorDoc>,
 	) -> Result<Value> {
 		// Allowed to run?
-		opt.is_allowed(Action::Edit, ResourceKind::Table, &Base::Db)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Table, &Base::Db)?;
 
 		// Process the name
 		let name =

@@ -134,7 +134,7 @@ async fn execute_user_info(
 	let base = base.unwrap_or(opt.selected_base()?);
 
 	// Allowed to run?
-	opt.is_allowed(Action::View, ResourceKind::Actor, &base)?;
+	ctx.is_allowed(Action::View, ResourceKind::Actor, &base)?;
 
 	// Evaluate the user name expression
 	let eval_ctx = EvalContext::from_exec_ctx(ctx);

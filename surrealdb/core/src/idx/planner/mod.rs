@@ -77,7 +77,7 @@ impl<'a> StatementContext<'a> {
 		opt: &'a Options,
 		stm: &'a Statement<'a>,
 	) -> Result<Self> {
-		let is_perm = opt.check_perms(stm.into())?;
+		let is_perm = ctx.check_perms(opt, stm.into())?;
 		Ok(Self {
 			ctx,
 			opt,

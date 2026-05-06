@@ -45,7 +45,7 @@ impl DefineBucketStatement {
 		doc: Option<&CursorDoc>,
 	) -> Result<Value> {
 		// Allowed to run?
-		opt.is_allowed(Action::Edit, ResourceKind::Bucket, &Base::Db)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Bucket, &Base::Db)?;
 		// Process the name
 		let name = expr_to_ident(stk, ctx, opt, doc, &self.name, "bucket name").await?;
 		// Fetch the transaction

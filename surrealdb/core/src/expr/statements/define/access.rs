@@ -348,7 +348,7 @@ impl DefineAccessStatement {
 		doc: Option<&CursorDoc>,
 	) -> Result<Value> {
 		// Allowed to run?
-		opt.is_allowed(Action::Edit, ResourceKind::Actor, &self.base)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Actor, &self.base)?;
 		// Compute the definition
 		let definition = self.to_definition(stk, ctx, opt, doc).await?;
 		// Check the statement type

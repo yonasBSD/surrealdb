@@ -153,7 +153,7 @@ impl DefineFieldStatement {
 		let definition = self.to_definition(stk, ctx, opt, doc).await?;
 
 		// Allowed to run?
-		opt.is_allowed(Action::Edit, ResourceKind::Field, &Base::Db)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Field, &Base::Db)?;
 
 		// Get the NS and DB
 		let (ns_name, db_name) = opt.ns_db()?;

@@ -191,7 +191,7 @@ pub async fn create_grant(
 		None => opt.selected_base()?,
 	};
 	// Allowed to run?
-	opt.is_allowed(Action::Edit, ResourceKind::Access, &base)?;
+	ctx.is_allowed(opt, Action::Edit, ResourceKind::Access, &base)?;
 	// Get the transaction.
 	let txn = ctx.tx();
 	// Clear the cache.
@@ -481,7 +481,7 @@ async fn compute_show(
 		None => opt.selected_base()?,
 	};
 	// Allowed to run?
-	opt.is_allowed(Action::View, ResourceKind::Access, &base)?;
+	ctx.is_allowed(opt, Action::View, ResourceKind::Access, &base)?;
 	// Get the transaction.
 	let txn = ctx.tx();
 	// Clear the cache.
@@ -631,7 +631,7 @@ pub async fn revoke_grant(
 		None => opt.selected_base()?,
 	};
 	// Allowed to run?
-	opt.is_allowed(Action::Edit, ResourceKind::Access, &base)?;
+	ctx.is_allowed(opt, Action::Edit, ResourceKind::Access, &base)?;
 	// Get the transaction
 	let txn = ctx.tx();
 	// Clear the cache
@@ -863,7 +863,7 @@ async fn compute_purge(
 		None => opt.selected_base()?,
 	};
 	// Allowed to run?
-	opt.is_allowed(Action::Edit, ResourceKind::Access, &base)?;
+	ctx.is_allowed(opt, Action::Edit, ResourceKind::Access, &base)?;
 	// Get the transaction.
 	let txn = ctx.tx();
 	// Clear the cache.

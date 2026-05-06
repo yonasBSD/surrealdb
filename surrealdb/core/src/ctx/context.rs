@@ -17,6 +17,7 @@ use surrealism_runtime::package::{SurrealismPackage, UnpackOptions};
 use surrealism_runtime::runtime::Runtime;
 #[cfg(feature = "http")]
 use url::Url;
+use uuid::Uuid;
 use web_time::Instant;
 
 use crate::buc::manager::BucketsManager;
@@ -25,6 +26,7 @@ use crate::buc::store::ObjectKey;
 use crate::buc::store::ObjectStore;
 use crate::catalog::providers::{CatalogProvider, DatabaseProvider, NamespaceProvider};
 use crate::catalog::{DatabaseDefinition, DatabaseId, NamespaceId};
+use crate::cnf::dynamic::DynamicConfiguration;
 use crate::cnf::{CommonConfig, PROTECTED_PARAM_NAMES};
 use crate::ctx::canceller::Canceller;
 use crate::ctx::reason::Reason;
@@ -35,12 +37,14 @@ use crate::dbs::capabilities::NetTarget;
 #[cfg(all(feature = "http", feature = "surrealism"))]
 use crate::dbs::capabilities::Targets;
 use crate::dbs::{
-	Capabilities, NewPlannerStrategy, Options, Session, StatementCounters, Variables,
+	Capabilities, MessageBroker, NewPlannerStrategy, Options, Session, StatementCounters, Variables,
 };
 use crate::err::Error;
 use crate::exec::function::FunctionRegistry;
+use crate::expr::Base;
 #[cfg(feature = "http")]
 use crate::http::HttpClient;
+use crate::iam::{Action, ResourceKind};
 use crate::idx::planner::executor::QueryExecutor;
 use crate::idx::planner::{IterationStage, QueryPlanner};
 use crate::idx::trees::store::IndexStores;
@@ -58,6 +62,11 @@ use crate::val::Value;
 
 pub type FrozenContext = Arc<Context>;
 
+/// Ambient state for one query batch: datastore handles, cancellation, capabilities,
+/// and **request-wide** configuration (node id, auth enabled, dynamic config, live/broker).
+///
+/// Stored behind [`FrozenContext`] (`Arc<Context>`) with optional parent links for scoped
+/// deadlines, planner state, and parameters. Per-statement toggles live on [`Options`], not here.
 pub struct Context {
 	// An optional parent context.
 	parent: Option<FrozenContext>,
@@ -125,6 +134,16 @@ pub struct Context {
 	/// Client for making http requests.
 	#[cfg(feature = "http")]
 	http_client: Arc<HttpClient>,
+	/// Stable node id for this datastore instance (live routing, queue keys, etc.).
+	node_id: Uuid,
+	/// Whether authentication is required for non-anonymous access (datastore boot flag).
+	pub(crate) auth_enabled: bool,
+	/// Runtime-adjustable configuration (e.g. global query timeout).
+	dynamic_configuration: DynamicConfiguration,
+	/// Whether this session may use realtime (`LIVE` / `KILL LIVE`).
+	live: bool,
+	/// Optional broker for cross-node live query notifications.
+	broker: Option<Arc<dyn MessageBroker>>,
 	// Executor config
 	pub config: Arc<CommonConfig>,
 }
@@ -175,6 +194,11 @@ impl Context {
 			#[cfg(feature = "http")]
 			http_client: parent.http_client.clone(),
 			tenant_identity: None,
+			node_id: parent.node_id,
+			auth_enabled: parent.auth_enabled,
+			dynamic_configuration: parent.dynamic_configuration.clone(),
+			live: parent.live,
+			broker: parent.broker.clone(),
 		}
 	}
 
@@ -228,6 +252,11 @@ impl Context {
 			#[cfg(feature = "http")]
 			http_client,
 			tenant_identity: parent.tenant_identity.clone(),
+			node_id: parent.node_id,
+			auth_enabled: parent.auth_enabled,
+			dynamic_configuration: parent.dynamic_configuration.clone(),
+			live: parent.live,
+			broker: parent.broker.clone(),
 		}
 	}
 
@@ -267,6 +296,11 @@ impl Context {
 			#[cfg(feature = "http")]
 			http_client: parent.http_client.clone(),
 			tenant_identity: parent.tenant_identity.clone(),
+			node_id: parent.node_id,
+			auth_enabled: parent.auth_enabled,
+			dynamic_configuration: parent.dynamic_configuration.clone(),
+			live: parent.live,
+			broker: parent.broker.clone(),
 		}
 	}
 
@@ -313,6 +347,11 @@ impl Context {
 			#[cfg(feature = "http")]
 			http_client: from.http_client.clone(),
 			tenant_identity: from.tenant_identity.clone(),
+			node_id: from.node_id,
+			auth_enabled: from.auth_enabled,
+			dynamic_configuration: from.dynamic_configuration.clone(),
+			live: from.live,
+			broker: from.broker.clone(),
 		}
 	}
 
@@ -352,12 +391,20 @@ impl Context {
 			#[cfg(feature = "http")]
 			http_client: from.http_client.clone(),
 			tenant_identity: from.tenant_identity.clone(),
+			node_id: from.node_id,
+			auth_enabled: from.auth_enabled,
+			dynamic_configuration: from.dynamic_configuration.clone(),
+			live: from.live,
+			broker: from.broker.clone(),
 		}
 	}
 
 	/// Creates a new context from a configured datastore.
 	#[expect(clippy::too_many_arguments)]
 	pub(crate) fn from_ds(
+		node_id: Uuid,
+		auth_enabled: bool,
+		dynamic_configuration: DynamicConfiguration,
 		time_out: Option<Duration>,
 		slow_log: Option<SlowLog>,
 		capabilities: Arc<Capabilities>,
@@ -405,6 +452,11 @@ impl Context {
 			#[cfg(feature = "http")]
 			http_client,
 			tenant_identity: None,
+			node_id,
+			auth_enabled,
+			dynamic_configuration,
+			live: false,
+			broker: None,
 		};
 		if let Some(timeout) = time_out {
 			ctx.add_timeout(timeout)?;
@@ -454,6 +506,11 @@ impl Context {
 				.expect("http client to be created"),
 			),
 			tenant_identity: None,
+			node_id: Uuid::nil(),
+			auth_enabled: true,
+			dynamic_configuration: DynamicConfiguration::default(),
+			live: false,
+			broker: None,
 		}
 	}
 
@@ -468,6 +525,87 @@ impl Context {
 			fail!("Tried to unfreeze a Context with multiple references")
 		};
 		Ok(x)
+	}
+
+	#[inline]
+	pub fn node_id(&self) -> Uuid {
+		self.node_id
+	}
+
+	#[inline]
+	pub(crate) fn auth_enabled(&self) -> bool {
+		self.auth_enabled
+	}
+
+	pub(crate) fn dynamic_configuration(&self) -> &DynamicConfiguration {
+		&self.dynamic_configuration
+	}
+
+	/// Whether this session may open `LIVE` queries or `KILL LIVE` (from [`Session::live`]
+	/// applied in [`Context::attach_session`]).
+	pub(crate) fn realtime(&self) -> Result<()> {
+		if !self.live {
+			bail!(Error::RealtimeDisabled);
+		}
+		Ok(())
+	}
+
+	pub(crate) fn broker(&self) -> Option<&Arc<dyn MessageBroker>> {
+		self.broker.as_ref()
+	}
+
+	pub(crate) fn set_broker(&mut self, broker: Option<Arc<dyn MessageBroker>>) {
+		self.broker = broker;
+	}
+
+	/// IAM check using auth from [`Options`] and the datastore auth toggle on this context.
+	pub fn is_allowed(
+		&self,
+		opt: &Options,
+		action: Action,
+		res: ResourceKind,
+		base: &Base,
+	) -> Result<()> {
+		let res = match base {
+			Base::Root => res.on_root(),
+			Base::Ns => res.on_ns(opt.ns()?),
+			Base::Db => {
+				let (ns, db) = opt.ns_db()?;
+				res.on_db(ns, db)
+			}
+		};
+
+		if !self.auth_enabled && opt.auth.is_anon() {
+			return Ok(());
+		}
+
+		opt.auth.is_allowed(action, &res)
+	}
+
+	/// Table-level permission check frequency (mirrors former [`Options::check_perms`]).
+	pub fn check_perms(&self, opt: &Options, action: Action) -> Result<bool> {
+		if !opt.perms {
+			return Ok(false);
+		}
+		if !self.auth_enabled && opt.auth.is_anon() {
+			return Ok(false);
+		}
+		match action {
+			Action::Edit => {
+				let allowed = opt.auth.has_editor_role();
+				let (ns, db) = opt.ns_db()?;
+				let db_in_actor_level =
+					opt.auth.is_root() || opt.auth.is_ns_check(ns) || opt.auth.is_db_check(ns, db);
+				Ok(!allowed || !db_in_actor_level)
+			}
+			Action::View => {
+				let allowed = opt.auth.has_viewer_role();
+				let (ns, db) = opt.ns_db()?;
+				let db_in_actor_level =
+					opt.auth.is_root() || opt.auth.is_ns_check(ns) || opt.auth.is_db_check(ns, db);
+				Ok(!allowed || !db_in_actor_level)
+			}
+		}
 	}
 
 	/// Get the namespace id for the current context.
@@ -853,6 +991,7 @@ impl Context {
 	/// Attach a session to the context and add any session variables to the
 	/// context.
 	pub(crate) fn attach_session(&mut self, session: &Session) -> Result<(), Error> {
+		self.live = session.live();
 		self.add_values(session.values());
 		// Only override the planner strategy if the session explicitly sets a
 		// non-default value (e.g. language tests). Otherwise the capability-level
@@ -1197,14 +1336,59 @@ mod tests {
 	#[cfg(feature = "http")]
 	use url::Url;
 
+	use crate::cnf::CommonConfig;
 	#[cfg(all(feature = "allocation-tracking", feature = "allocator"))]
 	use crate::cnf::MEMORY_THRESHOLD;
 	use crate::ctx::Context;
 	use crate::ctx::reason::Reason;
 	#[cfg(feature = "http")]
 	use crate::dbs::Capabilities;
+	use crate::dbs::Options;
 	#[cfg(feature = "http")]
 	use crate::dbs::capabilities::{NetTarget, Targets};
+	use crate::expr::Base;
+	use crate::iam::{Action, Auth, ResourceKind, Role};
+
+	#[test]
+	fn is_allowed_respects_context_auth_toggle_and_base() {
+		let config = CommonConfig::default();
+
+		// Auth disabled: anonymous allowed without IAM; still needs valid NS/DB for bases.
+		{
+			let mut ctx = Context::new_test();
+			ctx.auth_enabled = false;
+
+			let empty = Options::new(&config);
+			ctx.is_allowed(&empty, Action::View, ResourceKind::Any, &Base::Ns).unwrap_err();
+			ctx.is_allowed(&empty, Action::View, ResourceKind::Any, &Base::Db).unwrap_err();
+			let db_only = Options::new(&config).with_db(Some("db".into()));
+			ctx.is_allowed(&db_only, Action::View, ResourceKind::Any, &Base::Db).unwrap_err();
+
+			ctx.is_allowed(&empty, Action::View, ResourceKind::Any, &Base::Root).unwrap();
+			let ns = Options::new(&config).with_ns(Some("ns".into()));
+			ctx.is_allowed(&ns, Action::View, ResourceKind::Any, &Base::Ns).unwrap();
+			let ns_db = Options::new(&config).with_ns(Some("ns".into())).with_db(Some("db".into()));
+			ctx.is_allowed(&ns_db, Action::View, ResourceKind::Any, &Base::Db).unwrap();
+		}
+
+		// Auth enabled: root owner still needs NS/DB set for NS/Db bases.
+		{
+			let mut ctx = Context::new_test();
+			ctx.auth_enabled = true;
+
+			let opts = Options::new(&config).with_auth(Auth::for_root(Role::Owner).into());
+			ctx.is_allowed(&opts, Action::View, ResourceKind::Any, &Base::Ns).unwrap_err();
+			ctx.is_allowed(&opts, Action::View, ResourceKind::Any, &Base::Db).unwrap_err();
+			let db_only = opts.clone().with_db(Some("db".into()));
+			ctx.is_allowed(&db_only, Action::View, ResourceKind::Any, &Base::Db).unwrap_err();
+
+			ctx.is_allowed(&opts, Action::View, ResourceKind::Any, &Base::Root).unwrap();
+			let ns = opts.with_ns(Some("ns".into()));
+			ctx.is_allowed(&ns, Action::View, ResourceKind::Any, &Base::Ns).unwrap();
+			let ns_db = ns.with_db(Some("db".into()));
+			ctx.is_allowed(&ns_db, Action::View, ResourceKind::Any, &Base::Db).unwrap();
+		}
+	}
 
 	#[cfg(feature = "http")]
 	#[tokio::test]
