@@ -1,7 +1,8 @@
+use opentelemetry_otlp::WithTonicConfig;
 use opentelemetry_prometheus_text_exporter::PrometheusExporter;
-use opentelemetry_sdk::metrics::{
-	Aggregation, Instrument, PeriodicReader, SdkMeterProvider, Stream,
-};
+use opentelemetry_sdk::metrics::periodic_reader_with_async_runtime::PeriodicReader;
+use opentelemetry_sdk::metrics::{Aggregation, Instrument, SdkMeterProvider, Stream};
+use tonic::transport::ClientTlsConfig;
 
 use super::OTEL_DEFAULT_RESOURCE;
 use crate::cnf::{METRICS_ENABLED, TELEMETRY_DISABLE_METRICS, TELEMETRY_PROVIDER};
@@ -104,17 +105,17 @@ pub fn init() -> anyhow::Result<Option<MetricsInit>> {
 	};
 
 	if otlp_enabled {
+		// Native TLS roots so that HTTPS OTLP collector endpoints work out of the box.
 		let exporter = opentelemetry_otlp::MetricExporter::builder()
 			.with_tonic()
+			.with_tls_config(ClientTlsConfig::new().with_native_roots())
 			.with_temporality(opentelemetry_sdk::metrics::Temporality::Cumulative)
 			.build()?;
-		// Use the OTel SDK's standard env-var-aware default so operators
-		// can tune push frequency via the spec-mandated
-		// `OTEL_METRIC_EXPORT_INTERVAL` env var (milliseconds; 60000
-		// default per the OpenTelemetry specification). Hardcoding an
-		// override here would silently ignore any operator-configured
-		// value.
-		let reader = PeriodicReader::builder(exporter).build();
+		// Use the async PeriodicReader backed by the Tokio runtime so that
+		// metric exports don't block the calling thread. The OTel SDK's
+		// env-var-aware defaults still apply: operators can tune push
+		// frequency via `OTEL_METRIC_EXPORT_INTERVAL` (ms; 60 000 default).
+		let reader = PeriodicReader::builder(exporter, opentelemetry_sdk::runtime::Tokio).build();
 		builder = builder.with_reader(reader);
 	}
 

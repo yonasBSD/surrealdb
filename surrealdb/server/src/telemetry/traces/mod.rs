@@ -2,7 +2,9 @@ pub mod rpc;
 
 use anyhow::Result;
 use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_otlp::WithTonicConfig;
 use opentelemetry_sdk::trace::SdkTracerProvider;
+use tonic::transport::ClientTlsConfig;
 use tracing::Subscriber;
 use tracing_subscriber::Layer;
 
@@ -34,8 +36,12 @@ where
 	match TELEMETRY_PROVIDER.trim() {
 		// The OTLP telemetry provider has been specified
 		s if s.eq_ignore_ascii_case("otlp") && !*TELEMETRY_DISABLE_TRACING => {
-			// Build a new span exporter which uses gRPC via tonic
-			let span_exporter = opentelemetry_otlp::SpanExporter::builder().with_tonic().build()?;
+			// Build a new span exporter which uses gRPC via tonic with native TLS
+			// roots so that HTTPS OTLP collector endpoints work out of the box.
+			let span_exporter = opentelemetry_otlp::SpanExporter::builder()
+				.with_tonic()
+				.with_tls_config(ClientTlsConfig::new().with_native_roots())
+				.build()?;
 			// Create a batch span processor with the exporter (uses Tokio runtime automatically)
 			let batch_processor =
 				opentelemetry_sdk::trace::BatchSpanProcessor::builder(span_exporter).build();

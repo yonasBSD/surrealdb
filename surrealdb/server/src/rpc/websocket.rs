@@ -17,7 +17,7 @@ use surrealdb_core::observe::{
 };
 use surrealdb_core::rpc::format::Format;
 use surrealdb_core::rpc::{DbResponse, DbResult, Method, RpcProtocol};
-use surrealdb_types::{Array, Error as TypesError, HashMap, Value};
+use surrealdb_types::{Array, Error as TypesError, HashMap, ToSql, Value};
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::task::JoinSet;
@@ -447,7 +447,7 @@ impl Websocket {
 					span.record("otel.name", format!("surrealdb.rpc/{}", req.method));
 					span.record(
 						"rpc.request_id",
-						req.id.clone().map(|id| format!("{id:?}")).unwrap_or_default(),
+						req.id.as_ref().map(|id| id.to_sql()).unwrap_or_default(),
 					);
 					// Capture the request id, session id and a cloned channel handle up-front so we
 					// can still build a `DbResponse::failure` if the cancel branch wins the

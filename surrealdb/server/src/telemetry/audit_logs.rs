@@ -18,8 +18,10 @@
 //! every observer that wants an audit logger asks the runtime instance
 //! it was constructed with rather than mutating a global.
 
+use opentelemetry_otlp::WithTonicConfig;
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::logs::{BatchLogProcessor, SdkLoggerProvider};
+use tonic::transport::ClientTlsConfig;
 
 use super::OTEL_DEFAULT_RESOURCE;
 use crate::cnf::{TELEMETRY_DISABLE_METRICS, TELEMETRY_PROVIDER};
@@ -47,8 +49,12 @@ pub fn init() -> anyhow::Result<Option<SdkLoggerProvider>> {
 	}
 	let resource: Resource = OTEL_DEFAULT_RESOURCE.clone();
 	// OTLP logs exporter using the same tonic transport as the metrics
-	// pipeline.
-	let exporter = opentelemetry_otlp::LogExporter::builder().with_tonic().build()?;
+	// pipeline. Native TLS roots so that HTTPS OTLP collector endpoints
+	// work out of the box, consistent with the trace and metrics exporters.
+	let exporter = opentelemetry_otlp::LogExporter::builder()
+		.with_tonic()
+		.with_tls_config(ClientTlsConfig::new().with_native_roots())
+		.build()?;
 	let processor = BatchLogProcessor::builder(exporter).build();
 	let provider =
 		SdkLoggerProvider::builder().with_resource(resource).with_log_processor(processor).build();

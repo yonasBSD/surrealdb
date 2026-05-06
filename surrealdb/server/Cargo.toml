@@ -92,9 +92,9 @@ glob = "0.3.3"
 http-body = "1.0.1"
 hyper.workspace = true
 opentelemetry = { version = "0.31.0" }
-opentelemetry-otlp = { version = "0.31.1", features = ["metrics", "grpc-tonic", "logs"] }
+opentelemetry-otlp = { version = "0.31.1", features = ["metrics", "grpc-tonic", "tls", "tls-roots", "logs"] }
 opentelemetry-prometheus-text-exporter.workspace = true
-opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio", "spec_unstable_metrics_views", "experimental_metrics_custom_reader", "logs"] }
+opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio", "spec_unstable_metrics_views", "experimental_metrics_custom_reader", "experimental_metrics_periodicreader_with_async_runtime", "logs"] }
 rustyline = { version = "17.0.2", features = ["derive"], optional = true }
 tower = { version = "0.5.3", features = ["limit", "load-shed"] }
 tower-http = { version = "0.6.8", features = [
@@ -110,6 +110,7 @@ tower-http = { version = "0.6.8", features = [
     "add-extension",
     "compression-full",
 ] }
+tonic = { version = "0.14.5", features = ["tls-native-roots"] }
 tower-service = "0.3.3"
 tracing-appender = "0.2.5"
 tracing-opentelemetry = "0.32.1"
@@ -174,7 +175,6 @@ opentelemetry-proto = { version = "0.31.0", features = [
     "logs",
 ] }
 rcgen = "0.14.7"
-tonic = "0.14.5"
 
 # Other crates
 chrono.workspace = true
