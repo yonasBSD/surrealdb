@@ -158,19 +158,35 @@ impl<K, V> VecMap<K, V> {
 
 	/// Moves all elements from `other` into `self`, leaving `other` empty.
 	///
-	/// # Panics
-	///
-	/// Panics if any key in `other` is less than or equal to the greatest key in `self`
-	/// (debug builds only), matching [`BTreeMap::append`].
+	/// This matches [`BTreeMap::append`]: both maps must already be sorted by key with no
+	/// duplicates within each map. If the same key appears in both, the value from `other`
+	/// replaces the value in `self` (the key slot from `self` is dropped, as with
+	/// [`BTreeMap::insert`]).
 	pub fn append(&mut self, other: &mut Self)
 	where
 		K: Ord,
 	{
-		debug_assert!(
-			self.last_key_value().zip(other.first_key_value()).is_none_or(|(a, b)| a.0 < b.0),
-			"VecMap::append: keys not disjoint / not in ascending order"
+		if other.is_empty() {
+			return;
+		}
+		if self.is_empty() {
+			std::mem::swap(self, other);
+			return;
+		}
+		let can_concat =
+			self.entries.last().zip(other.entries.first()).is_some_and(|(a, b)| a.0 < b.0);
+		if can_concat {
+			self.entries.append(&mut other.entries);
+			return;
+		}
+		*self = Self::merge_sorted_prefer_rhs(
+			Self {
+				entries: std::mem::take(&mut self.entries),
+			},
+			Self {
+				entries: std::mem::take(&mut other.entries),
+			},
 		);
-		self.entries.append(&mut other.entries);
 	}
 
 	/// Linear merge of two maps whose keys are sorted ascending in each.
@@ -728,21 +744,125 @@ mod tests {
 	}
 
 	#[test]
-	#[cfg(debug_assertions)]
-	#[should_panic(expected = "VecMap::append")]
-	fn append_panics_in_debug_when_other_keys_overlap() {
+	fn append_merges_when_other_is_entirely_before_self() {
 		let mut a: VecMap<i32, i32> = (5..8).map(|i| (i, i)).collect();
 		let mut b: VecMap<i32, i32> = (0..3).map(|i| (i, i)).collect();
 		a.append(&mut b);
+		assert!(b.is_empty());
+		assert_eq!(a.len(), 6);
+		assert_sorted(&a);
+		let pairs: Vec<_> = a.iter().map(|(k, v)| (*k, *v)).collect();
+		assert_eq!(pairs, vec![(0, 0), (1, 1), (2, 2), (5, 5), (6, 6), (7, 7)]);
 	}
 
 	#[test]
-	#[cfg(debug_assertions)]
-	#[should_panic(expected = "VecMap::append")]
-	fn append_panics_in_debug_when_keys_equal() {
-		let mut a: VecMap<i32, i32> = [(1, 1), (2, 2)].into_iter().collect();
-		let mut b: VecMap<i32, i32> = [(2, 20), (3, 30)].into_iter().collect();
+	fn append_overlapping_prefers_values_from_other_like_btreemap() {
+		let mut a: VecMap<i32, i32> = [(1, 1), (2, 2), (3, 3)].into_iter().collect();
+		let mut b: VecMap<i32, i32> = [(3, 30), (4, 4), (5, 5)].into_iter().collect();
 		a.append(&mut b);
+		assert!(b.is_empty());
+		let pairs: Vec<_> = a.iter().map(|(k, v)| (*k, *v)).collect();
+		assert_eq!(pairs, vec![(1, 1), (2, 2), (3, 30), (4, 4), (5, 5)]);
+	}
+
+	#[test]
+	fn append_interleaved_keys_merges_sorted() {
+		let mut a: VecMap<i32, i32> = [(1, 10), (3, 30), (5, 50)].into_iter().collect();
+		let mut b: VecMap<i32, i32> = [(2, 20), (4, 40), (6, 60)].into_iter().collect();
+		a.append(&mut b);
+		assert!(b.is_empty());
+		let pairs: Vec<_> = a.iter().map(|(k, v)| (*k, *v)).collect();
+		assert_eq!(pairs, vec![(1, 10), (2, 20), (3, 30), (4, 40), (5, 50), (6, 60)]);
+	}
+
+	#[test]
+	fn append_full_overlap_all_keys_match() {
+		let mut a: VecMap<i32, i32> = [(1, 1), (2, 2), (3, 3)].into_iter().collect();
+		let mut b: VecMap<i32, i32> = [(1, 100), (2, 200), (3, 300)].into_iter().collect();
+		a.append(&mut b);
+		assert!(b.is_empty());
+		let pairs: Vec<_> = a.iter().map(|(k, v)| (*k, *v)).collect();
+		assert_eq!(pairs, vec![(1, 100), (2, 200), (3, 300)]);
+	}
+
+	#[test]
+	fn append_other_is_subset_of_self() {
+		let mut a: VecMap<i32, i32> =
+			[(1, 1), (2, 2), (3, 3), (4, 4), (5, 5)].into_iter().collect();
+		let mut b: VecMap<i32, i32> = [(2, 200), (4, 400)].into_iter().collect();
+		a.append(&mut b);
+		assert!(b.is_empty());
+		let pairs: Vec<_> = a.iter().map(|(k, v)| (*k, *v)).collect();
+		assert_eq!(pairs, vec![(1, 1), (2, 200), (3, 3), (4, 400), (5, 5)]);
+	}
+
+	#[test]
+	fn append_self_is_subset_of_other() {
+		let mut a: VecMap<i32, i32> = [(2, 2), (4, 4)].into_iter().collect();
+		let mut b: VecMap<i32, i32> =
+			[(1, 10), (2, 20), (3, 30), (4, 40), (5, 50)].into_iter().collect();
+		a.append(&mut b);
+		assert!(b.is_empty());
+		let pairs: Vec<_> = a.iter().map(|(k, v)| (*k, *v)).collect();
+		assert_eq!(pairs, vec![(1, 10), (2, 20), (3, 30), (4, 40), (5, 50)]);
+	}
+
+	/// Differential test against `BTreeMap::append`: across a battery of
+	/// disjoint, overlapping, and subset scenarios — including inputs large
+	/// enough to cross the linear/binary-search threshold — `VecMap::append`
+	/// must produce the same key/value pairs in the same order as
+	/// `BTreeMap::append`, and leave `other` empty in both cases.
+	#[test]
+	fn append_matches_btreemap_append_for_sample_inputs() {
+		type Scenario = (Vec<(i32, i32)>, Vec<(i32, i32)>);
+		let scenarios: Vec<Scenario> = vec![
+			// disjoint, self < other (concat path)
+			(vec![(1, 1), (2, 2)], vec![(3, 3), (4, 4)]),
+			// disjoint, self > other (merge path)
+			(vec![(5, 5), (6, 6)], vec![(1, 1), (2, 2)]),
+			// interleaved disjoint
+			(vec![(1, 10), (3, 30), (5, 50)], vec![(2, 20), (4, 40), (6, 60)]),
+			// single-key overlap
+			(vec![(1, 1), (2, 2), (3, 3)], vec![(3, 30), (4, 4), (5, 5)]),
+			// fully overlapping
+			(vec![(1, 1), (2, 2), (3, 3)], vec![(1, 100), (2, 200), (3, 300)]),
+			// other is subset of self
+			(vec![(1, 1), (2, 2), (3, 3), (4, 4), (5, 5)], vec![(2, 200), (4, 400)]),
+			// self is subset of other
+			(vec![(2, 2), (4, 4)], vec![(1, 10), (2, 20), (3, 30), (4, 40), (5, 50)]),
+			// empty cases
+			(vec![], vec![(1, 1), (2, 2)]),
+			(vec![(1, 1), (2, 2)], vec![]),
+			(vec![], vec![]),
+			// large inputs that exceed LINEAR_SEARCH_THRESHOLD (64) on both sides;
+			// every other key in `b` overlaps `a`, every alternate key extends past
+			(
+				(0..100i32).map(|i| (i * 2, i)).collect(),
+				(0..100i32).map(|i| (i * 2 + 1, i + 10_000)).collect(),
+			),
+			(
+				(0..100i32).map(|i| (i, i)).collect(),
+				(50..150i32).map(|i| (i, i + 1_000_000)).collect(),
+			),
+		];
+
+		for (i, (a_pairs, b_pairs)) in scenarios.into_iter().enumerate() {
+			let mut vm_a: VecMap<i32, i32> = a_pairs.iter().copied().collect();
+			let mut vm_b: VecMap<i32, i32> = b_pairs.iter().copied().collect();
+			let mut bt_a: BTreeMap<i32, i32> = a_pairs.iter().copied().collect();
+			let mut bt_b: BTreeMap<i32, i32> = b_pairs.iter().copied().collect();
+
+			vm_a.append(&mut vm_b);
+			bt_a.append(&mut bt_b);
+
+			assert!(vm_b.is_empty(), "scenario {i}: VecMap other not emptied");
+			assert!(bt_b.is_empty(), "scenario {i}: BTreeMap other not emptied");
+
+			let vm_pairs: Vec<_> = vm_a.iter().map(|(k, v)| (*k, *v)).collect();
+			let bt_pairs: Vec<_> = bt_a.iter().map(|(k, v)| (*k, *v)).collect();
+			assert_eq!(vm_pairs, bt_pairs, "scenario {i}: VecMap diverges from BTreeMap");
+			assert_sorted(&vm_a);
+		}
 	}
 
 	#[test]
