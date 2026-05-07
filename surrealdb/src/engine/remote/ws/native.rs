@@ -424,7 +424,7 @@ mod tests {
 				payload.len() as f32 / ref_compressed,
 			));
 		}
-		results.sort_by(|(a, _, _, _), (b, _, _, _)| a.cmp(b));
+		results.sort_by_key(|(a, _, _, _)| *a);
 		for (size, name, duration, factor) in &results {
 			info!("{name} - Size: {size} - Duration: {duration:?} - Factor: {factor}");
 		}

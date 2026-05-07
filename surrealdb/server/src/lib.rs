@@ -10,6 +10,7 @@
 //! <a href="https://crates.io/crates/surrealdb">the Rust SDK</a>.
 //! </section>
 
+#![recursion_limit = "256"]
 // Temporarily allow deprecated items until version 3.0 for backward compatibility
 #![allow(deprecated)]
 #![deny(clippy::mem_forget)]

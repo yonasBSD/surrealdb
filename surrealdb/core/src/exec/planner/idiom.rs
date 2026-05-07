@@ -557,10 +557,8 @@ fn ast_contains_repeat_recurse(parts: &[Part]) -> bool {
 					}
 				}
 			}
-			Part::Recurse(_, Some(inner_path), _) => {
-				if ast_contains_repeat_recurse(&inner_path.0) {
-					return true;
-				}
+			Part::Recurse(_, Some(inner_path), _) if ast_contains_repeat_recurse(&inner_path.0) => {
+				return true;
 			}
 			_ => {}
 		}

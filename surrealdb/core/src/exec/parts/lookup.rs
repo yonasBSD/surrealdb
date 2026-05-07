@@ -158,7 +158,7 @@ async fn evaluate_lookup(
 				let result = Box::pin(evaluate_lookup(item, lookup, ctx.clone())).await?;
 				// Flatten: extend results with array elements, or push single values
 				match result {
-					Value::Array(inner) => results.extend(inner.into_iter()),
+					Value::Array(inner) => results.extend(inner),
 					other => results.push(other),
 				}
 			}

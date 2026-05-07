@@ -110,11 +110,7 @@ impl Lexer<'_> {
 			let mut number = 0u32;
 			let mut count = 0;
 
-			loop {
-				let Some(d) = reader.peek() else {
-					break;
-				};
-
+			while let Some(d) = reader.peek() {
 				if !d.is_ascii_digit() {
 					break;
 				}

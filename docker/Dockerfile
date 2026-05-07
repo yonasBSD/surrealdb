@@ -10,7 +10,7 @@ RUN dnf install -y gcc-toolset-13 git cmake llvm-toolset patch zlib-devel python
 ENV OPENSSL_NO_VENDOR=1
 
 # Install rust
-ARG RUST_VERSION=1.91.1
+ARG RUST_VERSION=1.95.0
 ARG RUSTUP_SHA256=6c30b75a75b28a96fd913a037c8581b580080b6ee9b8169a3c0feb1af7fe8caf
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh \
     && echo "${RUSTUP_SHA256}  /tmp/rustup.sh" | sha256sum -c - \

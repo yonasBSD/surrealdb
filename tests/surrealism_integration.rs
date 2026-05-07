@@ -33,8 +33,18 @@ mod surrealism_integration {
 			.unwrap_or(false)
 	}
 
-	/// Path to the `surreal` binary built by cargo for integration tests.
+	/// Path to the `surreal` CLI binary (built alongside integration tests).
+	///
+	/// Uses `CARGO_BIN_EXE_surreal` when present (set by `cargo test` / cargo-nextest) so the path
+	/// stays valid under nextest's per-test directory layout. Falls back to deriving
+	/// `target/debug/surreal` from `std::env::current_exe()` for runners that omit it.
 	fn surreal_bin() -> PathBuf {
+		if let Some(p) = std::env::var_os("CARGO_BIN_EXE_surreal")
+			.or_else(|| std::env::var_os("NEXTEST_BIN_EXE_surreal"))
+		{
+			return PathBuf::from(p);
+		}
+
 		let mut path = std::env::current_exe().expect("Failed to get current exe path");
 		assert!(path.pop());
 		if path.ends_with("deps") {

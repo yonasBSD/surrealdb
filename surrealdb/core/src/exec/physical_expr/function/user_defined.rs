@@ -91,8 +91,7 @@ impl PhysicalExpr for UserDefinedFunctionExec {
 
 		// 8. Create isolated context with function parameters bound
 		let mut local_params: HashMap<Strand, Value> = HashMap::new();
-		for ((param_name, kind), arg_value) in func_def.args.iter().zip(evaluated_args.into_iter())
-		{
+		for ((param_name, kind), arg_value) in func_def.args.iter().zip(evaluated_args) {
 			let coerced =
 				arg_value.coerce_to_kind(kind).map_err(|e| Error::InvalidFunctionArguments {
 					name: func_name.clone(),

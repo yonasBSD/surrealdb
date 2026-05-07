@@ -129,6 +129,21 @@ const IGNORE_TESTS: &[&str] = &[
 
 #[test]
 fn all_language_tests() {
+	// Parsing the full language-tests corpus can recurse deeply; the default test thread stack (~2
+	// MiB) overflows on some toolchains. Match surplus headroom used by other DB test harnesses.
+	const STACK: usize = 32 * 1024 * 1024;
+	std::thread::Builder::new()
+		.name("all_language_tests".to_string())
+		.stack_size(STACK)
+		.spawn(|| {
+			all_language_tests_impl();
+		})
+		.expect("spawn all_language_tests thread")
+		.join()
+		.expect("all_language_tests thread panicked");
+}
+
+fn all_language_tests_impl() {
 	let mut failed = 0;
 	let mut successfull = 0;
 	let tests_path = Path::new(env!("CARGO_MANIFEST_DIR"))

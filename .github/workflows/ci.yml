@@ -173,7 +173,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: depot-ubuntu-24.04-8
     env:
-      msrv: "1.91" # This should be updated if the MSRV is updated.
+      msrv: "1.95" # This should be updated if the MSRV is updated.
     steps:
 
       - name: Checkout sources

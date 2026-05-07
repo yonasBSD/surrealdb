@@ -567,10 +567,8 @@ impl MutVisitor for IndexConditionStripper<'_> {
 				left,
 				op,
 				right,
-			} => {
-				if self.matches_access(left, op, right) {
-					*expr = Expr::Literal(Literal::Bool(true));
-				}
+			} if self.matches_access(left, op, right) => {
+				*expr = Expr::Literal(Literal::Bool(true));
 			}
 			_ => {}
 		}

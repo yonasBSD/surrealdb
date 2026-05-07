@@ -623,6 +623,7 @@ impl<'a> TreeBuilder<'a> {
 		col: IdiomCol,
 	) -> Option<IndexOperator> {
 		if let Some(v) = n.is_computed() {
+			#[allow(clippy::collapsible_match)]
 			match (op, v, p) {
 				(BinaryOperator::Equal | BinaryOperator::ExactEqual, v, _) => {
 					let iop = IndexOperator::Equality(v);

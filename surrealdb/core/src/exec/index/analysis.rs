@@ -337,10 +337,8 @@ impl<'a> IndexAnalyzer<'a> {
 			Expr::Prefix {
 				op,
 				expr: inner,
-			} => {
-				if !matches!(op, PrefixOperator::Not) {
-					Self::collect_containment_expressions(inner, results);
-				}
+			} if !matches!(op, PrefixOperator::Not) => {
+				Self::collect_containment_expressions(inner, results);
 			}
 			_ => {}
 		}
@@ -368,15 +366,13 @@ impl<'a> IndexAnalyzer<'a> {
 					results.push((idiom.clone(), arr.0));
 				}
 			}
+			// Do NOT recurse into NOT — expanding `NOT (field IN [...])`
+			// into index lookups would produce the wrong result set.
 			Expr::Prefix {
 				op,
 				expr: inner,
-			} => {
-				// Do NOT recurse into NOT — expanding `NOT (field IN [...])`
-				// into index lookups would produce the wrong result set.
-				if !matches!(op, PrefixOperator::Not) {
-					Self::collect_in_expressions(inner, results);
-				}
+			} if !matches!(op, PrefixOperator::Not) => {
+				Self::collect_in_expressions(inner, results);
 			}
 			_ => {}
 		}
@@ -426,15 +422,13 @@ impl<'a> IndexAnalyzer<'a> {
 					}
 				}
 			}
+			// Do NOT recurse into NOT — `NOT (field > 5)` must not
+			// generate an index candidate for `field > 5`.
 			Expr::Prefix {
 				op,
 				expr: inner,
-			} => {
-				// Do NOT recurse into NOT — `NOT (field > 5)` must not
-				// generate an index candidate for `field > 5`.
-				if !matches!(op, PrefixOperator::Not) {
-					self.collect_conditions(inner, conditions);
-				}
+			} if !matches!(op, PrefixOperator::Not) => {
+				self.collect_conditions(inner, conditions);
 			}
 			_ => {}
 		}
@@ -700,16 +694,14 @@ impl<'a> IndexAnalyzer<'a> {
 					}
 				}
 			}
-			// Nested expression in parentheses (but NOT negation)
+			// Nested expression in parentheses (but NOT negation).
+			// Do NOT recurse into NOT — negated predicates invert
+			// the result set and index candidates would be wrong.
 			Expr::Prefix {
 				op,
 				expr: inner,
-			} => {
-				// Do NOT recurse into NOT — negated predicates invert
-				// the result set and index candidates would be wrong.
-				if !matches!(op, PrefixOperator::Not) {
-					self.analyze_condition(inner, candidates);
-				}
+			} if !matches!(op, PrefixOperator::Not) => {
+				self.analyze_condition(inner, candidates);
 			}
 			_ => {}
 		}

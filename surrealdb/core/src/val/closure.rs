@@ -164,7 +164,7 @@ impl Closure {
 					})
 				}
 
-				for ((name, kind), val) in arg_spec.iter().zip(args.into_iter()) {
+				for ((name, kind), val) in arg_spec.iter().zip(args) {
 					if let Ok(val) = val.coerce_to_kind(kind) {
 						ctx.add_value(name.as_str(), val.into());
 					} else {

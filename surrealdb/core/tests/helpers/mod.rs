@@ -1,12 +1,10 @@
-#![cfg(test)]
-
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::future::Future;
 use std::sync::Arc;
 use std::thread::Builder;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use regex::Regex;
 use surrealdb_core::channel::{self, Receiver as NotifyReceiver};
 use surrealdb_core::dbs::capabilities::Capabilities;
@@ -60,29 +58,39 @@ pub async fn iam_run_case(
 	owner_sess.au = Arc::new(Auth::for_root(Role::Owner));
 
 	if use_ns && let Some(ns) = &sess.ns {
-		ds.execute(&format!("USE NS {ns}"), &owner_sess, None).await.unwrap();
+		ds.execute(&format!("USE NS {ns}"), &owner_sess, None)
+			.await
+			.expect("IAM case: USE NS failed");
 	}
 	if use_db && let Some(db) = &sess.db {
-		ds.execute(&format!("USE DB {db}"), &owner_sess, None).await.unwrap();
+		ds.execute(&format!("USE DB {db}"), &owner_sess, None)
+			.await
+			.expect("IAM case: USE DB failed");
 	}
 
 	// Prepare statement
 	{
 		if !prepare.is_empty() {
-			let resp = ds.execute(prepare, &owner_sess, None).await.unwrap();
+			let resp = ds
+				.execute(prepare, &owner_sess, None)
+				.await
+				.expect("IAM case: prepare execute failed");
 			for r in resp {
 				let tmp = r.output();
-				ensure!(tmp.is_ok(), "Prepare statement failed: {}", tmp.unwrap_err());
+				if let Err(e) = &tmp {
+					bail!("Prepare statement failed: {e}");
+				}
 			}
 		}
 	}
 
 	// Execute statement
-	let mut resp = ds.execute(test, sess, None).await.unwrap();
+	let mut resp = ds.execute(test, sess, None).await.expect("IAM case: test execute failed");
 
 	// Check datastore state first
 	{
-		let mut resp = ds.execute(check, &owner_sess, None).await.unwrap();
+		let mut resp =
+			ds.execute(check, &owner_sess, None).await.expect("IAM case: check execute failed");
 		assert_eq!(
 			resp.len(),
 			1,
@@ -90,14 +98,9 @@ pub async fn iam_run_case(
 			resp.len()
 		);
 
-		let tmp = resp.pop().unwrap().output();
-		ensure!(
-			tmp.is_ok(),
-			"Check statement errored for test {test_index} ({test}): {}",
-			tmp.unwrap_err()
-		);
-
-		let tmp = tmp.unwrap();
+		let tmp = resp.pop().expect("IAM case: check missing result row").output();
+		let tmp = tmp
+			.map_err(|e| anyhow!("Check statement errored for test {test_index} ({test}): {e}",))?;
 		let expected = syn::value(check_expected_result)?;
 		ensure!(
 			tmp == expected,
@@ -107,26 +110,24 @@ pub async fn iam_run_case(
 
 	// Check statement result. If the statement should succeed, check that the
 	// result is Ok, otherwise check that the result is a 'Not Allowed' error
-	let res = resp.pop().unwrap().output();
+	let res = resp.pop().expect("IAM case: test missing result row").output();
 	if should_succeed {
-		ensure!(
-			res.is_ok(),
-			"Test statement failed for test {test_index} ({test}): {}",
-			res.unwrap_err()
-		);
+		res.map_err(|e| anyhow!("Test statement failed for test {test_index} ({test}): {e}",))?;
 	} else {
-		ensure!(
-			res.is_err(),
-			"Test statement succeeded for test {test_index} ({test}) when it should have failed: {:?}",
-			res
-		);
-
-		let err = res.unwrap_err();
-		ensure!(
-			err.is_not_allowed(),
-			"Test statement failed with unexpected error (expected NotAllowed): {}",
-			err
-		);
+		match res {
+			Ok(val) => {
+				bail!(
+					"Test statement succeeded for test {test_index} ({test}) when it should have failed: {val:?}",
+				);
+			}
+			Err(err) => {
+				ensure!(
+					err.is_not_allowed(),
+					"Test statement failed with unexpected error (expected NotAllowed): {}",
+					err
+				);
+			}
+		}
 	}
 	Ok(())
 }
@@ -160,9 +161,9 @@ pub async fn iam_check_cases_impl(
 	use_ns: bool,
 	use_db: bool,
 ) -> Result<()> {
-	let prepare = scenario.get("prepare").unwrap();
-	let test = scenario.get("test").unwrap();
-	let check = scenario.get("check").unwrap();
+	let prepare = scenario.get("prepare").expect("IAM scenario must define `prepare` key");
+	let test = scenario.get("test").expect("IAM scenario must define `test` key");
+	let check = scenario.get("check").expect("IAM scenario must define `check` key");
 
 	for (test_index, ((level, role), (ns, db), should_succeed, expected_result)) in
 		cases.enumerate()
@@ -179,7 +180,7 @@ pub async fn iam_check_cases_impl(
 				.with_auth(true)
 				.build_with_path("memory")
 				.await
-				.unwrap();
+				.expect("IAM check: build memory datastore with auth");
 			iam_run_case(
 				test_index as i32,
 				prepare,
@@ -204,7 +205,7 @@ pub async fn iam_check_cases_impl(
 				.with_auth(false)
 				.build_with_path("memory")
 				.await
-				.unwrap();
+				.expect("IAM check: build memory datastore without auth");
 			iam_run_case(
 				test_index as i32,
 				prepare,
@@ -241,7 +242,7 @@ pub async fn iam_check_cases_impl(
 				.with_auth(auth_enabled)
 				.build_with_path("memory")
 				.await
-				.unwrap();
+				.expect("IAM check: build memory datastore for anonymous scenario");
 			let expected_result = if auth_enabled {
 				expected_anonymous_failure_result
 			} else {
@@ -285,12 +286,14 @@ pub fn with_enough_stack(fut: impl Future<Output = Result<()>> + Send + 'static)
 
 	builder
 		.spawn(|| {
-			let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+			let runtime = tokio::runtime::Builder::new_current_thread()
+				.build()
+				.expect("with_enough_stack: tokio current_thread runtime");
 			runtime.block_on(fut)
 		})
-		.unwrap()
+		.expect("with_enough_stack: spawn thread")
 		.join()
-		.unwrap()
+		.expect("with_enough_stack: thread join")
 }
 
 #[track_caller]

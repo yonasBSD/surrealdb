@@ -545,7 +545,7 @@ impl ObjectStore for FileStore {
 			}
 
 			// Sort entries by key to ensure consistent ordering
-			all_entries.sort_by(|(key_a, _), (key_b, _)| key_a.to_string().cmp(&key_b.to_string()));
+			all_entries.sort_by_key(|(key, _)| key.to_string());
 
 			// Filter by start key if provided
 			let filtered_entries = if let Some(ref start_key) = opts.start {

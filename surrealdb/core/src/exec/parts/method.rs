@@ -195,7 +195,7 @@ impl PhysicalExpr for ClosureFieldCallPart {
 
 				// Bind arguments to parameter names with type coercion
 				let mut local_params: HashMap<Strand, Value> = HashMap::new();
-				for ((param, kind), arg_value) in arg_spec.iter().zip(evaluated_args.into_iter()) {
+				for ((param, kind), arg_value) in arg_spec.iter().zip(evaluated_args) {
 					let coerced = arg_value.coerce_to_kind(kind).map_err(|_| {
 						Error::InvalidFunctionArguments {
 							name: "ANONYMOUS".to_string(),
