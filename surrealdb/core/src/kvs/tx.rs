@@ -166,6 +166,19 @@ impl Transaction {
 	/// snapshot, the event allocation, and the trait-object dispatch
 	/// are all skipped in that case.
 	fn emit_transaction_event(&self, outcome: Outcome) {
+		self.emit_transaction_event_with_class(outcome, None);
+	}
+
+	/// Variant of [`Self::emit_transaction_event`] that records a bounded
+	/// `error_class` on the resulting [`TransactionEvent`]. Use the
+	/// canonical strings published by the server's `error_class` module
+	/// (e.g. `txn_conflict`, `storage`, `internal`) so cardinality stays
+	/// closed. Pass `None` for non-error outcomes.
+	fn emit_transaction_event_with_class(
+		&self,
+		outcome: Outcome,
+		error_class: Option<&'static str>,
+	) {
 		if self.observer.is_noop() {
 			return;
 		}
@@ -175,7 +188,7 @@ impl Transaction {
 				write: self.tr.writeable(),
 				duration: self.started_at.elapsed(),
 				metrics: self.metrics.snapshot(),
-				error_class: None,
+				error_class,
 			},
 			ctx: self.tenant_identity.get().map(|t| t.to_transaction_ctx()).unwrap_or_default(),
 		});
@@ -242,7 +255,20 @@ impl Transaction {
 		if let Err(e) = self.tr.commit().await {
 			// Enqueue pending index batches for deferred cleanup after commit failure.
 			self.cleanup_index_batches().await;
-			self.emit_transaction_event(Outcome::Error);
+			// Classify the commit failure so the surrealdb.transaction.* metric
+			// family can carry an `error_class` attribute. `e` is a concrete
+			// `kvs::Error` here -- the transactor's `commit` returns
+			// `kvs::Result<()>` (see `kvs/tr.rs`) -- so we apply the
+			// kvs-layer rule directly: retryable variants collapse to
+			// `txn_conflict`, everything else to `storage`. The shared
+			// `classify_anyhow_error` helper applies the same rule from
+			// the `anyhow::Error` path used by the executor.
+			let class = if e.is_retryable() {
+				crate::observe::error_class::TXN_CONFLICT
+			} else {
+				crate::observe::error_class::STORAGE
+			};
+			self.emit_transaction_event_with_class(Outcome::Error, Some(class));
 			anyhow::bail!(e);
 		}
 		if self.trigger_async_event.load(Ordering::Relaxed) {

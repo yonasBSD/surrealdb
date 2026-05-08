@@ -133,7 +133,18 @@ pub async fn init<
 	// so the MCP server works regardless of whether the datastore has auth
 	// enabled or guest access disabled.
 	let base_session = Session::owner();
-	let service = McpService::new(datastore.clone(), namespace, database, base_session);
+	let mut service = McpService::new(datastore.clone(), namespace, database, base_session)
+		.with_transport_label("stdio");
+	// When telemetry has produced a meter provider (Prometheus disabled but
+	// OTLP enabled, or just the no-op default), build a `MetricsObserver`
+	// so MCP tool dispatch is recorded against `surrealdb.mcp.tool.*`.
+	// Building the observer when no readers are attached is harmless: the
+	// OTel SDK short-circuits no-op meters internally.
+	if let Ok(observer) = crate::observe::MetricsObserver::new(&runtime) {
+		let recorder: Arc<dyn surrealdb_mcp::metrics::McpMetricsRecorder> =
+			Arc::new(crate::observe::McpRecorderAdapter::new(Arc::new(observer)));
+		service = service.with_metrics_recorder(recorder);
+	}
 
 	tracing::info!(target: "surrealdb::mcp", "Starting MCP server over stdio");
 

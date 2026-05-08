@@ -159,6 +159,11 @@ impl RouterFactory for CommunityComposer {
 pub struct AppState {
 	pub client_ip: client_ip::ClientIp,
 	pub datastore: Arc<Datastore>,
+	/// Shared metrics observer for non-tower-instrumented protocols
+	/// (GraphQL, MCP). `None` when `SURREAL_METRICS_ENABLED=false` or no
+	/// metrics reader is attached, in which case the recording sites
+	/// short-circuit.
+	pub metrics_observer: Option<Arc<crate::observe::metrics::MetricsObserver>>,
 }
 
 /// Configuration options for building a [`SurrealRouter`].
@@ -319,6 +324,7 @@ impl SurrealRouter {
 		let app_state = AppState {
 			client_ip: opt.client_ip,
 			datastore: ds.clone(),
+			metrics_observer: metrics.as_ref().map(|m| m.observer.clone()),
 		};
 
 		// Specify headers to be obfuscated from all requests/responses

@@ -78,6 +78,14 @@ fn http_status(code: Option<u16>) -> Cow<'static, str> {
 	}
 }
 
+/// Resolve an `Option<&'static str>` error classification into a stable
+/// attribute value. Successful / cancelled outcomes carry `None` and collapse
+/// to [`NONE_LABEL`]; error outcomes carry one of the bounded
+/// [`super::instruments::error_class`] constants.
+fn error_class_label(class: Option<&'static str>) -> &'static str {
+	class.unwrap_or(NONE_LABEL)
+}
+
 /// Records [`surrealdb_core::observe`] events as a labelled OpenTelemetry
 /// instrument family per signal domain.
 ///
@@ -99,12 +107,11 @@ pub struct MetricsObserver {
 	transaction_kv_ops: Counter<u64>,
 	transaction_keys_read: Counter<u64>,
 	transaction_keys_written: Counter<u64>,
-	transaction_bytes_read: Counter<u64>,
-	transaction_bytes_written: Counter<u64>,
 	transaction_key_bytes_read: Counter<u64>,
 	transaction_value_bytes_read: Counter<u64>,
 	transaction_key_bytes_written: Counter<u64>,
 	transaction_value_bytes_written: Counter<u64>,
+	transaction_conflicts: Counter<u64>,
 	// RPC (scope: surrealdb.rpc)
 	rpc_total: Counter<u64>,
 	rpc_duration: Histogram<f64>,
@@ -126,6 +133,18 @@ pub struct MetricsObserver {
 	// Live query (scope: surrealdb.live_query)
 	live_query_active: UpDownCounter<i64>,
 	live_query_notifications: Counter<u64>,
+	// Slow query (scope: surrealdb.slow_query)
+	slow_query_total: Counter<u64>,
+	/// Cached threshold (in milliseconds) for `slow_query_total`. `0` disables
+	/// the slow-query counter without affecting the duration histogram.
+	slow_query_threshold_ms: u64,
+	// GraphQL (scope: surrealdb.graphql)
+	graphql_operation_total: Counter<u64>,
+	graphql_operation_duration: Histogram<f64>,
+	// MCP (scope: surrealdb.mcp)
+	mcp_tool_invocation: Counter<u64>,
+	mcp_tool_duration: Histogram<f64>,
+	mcp_session_active: UpDownCounter<i64>,
 }
 
 impl MetricsObserver {
@@ -149,6 +168,9 @@ impl MetricsObserver {
 		let net = runtime.meter(scope::NETWORK);
 		let http = runtime.meter(scope::HTTP);
 		let lq = runtime.meter(scope::LIVE_QUERY);
+		let slow = runtime.meter(scope::SLOW_QUERY);
+		let gql = runtime.meter(scope::GRAPHQL);
+		let mcp = runtime.meter(scope::MCP);
 
 		Ok(Self {
 			statement_total: stmt
@@ -198,16 +220,6 @@ impl MetricsObserver {
 				.u64_counter(names::TRANSACTION_KEYS_WRITTEN)
 				.with_description("Total keys written across transactions")
 				.build(),
-			transaction_bytes_read: tx
-				.u64_counter(names::TRANSACTION_BYTES_READ)
-				.with_description("Total key + value bytes read across transactions")
-				.with_unit("By")
-				.build(),
-			transaction_bytes_written: tx
-				.u64_counter(names::TRANSACTION_BYTES_WRITTEN)
-				.with_description("Total key + value bytes written across transactions")
-				.with_unit("By")
-				.build(),
 			transaction_key_bytes_read: tx
 				.u64_counter(names::TRANSACTION_KEY_BYTES_READ)
 				.with_description("Total key bytes read across transactions")
@@ -227,6 +239,12 @@ impl MetricsObserver {
 				.u64_counter(names::TRANSACTION_VALUE_BYTES_WRITTEN)
 				.with_description("Total value bytes written across transactions")
 				.with_unit("By")
+				.build(),
+			transaction_conflicts: tx
+				.u64_counter(names::TRANSACTION_CONFLICTS)
+				.with_description(
+					"Cumulative count of transactions that aborted due to a commit conflict",
+				)
 				.build(),
 			rpc_total: rpc
 				.u64_counter(names::RPC_TOTAL)
@@ -309,21 +327,130 @@ impl MetricsObserver {
 				.u64_counter(names::LIVE_QUERY_NOTIFICATIONS)
 				.with_description("Cumulative count of LIVE query notifications dispatched")
 				.build(),
+			slow_query_total: slow
+				.u64_counter(names::SLOW_QUERY_TOTAL)
+				.with_description(
+					"Cumulative count of statements whose execution exceeded \
+					 SURREAL_SLOW_QUERY_METRIC_THRESHOLD_MS",
+				)
+				.build(),
+			slow_query_threshold_ms: *crate::cnf::SLOW_QUERY_METRIC_THRESHOLD_MS,
+			graphql_operation_total: gql
+				.u64_counter(names::GRAPHQL_OPERATION_TOTAL)
+				.with_description("Cumulative count of GraphQL operations executed")
+				.build(),
+			graphql_operation_duration: gql
+				.f64_histogram(names::GRAPHQL_OPERATION_DURATION)
+				.with_description("Distribution of GraphQL operation latency")
+				.with_unit("s")
+				.build(),
+			mcp_tool_invocation: mcp
+				.u64_counter(names::MCP_TOOL_INVOCATION)
+				.with_description("Cumulative count of MCP tool invocations")
+				.build(),
+			mcp_tool_duration: mcp
+				.f64_histogram(names::MCP_TOOL_DURATION)
+				.with_description("Distribution of MCP tool invocation latency")
+				.with_unit("s")
+				.build(),
+			mcp_session_active: mcp
+				.i64_up_down_counter(names::MCP_SESSION_ACTIVE)
+				.with_description("Number of currently-active MCP sessions")
+				.build(),
 		})
 	}
 
-	/// Bump or drop the active LIVE query gauge. Called from the RPC
-	/// dispatch path; ctx is not yet resolved at the call site so the
-	/// gauge is intentionally unlabelled.
-	pub fn adjust_live_query_active(&self, delta: i64) {
-		if delta != 0 {
-			self.live_query_active.add(delta, &[]);
+	/// Bump or drop the active LIVE query gauge under the supplied tenant
+	/// ctx. Callers are expected to pass the namespace/database of the
+	/// session that registered the LIVE statement; the corresponding
+	/// decrement on KILL or session teardown MUST use the same ctx so the
+	/// gauge series stays balanced.
+	pub fn adjust_live_query_active(
+		&self,
+		delta: i64,
+		namespace: Option<&str>,
+		database: Option<&str>,
+	) {
+		if delta == 0 {
+			return;
 		}
+		let attrs = [
+			KeyValue::new(attrs::NAMESPACE, label_cow(namespace)),
+			KeyValue::new(attrs::DATABASE, label_cow(database)),
+		];
+		self.live_query_active.add(delta, &attrs);
 	}
 
-	/// Record a single LIVE query notification dispatch.
-	pub fn record_live_query_notification(&self) {
-		self.live_query_notifications.add(1, &[]);
+	/// Record a single LIVE query notification dispatch under the supplied
+	/// tenant ctx. The labels mirror those used on the active gauge so
+	/// operators can join across the two families.
+	pub fn record_live_query_notification(&self, namespace: Option<&str>, database: Option<&str>) {
+		let attrs = [
+			KeyValue::new(attrs::NAMESPACE, label_cow(namespace)),
+			KeyValue::new(attrs::DATABASE, label_cow(database)),
+		];
+		self.live_query_notifications.add(1, &attrs);
+	}
+
+	/// Record a single GraphQL operation completion.
+	///
+	/// `operation_type` should be a stable lower-case identifier from the
+	/// closed set `{"query", "mutation", "subscription", "unknown"}`.
+	/// `error_class` is `Some` only when `outcome` is
+	/// [`surrealdb_core::observe::Outcome::Error`].
+	#[allow(clippy::too_many_arguments)]
+	pub fn record_graphql_operation(
+		&self,
+		operation_type: &'static str,
+		outcome: surrealdb_core::observe::Outcome,
+		error_class: Option<&'static str>,
+		duration: std::time::Duration,
+		namespace: Option<&str>,
+		database: Option<&str>,
+		user: Option<&str>,
+	) {
+		let attrs = [
+			KeyValue::new(attrs::GRAPHQL_OPERATION_TYPE, operation_type),
+			KeyValue::new(attrs::OUTCOME, outcome.as_label()),
+			KeyValue::new(attrs::ERROR_CLASS, error_class_label(error_class)),
+			KeyValue::new(attrs::NAMESPACE, label_cow(namespace)),
+			KeyValue::new(attrs::DATABASE, label_cow(database)),
+			KeyValue::new(attrs::USER, label_cow(user)),
+		];
+		self.graphql_operation_total.add(1, &attrs);
+		self.graphql_operation_duration.record(duration.as_secs_f64(), &attrs);
+	}
+
+	/// Record a single MCP tool invocation.
+	///
+	/// `tool` is the bounded tool identifier from the MCP service's static
+	/// dispatch table; `transport` is one of `"stdio"` / `"http"`.
+	pub fn record_mcp_tool(
+		&self,
+		tool: &'static str,
+		transport: &'static str,
+		outcome: surrealdb_core::observe::Outcome,
+		error_class: Option<&'static str>,
+		duration: std::time::Duration,
+	) {
+		let attrs = [
+			KeyValue::new(attrs::MCP_TOOL, tool),
+			KeyValue::new(attrs::MCP_TRANSPORT, transport),
+			KeyValue::new(attrs::OUTCOME, outcome.as_label()),
+			KeyValue::new(attrs::ERROR_CLASS, error_class_label(error_class)),
+		];
+		self.mcp_tool_invocation.add(1, &attrs);
+		self.mcp_tool_duration.record(duration.as_secs_f64(), &attrs);
+	}
+
+	/// Bump or drop the active MCP session gauge. Connect / disconnect must
+	/// pass the same `transport` so the gauge series stays balanced.
+	pub fn adjust_mcp_session_active(&self, delta: i64, transport: &'static str) {
+		if delta == 0 {
+			return;
+		}
+		let attrs = [KeyValue::new(attrs::MCP_TRANSPORT, transport)];
+		self.mcp_session_active.add(delta, &attrs);
 	}
 
 	/// Register pipeline self-metrics
@@ -443,6 +570,7 @@ impl ExecutionObserver for MetricsObserver {
 		let attrs = [
 			KeyValue::new(attrs::STATEMENT_TYPE, event.safe.kind.as_label()),
 			KeyValue::new(attrs::OUTCOME, event.safe.outcome.as_label()),
+			KeyValue::new(attrs::ERROR_CLASS, error_class_label(event.safe.error_class)),
 			KeyValue::new(attrs::NAMESPACE, label_cow(event.ctx.namespace.as_deref())),
 			KeyValue::new(attrs::DATABASE, label_cow(event.ctx.database.as_deref())),
 			KeyValue::new(attrs::USER, label_cow(event.ctx.user.as_deref())),
@@ -452,11 +580,21 @@ impl ExecutionObserver for MetricsObserver {
 		if event.safe.result_rows > 0 {
 			self.statement_rows.add(event.safe.result_rows, &attrs);
 		}
+		if self.slow_query_threshold_ms > 0 {
+			let duration_ms = event.safe.duration.as_millis() as u64;
+			if duration_ms >= self.slow_query_threshold_ms {
+				// Slow-query counter intentionally re-uses the same labels
+				// as `surrealdb.statement.*` so dashboards can join across
+				// the two families on `statement_type` / `outcome` / tenant ctx.
+				self.slow_query_total.add(1, &attrs);
+			}
+		}
 	}
 
 	fn on_query_complete(&self, event: &QueryEvent) {
 		let attrs = [
 			KeyValue::new(attrs::OUTCOME, event.safe.outcome.as_label()),
+			KeyValue::new(attrs::ERROR_CLASS, error_class_label(event.safe.error_class)),
 			KeyValue::new(attrs::NAMESPACE, label_cow(event.ctx.namespace.as_deref())),
 			KeyValue::new(attrs::DATABASE, label_cow(event.ctx.database.as_deref())),
 			KeyValue::new(attrs::USER, label_cow(event.ctx.user.as_deref())),
@@ -475,12 +613,32 @@ impl ExecutionObserver for MetricsObserver {
 		let core_attrs = [
 			KeyValue::new(attrs::WRITE, write),
 			KeyValue::new(attrs::OUTCOME, outcome),
+			KeyValue::new(attrs::ERROR_CLASS, error_class_label(event.safe.error_class)),
 			KeyValue::new(attrs::NAMESPACE, label_cow(event.ctx.namespace.as_deref())),
 			KeyValue::new(attrs::DATABASE, label_cow(event.ctx.database.as_deref())),
 			KeyValue::new(attrs::USER, label_cow(event.ctx.user.as_deref())),
 		];
 		self.transaction_total.add(1, &core_attrs);
 		self.transaction_duration.record(event.safe.duration.as_secs_f64(), &core_attrs);
+		// Each commit-conflict failure is itself a retry trigger when
+		// surrounded by an optimistic-retry loop, so the conflicts
+		// counter doubles as the retry-pressure signal. Operators alert
+		// on `rate(surrealdb_transaction_conflicts_total[5m])` rather
+		// than a separate `retries` counter; per-transaction retry
+		// counting does not fit the architecture (each optimistic
+		// retry creates a fresh `Transaction` instance).
+		if matches!(event.safe.error_class, Some(c) if c == super::instruments::error_class::TXN_CONFLICT)
+		{
+			// Drop the WRITE attr from conflicts so the series is keyed on
+			// tenant ctx alone -- conflict rate is what operators alert on,
+			// not whether the doomed txn was a write or read.
+			let conflict_attrs = [
+				KeyValue::new(attrs::NAMESPACE, label_cow(event.ctx.namespace.as_deref())),
+				KeyValue::new(attrs::DATABASE, label_cow(event.ctx.database.as_deref())),
+				KeyValue::new(attrs::USER, label_cow(event.ctx.user.as_deref())),
+			];
+			self.transaction_conflicts.add(1, &conflict_attrs);
+		}
 		let m = event.safe.metrics;
 		let bump = |op: &'static str, n: u32| {
 			if n > 0 {
@@ -502,12 +660,6 @@ impl ExecutionObserver for MetricsObserver {
 		if m.keys_written > 0 {
 			self.transaction_keys_written.add(m.keys_written, &outcome_attrs);
 		}
-		if m.total_bytes_read > 0 {
-			self.transaction_bytes_read.add(m.total_bytes_read, &outcome_attrs);
-		}
-		if m.total_bytes_written > 0 {
-			self.transaction_bytes_written.add(m.total_bytes_written, &outcome_attrs);
-		}
 		if m.key_bytes_read > 0 {
 			self.transaction_key_bytes_read.add(m.key_bytes_read, &outcome_attrs);
 		}
@@ -526,6 +678,7 @@ impl ExecutionObserver for MetricsObserver {
 		let attrs = [
 			KeyValue::new(attrs::RPC_METHOD, event.safe.method.to_str()),
 			KeyValue::new(attrs::OUTCOME, event.safe.outcome.as_label()),
+			KeyValue::new(attrs::ERROR_CLASS, error_class_label(event.safe.error_class)),
 			KeyValue::new(attrs::NAMESPACE, label_cow(event.ctx.namespace.as_deref())),
 			KeyValue::new(attrs::DATABASE, label_cow(event.ctx.database.as_deref())),
 			KeyValue::new(attrs::USER, label_cow(event.ctx.user.as_deref())),
@@ -539,6 +692,7 @@ impl ExecutionObserver for MetricsObserver {
 			KeyValue::new(attrs::AUTH_ACTION, event.safe.action.as_label()),
 			KeyValue::new(attrs::AUTH_SCOPE, event.safe.scope.as_label()),
 			KeyValue::new(attrs::OUTCOME, event.safe.outcome.as_label()),
+			KeyValue::new(attrs::ERROR_CLASS, error_class_label(event.safe.error_class)),
 			KeyValue::new(attrs::NAMESPACE, label_cow(event.ctx.namespace.as_deref())),
 			KeyValue::new(attrs::DATABASE, label_cow(event.ctx.database.as_deref())),
 			KeyValue::new(attrs::USER, label_cow(event.ctx.user.as_deref())),
@@ -614,6 +768,7 @@ impl ExecutionObserver for MetricsObserver {
 			KeyValue::new(attrs::HTTP_ROUTE, route),
 			KeyValue::new(attrs::HTTP_STATUS_CODE, http_status(event.safe.status_code)),
 			KeyValue::new(attrs::OUTCOME, event.safe.outcome.as_label()),
+			KeyValue::new(attrs::ERROR_CLASS, error_class_label(event.safe.error_class)),
 			KeyValue::new(attrs::NAMESPACE, label_cow(event.ctx.namespace.as_deref())),
 			KeyValue::new(attrs::DATABASE, label_cow(event.ctx.database.as_deref())),
 			KeyValue::new(attrs::USER, label_cow(event.ctx.user.as_deref())),
@@ -959,7 +1114,8 @@ mod tests {
 		for expected in [
 			names::TRANSACTION_TOTAL,
 			names::TRANSACTION_KEYS_READ,
-			names::TRANSACTION_BYTES_WRITTEN,
+			names::TRANSACTION_KEY_BYTES_WRITTEN,
+			names::TRANSACTION_VALUE_BYTES_WRITTEN,
 			names::TRANSACTION_KV_OPS,
 		] {
 			assert!(

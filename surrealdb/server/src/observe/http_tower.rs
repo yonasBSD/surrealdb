@@ -331,11 +331,11 @@ impl Drop for HttpCallMetricTracker {
 
 /// Dispatch [`HttpRequestStartEvent`] when the future is first polled.
 ///
-/// Recording sites that pivot on the active-request count (community
-/// Prometheus' `surrealdb_http_active_requests`, OTel's
-/// `http.server.active_requests`) get their `+1` here so the gauge
-/// reflects requests that are in flight even when the inner stack
-/// stalls.
+/// Recording sites that pivot on the active-request count
+/// (`surrealdb.http.active_requests`, rendered as
+/// `surrealdb_http_active_requests` by the Prometheus exporter) get their
+/// `+1` here so the gauge reflects requests that are in flight even when
+/// the inner stack stalls.
 pub fn on_request_start(tracker: &HttpCallMetricTracker) {
 	let Some(observer) = tracker.observer.as_ref() else {
 		return;
@@ -362,10 +362,9 @@ pub fn on_request_start(tracker: &HttpCallMetricTracker) {
 /// [`NetworkBytesEvent`] pair when the request finishes.
 ///
 /// Network byte events stay separate from the request event because
-/// byte-only consumers (the community `surrealdb_network_bytes_*_total`
-/// aggregate counters and the dimensional `*_bytes_*` counters in the
-/// enterprise registry) record on direction alone and do not need the
-/// full request context.
+/// byte-only consumers (`surrealdb.network.received` /
+/// `surrealdb.network.sent`) record on direction alone and do not need
+/// the full request context.
 pub fn on_request_finish(tracker: &HttpCallMetricTracker) {
 	let Some(observer) = tracker.observer.as_ref() else {
 		return;
@@ -376,17 +375,24 @@ pub fn on_request_finish(tracker: &HttpCallMetricTracker) {
 
 	let ctx = tracker.snapshot_ctx();
 	let outcome = tracker.outcome();
+	let status_code = tracker.status_code.map(|s| s.as_u16());
+	// Map the HTTP status code into the bounded `error_class` taxonomy
+	// so dashboards keying on `surrealdb_http_request_total{error_class=...}`
+	// distinguish 401 / 403 / 408 from generic 4xx/5xx without scraping
+	// the per-status-code label. `None` for 1xx / 2xx / 3xx responses.
+	let error_class =
+		status_code.and_then(surrealdb_core::observe::error_class::classify_http_status);
 	let event = HttpRequestEvent {
 		safe: HttpRequestEventSafe {
 			method: tracker.method,
 			route: tracker.route,
-			status_code: tracker.status_code.map(|s| s.as_u16()),
+			status_code,
 			version: tracker.version,
 			outcome,
 			duration: tracker.duration(),
 			request_size: tracker.request_size,
 			response_size: tracker.response_size,
-			error_class: None,
+			error_class,
 		},
 		ctx: ctx.clone(),
 	};

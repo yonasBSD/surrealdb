@@ -103,6 +103,13 @@ mod tests {
 			"surrealdb_slow_query_",
 			"surrealdb_storage_",
 			"surrealdb_tenant_",
+			// GraphQL operation metrics carry per-tenant labels
+			// (operation_type + NS/DB/user); MCP tool metrics carry
+			// per-tenant labels (tool + transport + outcome). Neither
+			// must ever appear on the unauthenticated allowlist, so
+			// list both prefixes here as a defence-in-depth backstop.
+			"surrealdb_graphql_",
+			"surrealdb_mcp_",
 		];
 		for m in PUBLIC_METRICS {
 			for p in FORBIDDEN_PREFIXES {

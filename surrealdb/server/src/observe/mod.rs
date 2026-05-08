@@ -48,6 +48,8 @@
 pub mod handler;
 pub mod http_tower;
 pub mod instruments;
+#[cfg(feature = "mcp")]
+pub mod mcp_adapter;
 pub mod metrics;
 pub mod provider;
 pub mod public;
@@ -58,6 +60,8 @@ pub mod storage_metrics;
 
 pub use handler::MetricsState;
 pub use http_tower::HttpMetricsLayer;
+#[cfg(feature = "mcp")]
+pub use mcp_adapter::McpRecorderAdapter;
 pub use metrics::MetricsObserver;
 pub use provider::{ObservabilityProvider, PipelineCounters};
 pub use runtime::{ObservabilityRuntime, ObservabilityRuntimeBuilder};

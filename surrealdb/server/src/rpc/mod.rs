@@ -27,8 +27,24 @@ static CONN_CLOSED_ERR: &str = "Connection closed normally";
 type WebSocket = Arc<Websocket>;
 /// Mapping of WebSocket ID to WebSocket
 type WebSockets = RwLock<HashMap<Uuid, WebSocket>>;
-/// Mapping of LIVE Query ID to WebSocket ID + Session ID
-type LiveQueries = RwLock<HashMap<Uuid, (Uuid, Uuid)>>;
+/// Recorded state for a registered LIVE query. Stored on the global RPC
+/// state so the live-query active gauge can be balanced (the cleanup paths
+/// drop entries one-by-one with the originating tenant ctx) and so the
+/// notification dispatch can label its delivery counter.
+#[derive(Clone, Debug)]
+pub struct LiveQueryEntry {
+	pub websocket_id: Uuid,
+	pub session_id: Uuid,
+	/// Namespace at the time the LIVE statement was registered. `None`
+	/// when the registering session had no NS selected.
+	pub namespace: Option<String>,
+	/// Database at the time the LIVE statement was registered. `None`
+	/// when the registering session had no DB selected.
+	pub database: Option<String>,
+}
+
+/// Mapping of LIVE Query ID to its registered entry.
+type LiveQueries = RwLock<HashMap<Uuid, LiveQueryEntry>>;
 
 pub struct RpcState {
 	/// Stores the currently connected WebSockets
@@ -117,16 +133,19 @@ pub async fn notifications(
 					.read()
 					.await
 					.get(&notification.id)
-					.copied();
-				if let Some((ws_id, session_id)) = live_query
-					&& let Some(rpc) = state.web_sockets.read().await.get(&ws_id).cloned() {
+					.cloned();
+				if let Some(entry) = live_query
+					&& let Some(rpc) = state.web_sockets.read().await.get(&entry.websocket_id).cloned() {
 						// Count the notification once we know it will
 						// actually be delivered to a client. We
 						// deliberately avoid counting drops (unknown
 						// LQ id or disconnected WS) so the metric
 						// mirrors end-to-end deliveries.
 						if let Some(obs) = state.metrics_observer.as_ref() {
-							obs.record_live_query_notification();
+							obs.record_live_query_notification(
+								entry.namespace.as_deref(),
+								entry.database.as_deref(),
+							);
 						}
 						// Hide the connection's implicit session UUID from the
 						// client: when a LIVE query was registered without an
@@ -135,7 +154,7 @@ pub async fn notifications(
 						// never supplied. Emit `null` in that case to match
 						// the historical wire protocol.
 						let wire_session_id =
-							(session_id != rpc.id).then_some(session_id);
+							(entry.session_id != rpc.id).then_some(entry.session_id);
 						let message = DbResponse::success(
 							None,
 							wire_session_id,

@@ -153,11 +153,22 @@ pub trait RpcProtocol {
 	/// Live queries are disabled by default
 	const LQ_SUPPORT: bool = false;
 
-	/// Handles the execution of a LIVE statement
+	/// Handles the execution of a LIVE statement.
+	///
+	/// `namespace` and `database` are snapshotted from the registering
+	/// session by the caller (`run_query`) using the read guard it
+	/// already holds, and threaded down here so the implementation does
+	/// NOT re-lock the same `RwLock<Session>` -- that would be a
+	/// recursive read on a write-preferring lock and can deadlock against
+	/// any concurrent session-mutating RPC on the same WebSocket
+	/// (signin / signup / authenticate / set / unset / yuse / refresh /
+	/// invalidate / revoke / reset).
 	fn handle_live(
 		&self,
 		_lqid: &Uuid,
 		_session_id: Uuid,
+		_namespace: Option<String>,
+		_database: Option<String>,
 	) -> impl std::future::Future<Output = ()> + Send {
 		async { unimplemented!("handle_live function must be implemented if LQ_SUPPORT = true") }
 	}
@@ -191,6 +202,13 @@ pub trait RpcProtocol {
 	/// but consumed by enterprise audit sinks). Auth-related methods
 	/// additionally fan out an [`AuthEvent`] so auth attempt counters can
 	/// be broken out by action/scope/outcome.
+	#[tracing::instrument(
+		level = "debug",
+		target = "surrealdb::core::rpc",
+		name = "rpc.execute",
+		skip_all,
+		fields(rpc.method = method.to_str(), rpc.session = %session)
+	)]
 	async fn execute(
 		&self,
 		txn: Option<Uuid>,
@@ -273,13 +291,22 @@ pub trait RpcProtocol {
 			}
 			Err(_) => (TenantIdentity::default(), AuthScope::None),
 		};
+		// Classify error-outcome events using the structured
+		// [`surrealdb_types::ErrorDetails`] taxonomy so the
+		// `error_class` attribute on `surrealdb.rpc.*` and
+		// `surrealdb.auth.*` carries a real label
+		// (`auth` / `permission` / `parse` / `client` / `txn_conflict` /
+		// `ctx_cancelled` / `timeout` / `internal`) rather than the
+		// `-` sentinel.
+		let error_class =
+			result.as_ref().err().map(crate::observe::error_class::classify_types_error);
 		let observer = self.kvs().observer();
 		observer.on_rpc_complete(&RpcEvent {
 			safe: RpcEventSafe {
 				method,
 				outcome,
 				duration: start.elapsed(),
-				error_class: None,
+				error_class,
 			},
 			ctx: identity.to_rpc_ctx(),
 		});
@@ -289,7 +316,7 @@ pub trait RpcProtocol {
 					action,
 					scope,
 					outcome,
-					error_class: None,
+					error_class,
 				},
 				ctx: identity.to_auth_ctx(),
 			});
@@ -449,6 +476,13 @@ pub trait RpcProtocol {
 		Ok(DbResult::Other(value))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		target = "surrealdb::core::rpc",
+		name = "rpc.signup",
+		skip_all,
+		fields(rpc.session = %session_id)
+	)]
 	async fn signup(
 		&self,
 		session_id: Uuid,
@@ -470,6 +504,13 @@ pub trait RpcProtocol {
 		out.map(DbResult::Other).map_err(types_error_from_anyhow)
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		target = "surrealdb::core::rpc",
+		name = "rpc.signin",
+		skip_all,
+		fields(rpc.session = %session_id)
+	)]
 	async fn signin(
 		&self,
 		session_id: Uuid,
@@ -491,6 +532,13 @@ pub trait RpcProtocol {
 		out.map(DbResult::Other).map_err(types_error_from_anyhow)
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		target = "surrealdb::core::rpc",
+		name = "rpc.authenticate",
+		skip_all,
+		fields(rpc.session = %session_id)
+	)]
 	async fn authenticate(
 		&self,
 		session_id: Uuid,
@@ -1666,12 +1714,28 @@ where
 		}
 	};
 
-	// Post-process hooks for web layer
+	// Post-process hooks for web layer.
+	//
+	// `handle_live` needs the registering session's namespace / database
+	// for the `surrealdb.live_query.active` gauge labelling. We snapshot
+	// those off the read guard we already hold here rather than letting
+	// `handle_live` re-lock the same `RwLock<Session>`: that would be a
+	// recursive read on a write-preferring lock, and any concurrent
+	// session-mutating RPC on the same WebSocket would queue a writer
+	// between the two reads and deadlock both futures.
+	let live_namespace = session.ns.clone();
+	let live_database = session.db.clone();
 	for response in &res {
 		match &response.query_type {
 			QueryType::Live => {
 				if let Ok(PublicValue::Uuid(lqid)) = &response.result {
-					this.handle_live(lqid, session_id).await;
+					this.handle_live(
+						lqid,
+						session_id,
+						live_namespace.clone(),
+						live_database.clone(),
+					)
+					.await;
 				}
 			}
 			QueryType::Kill => {

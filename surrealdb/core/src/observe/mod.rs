@@ -17,12 +17,20 @@
 //! This split is the primary defence-in-depth mechanism for the public
 //! `/metrics` endpoint.
 
+pub mod error_class;
 pub mod events;
 pub mod fan_out;
 pub mod observer;
 pub mod process;
 pub mod provider;
 
+pub use error_class::{
+	AUTH as ERROR_AUTH, CLIENT as ERROR_CLIENT, CTX_CANCELLED as ERROR_CTX_CANCELLED,
+	CTX_TIMEOUT as ERROR_CTX_TIMEOUT, INTERNAL as ERROR_INTERNAL, PARSE as ERROR_PARSE,
+	PERMISSION as ERROR_PERMISSION, STORAGE as ERROR_STORAGE, TIMEOUT as ERROR_TIMEOUT,
+	TXN_CONFLICT as ERROR_TXN_CONFLICT, TXN_CREATE_FAILED as ERROR_TXN_CREATE_FAILED,
+	TXN_TIMEOUT as ERROR_TXN_TIMEOUT,
+};
 pub use events::{
 	AuthAction, AuthEvent, AuthEventCtx, AuthEventSafe, AuthScope, HttpMethod, HttpRequestEvent,
 	HttpRequestEventCtx, HttpRequestEventSafe, HttpRequestStartEvent, HttpRequestStartEventSafe,

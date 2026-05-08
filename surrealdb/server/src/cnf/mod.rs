@@ -220,6 +220,17 @@ pub static TELEMETRY_DISABLE_METRICS: LazyLock<bool> =
 /// front the server with an auth-aware reverse proxy.
 pub static METRICS_ENABLED: LazyLock<bool> = lazy_env_parse!("SURREAL_METRICS_ENABLED", bool, true);
 
+/// Threshold (in milliseconds) at which a completed statement is also
+/// recorded against the `surrealdb.slow_query.total` counter, in addition
+/// to its usual `surrealdb.statement.duration` histogram entry.
+///
+/// Mirrors the cutoff used by `--slow-log-threshold` so dashboards and the
+/// slow-query log surface the same set of statements without operators
+/// having to maintain two thresholds. Default: `1000` (1 second). Set to
+/// `0` to disable the counter entirely; the histogram remains.
+pub static SLOW_QUERY_METRIC_THRESHOLD_MS: LazyLock<u64> =
+	lazy_env_parse!("SURREAL_SLOW_QUERY_METRIC_THRESHOLD_MS", u64, 1000);
+
 /// Cadence (in seconds) at which the cached process snapshot used by the
 /// `surrealdb.process.{memory,cpu_percent}` observable gauges is refreshed.
 ///

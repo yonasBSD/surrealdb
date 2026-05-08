@@ -65,6 +65,10 @@ pub mod scope {
 	pub static SLOW_QUERY: &str = "surrealdb.slow_query";
 	/// Storage-backend manifest gauges.
 	pub static STORAGE: &str = "surrealdb.storage";
+	/// GraphQL operation lifecycle counters / histograms.
+	pub static GRAPHQL: &str = "surrealdb.graphql";
+	/// MCP (Model Context Protocol) tool invocation counters / histograms.
+	pub static MCP: &str = "surrealdb.mcp";
 
 	/// Every scope known to the unified provider. Tests assert this list
 	/// matches what observers actually register.
@@ -72,8 +76,10 @@ pub mod scope {
 		AUDIT,
 		AUTH,
 		DS,
+		GRAPHQL,
 		HTTP,
 		LIVE_QUERY,
+		MCP,
 		NETWORK,
 		PROCESS,
 		QUERY,
@@ -121,12 +127,19 @@ pub mod names {
 	pub static TRANSACTION_KV_OPS: &str = "surrealdb.transaction.kv_ops";
 	pub static TRANSACTION_KEYS_READ: &str = "surrealdb.transaction.keys_read";
 	pub static TRANSACTION_KEYS_WRITTEN: &str = "surrealdb.transaction.keys_written";
-	pub static TRANSACTION_BYTES_READ: &str = "surrealdb.transaction.bytes_read";
-	pub static TRANSACTION_BYTES_WRITTEN: &str = "surrealdb.transaction.bytes_written";
 	pub static TRANSACTION_KEY_BYTES_READ: &str = "surrealdb.transaction.key_bytes_read";
 	pub static TRANSACTION_VALUE_BYTES_READ: &str = "surrealdb.transaction.value_bytes_read";
 	pub static TRANSACTION_KEY_BYTES_WRITTEN: &str = "surrealdb.transaction.key_bytes_written";
 	pub static TRANSACTION_VALUE_BYTES_WRITTEN: &str = "surrealdb.transaction.value_bytes_written";
+	/// Cumulative count of transactions that aborted due to a commit conflict
+	/// (write-write, optimistic-lock, version conflict, etc.) Labelled by
+	/// tenant ctx.
+	///
+	/// Each conflict is itself a retry trigger when surrounded by an
+	/// optimistic-retry loop, so this counter doubles as the canonical
+	/// retry-pressure signal: alert on
+	/// `rate(surrealdb_transaction_conflicts_total[5m])`.
+	pub static TRANSACTION_CONFLICTS: &str = "surrealdb.transaction.conflicts";
 
 	// --- RPC (scope: RPC) ----------------------------------------------
 
@@ -160,6 +173,23 @@ pub mod names {
 
 	pub static LIVE_QUERY_ACTIVE: &str = "surrealdb.live_query.active";
 	pub static LIVE_QUERY_NOTIFICATIONS: &str = "surrealdb.live_query.notifications";
+
+	// --- Slow query (scope: SLOW_QUERY) --------------------------------
+
+	/// Cumulative count of statements whose execution exceeded
+	/// [`crate::cnf::SLOW_QUERY_METRIC_THRESHOLD_MS`].
+	pub static SLOW_QUERY_TOTAL: &str = "surrealdb.slow_query";
+
+	// --- GraphQL (scope: GRAPHQL) --------------------------------------
+
+	pub static GRAPHQL_OPERATION_TOTAL: &str = "surrealdb.graphql.operation";
+	pub static GRAPHQL_OPERATION_DURATION: &str = "surrealdb.graphql.operation.duration";
+
+	// --- MCP (scope: MCP) ----------------------------------------------
+
+	pub static MCP_TOOL_INVOCATION: &str = "surrealdb.mcp.tool.invocation";
+	pub static MCP_TOOL_DURATION: &str = "surrealdb.mcp.tool.duration";
+	pub static MCP_SESSION_ACTIVE: &str = "surrealdb.mcp.session.active";
 }
 
 /// Attribute keys recorded on labelled instruments. Centralised here so
@@ -203,7 +233,26 @@ pub mod attrs {
 	pub static HTTP_STATUS_CODE: &str = "http.response.status_code";
 	/// Inbound / outbound (`received` / `sent`) on network byte counters.
 	pub static NETWORK_DIRECTION: &str = "direction";
+	/// Bounded error classification recorded only when `outcome="error"`. Sourced
+	/// from [`error_class`] constants so cardinality stays closed.
+	pub static ERROR_CLASS: &str = "error_class";
+	/// GraphQL operation type (`query` / `mutation` / `subscription`).
+	pub static GRAPHQL_OPERATION_TYPE: &str = "operation_type";
+	/// MCP tool name (bounded — sourced from the static tool dispatch in the mcp crate).
+	pub static MCP_TOOL: &str = "tool";
+	/// MCP transport (`stdio` / `http`).
+	pub static MCP_TRANSPORT: &str = "transport";
 }
+
+/// Re-export the core's bounded error-classification constants so server-side
+/// recording sites and tests share a single source of truth with the core
+/// emit sites. The core uses these from the executor (per-statement
+/// classification, cancel/timeout paths), the kvs commit-failure path, and
+/// from the RPC dispatch shim. Server crates additionally use them via the
+/// shared classifier helpers ([`error_class::classify_types_error`],
+/// [`error_class::classify_anyhow_error`],
+/// [`error_class::classify_http_status`]) at the HTTP / GraphQL / MCP layers.
+pub use surrealdb_core::observe::error_class;
 
 #[cfg(test)]
 mod tests {
@@ -222,6 +271,8 @@ mod tests {
 		const NAMES: &[&str] = &[
 			names::AUTH_TOTAL,
 			names::BUILD_INFO,
+			names::GRAPHQL_OPERATION_DURATION,
+			names::GRAPHQL_OPERATION_TOTAL,
 			names::HTTP_ACTIVE_REQUESTS,
 			names::HTTP_REQUEST_DURATION,
 			names::HTTP_REQUEST_SIZE,
@@ -229,6 +280,9 @@ mod tests {
 			names::HTTP_RESPONSE_SIZE,
 			names::LIVE_QUERY_ACTIVE,
 			names::LIVE_QUERY_NOTIFICATIONS,
+			names::MCP_SESSION_ACTIVE,
+			names::MCP_TOOL_DURATION,
+			names::MCP_TOOL_INVOCATION,
 			names::NETWORK_RECEIVED,
 			names::NETWORK_SENT,
 			names::PROCESS_CPU_PERCENT,
@@ -241,11 +295,11 @@ mod tests {
 			names::SESSION_ACTIVE,
 			names::SESSION_DURATION,
 			names::SESSION_TOTAL,
+			names::SLOW_QUERY_TOTAL,
 			names::STATEMENT_DURATION,
 			names::STATEMENT_ROWS,
 			names::STATEMENT_TOTAL,
-			names::TRANSACTION_BYTES_READ,
-			names::TRANSACTION_BYTES_WRITTEN,
+			names::TRANSACTION_CONFLICTS,
 			names::TRANSACTION_DURATION,
 			names::TRANSACTION_KEYS_READ,
 			names::TRANSACTION_KEYS_WRITTEN,

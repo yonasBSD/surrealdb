@@ -25,6 +25,9 @@ use rmcp::model::{CallToolResult, ErrorCode};
 use serde_json::Value as JsonValue;
 
 /// Outcome classification used in the canonical audit log.
+///
+/// Crate-internal only; consumers outside the crate should map through
+/// [`crate::metrics::McpToolOutcome`].
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Outcome {
 	Ok,

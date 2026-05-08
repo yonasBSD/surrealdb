@@ -61,7 +61,14 @@ async fn handle_mcp(
 	}
 
 	let service = mcp_cell
-		.get_or_init(|| async { surrealdb_mcp::service::create_http_service(db.clone()) })
+		.get_or_init(|| async {
+			let recorder: Option<std::sync::Arc<dyn surrealdb_mcp::metrics::McpMetricsRecorder>> =
+				state.metrics_observer.as_ref().map(|obs| {
+					std::sync::Arc::new(crate::observe::McpRecorderAdapter::new(obs.clone()))
+						as std::sync::Arc<dyn surrealdb_mcp::metrics::McpMetricsRecorder>
+				});
+			surrealdb_mcp::service::create_http_service_with_metrics(db.clone(), recorder)
+		})
 		.await;
 
 	match tower_service::Service::call(&mut service.clone(), req).await {

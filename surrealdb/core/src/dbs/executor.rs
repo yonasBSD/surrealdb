@@ -221,6 +221,17 @@ impl Executor {
 		} else {
 			Outcome::Success
 		};
+		// Classify the batch error using the FIRST errored statement's
+		// structured `surrealdb_types::Error`. Operators see the
+		// dominant error class for the batch on `surrealdb.query.*`;
+		// per-statement classification happens via
+		// `surrealdb.statement.*` once executor emit sites are wired
+		// to populate it (today only the unexecuted-statement paths
+		// do so explicitly).
+		let error_class = results
+			.iter()
+			.find_map(|r| r.result.as_ref().err())
+			.map(crate::observe::error_class::classify_types_error);
 		kvs.observer().on_query_complete(&QueryEvent {
 			safe: QueryEventSafe {
 				outcome,
@@ -230,7 +241,7 @@ impl Executor {
 					ok,
 					err,
 				},
-				error_class: None,
+				error_class,
 			},
 			ctx: self.ctx.tenant_identity().map(|t| t.to_query_ctx()).unwrap_or_default(),
 		});
@@ -260,6 +271,7 @@ impl Executor {
 		start: &Instant,
 		outcome: Outcome,
 		result_rows: u64,
+		error_class: Option<&'static str>,
 	) {
 		kvs.observer().on_statement_complete(&StatementEvent {
 			safe: StatementEventSafe {
@@ -268,7 +280,7 @@ impl Executor {
 				duration: start.elapsed(),
 				read_only,
 				result_rows,
-				error_class: None,
+				error_class,
 			},
 			ctx: self.ctx.tenant_identity().map(|t| t.to_statement_ctx(sql.clone())).unwrap_or(
 				StatementEventCtx {
@@ -990,7 +1002,11 @@ impl Executor {
 					)),
 					query_type: QueryType::Other,
 				});
-				self.emit_statement_event_unexecuted(kvs, kind, "txn_create_failed");
+				self.emit_statement_event_unexecuted(
+					kvs,
+					kind,
+					crate::observe::error_class::TXN_CREATE_FAILED,
+				);
 			}
 
 			// Ran out of statements but still didn't hit a COMMIT or CANCEL
@@ -1035,7 +1051,7 @@ impl Executor {
 							self.emit_statement_event_unexecuted(
 								kvs,
 								StatementType::Other,
-								"txn_timeout",
+								crate::observe::error_class::TXN_TIMEOUT,
 							);
 						}
 						bail!(Error::TransactionTimedout(timeout.into()))
@@ -1088,8 +1104,8 @@ impl Executor {
 					));
 				}
 				let cancel_class = match done {
-					Reason::Timedout(_) => "ctx_timeout",
-					Reason::Canceled => "ctx_cancelled",
+					Reason::Timedout(_) => crate::observe::error_class::CTX_TIMEOUT,
+					Reason::Canceled => crate::observe::error_class::CTX_CANCELLED,
 				};
 				for _ in 0..cancelled_count {
 					self.emit_statement_event_unexecuted(kvs, StatementType::Other, cancel_class);
@@ -1215,6 +1231,7 @@ impl Executor {
 						&before,
 						Outcome::Error,
 						0,
+						Some(crate::observe::error_class::INTERNAL),
 					);
 
 					while let Some(stmt) = stream.next().await {
@@ -1282,6 +1299,7 @@ impl Executor {
 						&before,
 						Outcome::Success,
 						0,
+						None,
 					);
 
 					return Ok(());
@@ -1322,6 +1340,7 @@ impl Executor {
 							&before,
 							Outcome::Success,
 							0,
+							None,
 						);
 
 						return Ok(());
@@ -1347,6 +1366,10 @@ impl Executor {
 						query_type: QueryType::Other,
 					});
 
+					// `Cannot COMMIT` surfaces as a NotExecuted query error on
+					// the COMMIT row -- a caller-visible failure ("the
+					// transaction your statements ran inside could not
+					// commit"), not an internal fault.
 					self.emit_statement_event_cached(
 						kvs,
 						statement_type,
@@ -1355,6 +1378,7 @@ impl Executor {
 						&before,
 						Outcome::Error,
 						0,
+						Some(crate::observe::error_class::CLIENT),
 					);
 
 					return Ok(());
@@ -1375,6 +1399,7 @@ impl Executor {
 							&before,
 							Outcome::Success,
 							0,
+							None,
 						);
 						continue;
 					}
@@ -1409,11 +1434,19 @@ impl Executor {
 									));
 								}
 
+								// Convert the anyhow error before pushing so we can both
+								// classify it for the metric attribute and store it on the
+								// result row in a single move.
+								let typed_err = types_error_from_anyhow(e);
+								let error_class = Some(
+									crate::observe::error_class::classify_types_error(&typed_err),
+								);
+
 								// statement return an error. Consume all the other statement until
 								// we hit a cancel or commit.
 								self.results.push(QueryResult {
 									time: before.elapsed(),
-									result: Err(types_error_from_anyhow(e)),
+									result: Err(typed_err),
 									query_type,
 								});
 
@@ -1425,6 +1458,7 @@ impl Executor {
 									&before,
 									Outcome::Error,
 									0,
+									error_class,
 								);
 
 								let _ = txn.cancel().await;
@@ -1492,6 +1526,8 @@ impl Executor {
 			};
 
 			let outcome = Outcome::from(&result);
+			let error_class =
+				result.as_ref().err().map(crate::observe::error_class::classify_types_error);
 			self.emit_statement_event_cached(
 				kvs,
 				statement_type,
@@ -1500,6 +1536,7 @@ impl Executor {
 				&before,
 				outcome,
 				stmt_result_rows,
+				error_class,
 			);
 
 			self.results.push(QueryResult {
@@ -1586,6 +1623,11 @@ impl Executor {
 				},
 			};
 			let outcome = Outcome::from(&query_result.result);
+			let error_class = query_result
+				.result
+				.as_ref()
+				.err()
+				.map(crate::observe::error_class::classify_types_error);
 			// Counters are accurate for DML (SELECT row counts come
 			// from the value shape, which we no longer have post
 			// conversion — passing `None` is fine since the helper
@@ -1602,6 +1644,7 @@ impl Executor {
 				&start,
 				outcome,
 				stmt_result_rows,
+				error_class,
 			);
 			results.push(query_result);
 		}
@@ -1739,6 +1782,13 @@ impl Executor {
 					}
 					let result = this.execute_option_statement(stmt);
 					let outcome = Outcome::from(&result);
+					// `execute_option_statement` returns `anyhow::Result`; the
+					// only failure today is a permission denial via the
+					// capability gate (`is_allowed(..., Action::Edit,
+					// ResourceKind::Option, ...)`), so the bounded error class
+					// is `permission`, not the generic `client` bucket.
+					let error_class =
+						result.as_ref().err().map(|_| crate::observe::error_class::PERMISSION);
 					this.emit_statement_event_cached(
 						kvs,
 						statement_type,
@@ -1747,6 +1797,7 @@ impl Executor {
 						&start,
 						outcome,
 						0,
+						error_class,
 					);
 					result?;
 					if !skip_success_results {
@@ -1768,6 +1819,18 @@ impl Executor {
 
 					let begin_result = this.execute_begin_statement(kvs, stream.as_mut()).await;
 					let outcome = Outcome::from(&begin_result);
+					// `execute_begin_statement` returns `anyhow::Result`; on
+					// failure the result is wrapped via
+					// `types_error_from_anyhow` below (see the `if let
+					// Err(e)` arm). We can't classify before that conversion
+					// because we'd consume the error twice, so reach for the
+					// `txn_create_failed` constant: the only way
+					// `execute_begin_statement` errors today is when the
+					// transaction creation itself failed.
+					let error_class = begin_result
+						.as_ref()
+						.err()
+						.map(|_| crate::observe::error_class::TXN_CREATE_FAILED);
 					this.emit_statement_event_cached(
 						kvs,
 						statement_type,
@@ -1776,6 +1839,7 @@ impl Executor {
 						&start,
 						outcome,
 						0,
+						error_class,
 					);
 
 					if let Err(e) = begin_result {
@@ -1807,6 +1871,10 @@ impl Executor {
 						Some(counters.as_ref()),
 						result.as_ref().ok(),
 					);
+					let error_class = result
+						.as_ref()
+						.err()
+						.map(crate::observe::error_class::classify_anyhow_error);
 					this.emit_statement_event_cached(
 						kvs,
 						statement_type,
@@ -1815,6 +1883,7 @@ impl Executor {
 						&start,
 						outcome,
 						result_rows,
+						error_class,
 					);
 
 					if skip_success_results {

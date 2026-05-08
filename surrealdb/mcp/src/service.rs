@@ -4,6 +4,7 @@
 //! session via the factory closure in `StreamableHttpService`.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -17,6 +18,7 @@ use web_time::Instant;
 
 use crate::auth::{self, BoundSubject};
 use crate::cnf::McpConfig;
+use crate::metrics::{McpMetricsRecorder, McpToolOutcome};
 use crate::session::McpSession;
 use crate::tools::{connection, crud, query, run as run_tool, schema};
 use crate::{audit, completions, prompts, resources};
@@ -47,6 +49,48 @@ pub struct McpService {
 	config: Arc<McpConfig>,
 	#[allow(dead_code)] // Read by #[tool_handler] macro-generated code
 	tool_router: ToolRouter<Self>,
+	/// Optional metrics recorder. When present, every tool dispatch fires
+	/// a single `record_tool_invocation` call. The MCP crate has no
+	/// dependency on the OpenTelemetry SDK; embedders supply the
+	/// recorder.
+	metrics_recorder: Option<Arc<dyn McpMetricsRecorder>>,
+	/// Static identifier for the wire transport this service is mounted
+	/// on. Recorded as the `transport` attribute on every metric so
+	/// operators can split stdio vs HTTP MCP traffic.
+	transport_label: &'static str,
+	/// Drop guard that fires the matching `-1` on the
+	/// `surrealdb.mcp.session.active` gauge when the last clone of this
+	/// `McpService` is dropped. `McpService` derives `Clone`, and rmcp
+	/// may clone the per-session service internally, so the decrement
+	/// MUST be tied to the `Arc` reference count rather than to a single
+	/// `Drop` impl on `McpService`.
+	session_gauge: Arc<SessionGaugeGuard>,
+}
+
+/// Drop-guard that decrements the `surrealdb.mcp.session.active` gauge
+/// when its containing `Arc` is fully released.
+///
+/// Each [`McpService`] holds its `Arc<SessionGaugeGuard>`. When the last
+/// service clone goes away the `Arc` refcount drops to zero and this
+/// `Drop` fires once. The decrement is gated on
+/// [`Self::incremented`] so services that were constructed but never
+/// initialised (the streamable HTTP factory builds idle instances during
+/// startup) do not produce a `-1` that has no matching `+1`.
+struct SessionGaugeGuard {
+	recorder: Option<Arc<dyn McpMetricsRecorder>>,
+	transport: &'static str,
+	incremented: AtomicBool,
+}
+
+impl Drop for SessionGaugeGuard {
+	fn drop(&mut self) {
+		if !self.incremented.load(Ordering::Acquire) {
+			return;
+		}
+		if let Some(recorder) = self.recorder.as_ref() {
+			recorder.adjust_session_active(-1, self.transport);
+		}
+	}
 }
 
 /// Builder-style configuration for [`McpService`].
@@ -62,6 +106,8 @@ pub struct McpServiceConfig {
 	default_db: Option<String>,
 	base_session: Session,
 	config: Arc<McpConfig>,
+	metrics_recorder: Option<Arc<dyn McpMetricsRecorder>>,
+	transport_label: &'static str,
 }
 
 impl McpServiceConfig {
@@ -81,7 +127,27 @@ impl McpServiceConfig {
 			default_db: None,
 			base_session: Session::default(),
 			config: McpConfig::from_env(),
+			metrics_recorder: None,
+			// Default transport label for in-process / stdio embedders.
+			// HTTP embedders override via [`Self::with_transport_label`].
+			transport_label: "stdio",
 		}
+	}
+
+	/// Attach a metrics recorder. Pass an [`Arc`]'d implementation from
+	/// the embedding crate; the MCP service will fire one
+	/// `record_tool_invocation` per dispatch.
+	pub fn with_metrics_recorder(mut self, recorder: Arc<dyn McpMetricsRecorder>) -> Self {
+		self.metrics_recorder = Some(recorder);
+		self
+	}
+
+	/// Override the static transport label recorded as the `transport`
+	/// metric attribute. Defaults to `"stdio"`. HTTP embedders should
+	/// pass `"http"`; custom transports may pass any other static label.
+	pub fn with_transport_label(mut self, label: &'static str) -> Self {
+		self.transport_label = label;
+		self
 	}
 
 	/// Set the default namespace applied to any session that doesn't
@@ -115,13 +181,21 @@ impl McpServiceConfig {
 
 	/// Consume the builder and construct an [`McpService`].
 	pub fn build(self) -> McpService {
-		McpService::new_with_config(
+		let svc = McpService::new_with_config(
 			self.datastore,
 			self.default_ns,
 			self.default_db,
 			self.base_session,
 			self.config,
-		)
+		);
+		// Route the recorder / transport through the builder methods so
+		// the session-gauge guard is rebuilt with the right
+		// configuration before any [`McpService::init_session`] call.
+		let svc = svc.with_transport_label(self.transport_label);
+		match self.metrics_recorder {
+			Some(rec) => svc.with_metrics_recorder(rec),
+			None => svc,
+		}
 	}
 }
 
@@ -179,7 +253,52 @@ impl McpService {
 			base_session,
 			config,
 			tool_router,
+			metrics_recorder: None,
+			transport_label: "stdio",
+			session_gauge: Arc::new(SessionGaugeGuard {
+				recorder: None,
+				transport: "stdio",
+				incremented: AtomicBool::new(false),
+			}),
 		}
+	}
+
+	/// Attach an [`McpMetricsRecorder`] to an existing service. The MCP
+	/// crate has no compile-time dependency on a metrics SDK; embedders
+	/// supply the recorder.
+	///
+	/// Must be called before [`Self::init_session`]: rebuilds the
+	/// internal session-gauge drop-guard so the recorder seen at session
+	/// teardown matches the one that observed the bump.
+	pub fn with_metrics_recorder(mut self, recorder: Arc<dyn McpMetricsRecorder>) -> Self {
+		self.metrics_recorder = Some(recorder);
+		self.rebuild_session_gauge();
+		self
+	}
+
+	/// Override the static transport label recorded as the `transport`
+	/// metric attribute. Defaults to `"stdio"`. HTTP embedders should
+	/// pass `"http"`.
+	///
+	/// Must be called before [`Self::init_session`]: rebuilds the
+	/// internal session-gauge drop-guard so the transport label seen at
+	/// session teardown matches the one used at the bump.
+	pub fn with_transport_label(mut self, label: &'static str) -> Self {
+		self.transport_label = label;
+		self.rebuild_session_gauge();
+		self
+	}
+
+	/// Recreate the session-gauge guard with the current recorder /
+	/// transport. Called from the builder methods so the guard reflects
+	/// the configuration that will actually be in force at
+	/// [`Self::init_session`] time.
+	fn rebuild_session_gauge(&mut self) {
+		self.session_gauge = Arc::new(SessionGaugeGuard {
+			recorder: self.metrics_recorder.clone(),
+			transport: self.transport_label,
+			incremented: AtomicBool::new(false),
+		});
 	}
 
 	fn session(&self) -> Result<&McpSession, McpError> {
@@ -211,6 +330,22 @@ impl McpService {
 		// already errored above), but the redundancy keeps the two cells
 		// in lock-step.
 		let _ = self.bound_subject.set(subject);
+		// Bump the active-session gauge now that the session is bound.
+		// The matching `-1` lives in `SessionGaugeGuard::drop`, fired
+		// when the last clone of this `McpService` is released so the
+		// gauge tracks live MCP sessions rather than per-request
+		// service clones. `compare_exchange` keeps the bump idempotent
+		// if `init_session` is somehow re-entered (it normally errors
+		// above on the second call).
+		if let Some(recorder) = self.metrics_recorder.as_ref()
+			&& self
+				.session_gauge
+				.incremented
+				.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+				.is_ok()
+		{
+			recorder.adjust_session_active(1, self.transport_label);
+		}
 		Ok(())
 	}
 
@@ -287,6 +422,17 @@ impl McpService {
 		let elapsed = started.elapsed();
 		let (kind, kind_str) = audit::classify(&outcome);
 		audit::record(tool, &subject, ns.as_deref(), db.as_deref(), kind, &kind_str, elapsed);
+		// Optional metrics dispatch. Mirrors the audit classification so
+		// `surrealdb.mcp.tool.invocation{outcome="error"}` and the audit
+		// log agree on every dispatch.
+		if let Some(recorder) = self.metrics_recorder.as_ref() {
+			let metric_outcome = match kind {
+				audit::Outcome::Ok => McpToolOutcome::Success,
+				audit::Outcome::ToolError => McpToolOutcome::ToolError,
+				audit::Outcome::ProtocolError => McpToolOutcome::ProtocolError,
+			};
+			recorder.record_tool_invocation(tool, self.transport_label, metric_outcome, elapsed);
+		}
 		outcome
 	}
 }
@@ -705,10 +851,29 @@ mod http_service {
 	/// `Session::default()` -- the datastore's capability rules then decide
 	/// whether guest access is allowed.
 	pub fn create_http_service(ds: Arc<Datastore>) -> McpHttpService {
+		create_http_service_with_metrics(ds, None)
+	}
+
+	/// Variant of [`create_http_service`] that wires an
+	/// [`McpMetricsRecorder`] into every per-session [`McpService`] so
+	/// embedders running their own metric pipeline (the SurrealDB server)
+	/// can record `surrealdb.mcp.tool.*` instruments.
+	pub fn create_http_service_with_metrics(
+		ds: Arc<Datastore>,
+		metrics_recorder: Option<Arc<dyn McpMetricsRecorder>>,
+	) -> McpHttpService {
 		let mut config = StreamableHttpServerConfig::default();
 		config.stateful_mode = true;
 		StreamableHttpService::new(
-			move || Ok(McpService::new(ds.clone(), None, None, Session::default())),
+			move || {
+				let svc = McpService::new(ds.clone(), None, None, Session::default());
+				let svc = if let Some(rec) = metrics_recorder.clone() {
+					svc.with_metrics_recorder(rec).with_transport_label("http")
+				} else {
+					svc.with_transport_label("http")
+				};
+				Ok(svc)
+			},
 			Arc::new(LocalSessionManager::default()),
 			config,
 		)

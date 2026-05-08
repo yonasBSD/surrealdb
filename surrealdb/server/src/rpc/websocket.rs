@@ -112,9 +112,9 @@ impl Websocket {
 		state.web_sockets.write().await.insert(id, rpc.clone());
 		// Emit a session connect event so observability sinks can track
 		// simultaneous connections without consulting the datastore.
-		// The OTel `rpc.server.active_connections` and
-		// `rpc.server.connection.count` instruments are recorded by
-		// `OtelObserver::on_session_event` from the same dispatch.
+		// `MetricsObserver::on_session_event` increments
+		// `surrealdb.session.active` (UpDown gauge) and
+		// `surrealdb.session.total` (counter) from this dispatch.
 		rpc.datastore.observer().on_session_event(&SessionEvent {
 			safe: SessionEventSafe {
 				action: SessionAction::Connect,
@@ -166,9 +166,9 @@ impl Websocket {
 		state.web_sockets.write().await.remove(&id);
 		// Emit a session disconnect event including the full session
 		// lifetime so histogram-based observers can summarise dwell
-		// time. The OTel `rpc.server.active_connections` decrement
-		// flows through `OtelObserver::on_session_event` from this
-		// dispatch.
+		// time. `MetricsObserver::on_session_event` decrements
+		// `surrealdb.session.active` and records the elapsed time on
+		// `surrealdb.session.duration`.
 		rpc.datastore.observer().on_session_event(&SessionEvent {
 			safe: SessionEventSafe {
 				action: SessionAction::Disconnect,
@@ -711,13 +711,37 @@ impl RpcProtocol for Websocket {
 
 	/// Handles the execution of a LIVE statement.
 	///
-	/// Increments the Prometheus `surrealdb_live_query_active` gauge when
-	/// metrics are enabled so operators can alert on runaway subscriber counts
-	/// without peeking at internal datastructures.
-	async fn handle_live(&self, lqid: &Uuid, session_id: Uuid) {
-		self.state.live_queries.write().await.insert(*lqid, (self.id, session_id));
+	/// Increments the `surrealdb.live_query.active` gauge (rendered by
+	/// Prometheus as `surrealdb_live_query_active`) when metrics are enabled
+	/// so operators can alert on runaway subscriber counts without peeking
+	/// at internal datastructures. The gauge is labelled by the registering
+	/// session's namespace and database so operators can pinpoint the
+	/// tenant driving the load.
+	///
+	/// `namespace` and `database` are snapshotted by `run_query` off the
+	/// read guard it already holds on the session lock, and passed down
+	/// here so this function does NOT re-acquire that lock. Re-locking
+	/// would be a recursive read on a write-preferring `RwLock` and
+	/// would deadlock against any concurrent session-mutating RPC on
+	/// the same WebSocket.
+	async fn handle_live(
+		&self,
+		lqid: &Uuid,
+		session_id: Uuid,
+		namespace: Option<String>,
+		database: Option<String>,
+	) {
+		self.state.live_queries.write().await.insert(
+			*lqid,
+			crate::rpc::LiveQueryEntry {
+				websocket_id: self.id,
+				session_id,
+				namespace: namespace.clone(),
+				database: database.clone(),
+			},
+		);
 		if let Some(obs) = self.state.metrics_observer.as_ref() {
-			obs.adjust_live_query_active(1);
+			obs.adjust_live_query_active(1, namespace.as_deref(), database.as_deref());
 		}
 		trace!("Registered live query {lqid} on websocket {}", self.id);
 	}
@@ -726,63 +750,41 @@ impl RpcProtocol for Websocket {
 	///
 	/// Decrements the active LIVE query gauge only when a registration was
 	/// actually removed so duplicate kills do not drift the counter negative.
+	/// The decrement uses the namespace/database stashed at registration time
+	/// so the gauge series is balanced even when the killing session has
+	/// since switched namespaces.
 	async fn handle_kill(&self, lqid: &Uuid) {
-		if let Some((id, session_id)) = self.state.live_queries.write().await.remove(lqid) {
+		if let Some(entry) = self.state.live_queries.write().await.remove(lqid) {
 			if let Some(obs) = self.state.metrics_observer.as_ref() {
-				obs.adjust_live_query_active(-1);
+				obs.adjust_live_query_active(
+					-1,
+					entry.namespace.as_deref(),
+					entry.database.as_deref(),
+				);
 			}
-			trace!("Unregistered live query {lqid} on websocket {id} for session {session_id}");
+			trace!(
+				"Unregistered live query {lqid} on websocket {} for session {}",
+				entry.websocket_id, entry.session_id,
+			);
 		}
 	}
 
 	/// Handles the cleanup of live queries for a given session.
 	///
-	/// Batches the gauge update by the number of LIVE queries that were
-	/// actually garbage collected.
+	/// Drops the gauge per-entry using the namespace/database recorded at
+	/// registration time so the gauge stays balanced even when entries on
+	/// the same WebSocket span multiple namespaces.
 	async fn cleanup_lqs(&self, session_id: &Uuid) {
-		let mut gc = Vec::new();
-		// Find all live queries for to this connection
-		self.state.live_queries.write().await.retain(|key, value| {
-			if value.0 == self.id && value.1 == *session_id {
-				trace!("Removing live query: {key}");
-				gc.push(*key);
-				return false;
-			}
-			true
-		});
-		if let Some(obs) = self.state.metrics_observer.as_ref() {
-			// `gc.len() as i64` is safe: bounded by the number of live queries
-			// we could plausibly register per session.
-			obs.adjust_live_query_active(-(gc.len() as i64));
-		}
-		// Garbage collect the live queries on this connection
-		if let Err(err) = self.kvs().delete_queries(gc).await {
-			error!("Error handling RPC connection: {err}");
-		}
+		self.cleanup_lqs_filtered(Some(session_id)).await;
 	}
 
 	/// Handles the cleanup of live queries on WebSocket close.
 	///
 	/// Drops the gauge by the number of LIVE queries attached to this
-	/// connection so the metric tracks the live map exactly.
+	/// connection so the metric tracks the live map exactly. Each
+	/// decrement uses the per-entry NS/DB so the gauge stays balanced.
 	async fn cleanup_all_lqs(&self) {
-		let mut gc = Vec::new();
-		// Find all live queries for to this connection
-		self.state.live_queries.write().await.retain(|key, value| {
-			if value.0 == self.id {
-				trace!("Removing live query: {key}");
-				gc.push(*key);
-				return false;
-			}
-			true
-		});
-		if let Some(obs) = self.state.metrics_observer.as_ref() {
-			obs.adjust_live_query_active(-(gc.len() as i64));
-		}
-		// Garbage collect the live queries on this connection
-		if let Err(err) = self.kvs().delete_queries(gc).await {
-			error!("Error handling RPC connection: {err}");
-		}
+		self.cleanup_lqs_filtered(None).await;
 	}
 
 	// ------------------------------
@@ -866,6 +868,49 @@ impl RpcProtocol for Websocket {
 
 		// Return success
 		Ok(DbResult::Other(Value::None))
+	}
+}
+
+impl Websocket {
+	/// Shared body for [`Self::cleanup_lqs`] and [`Self::cleanup_all_lqs`].
+	///
+	/// `session_filter` narrows the cleanup to a specific session id when
+	/// `Some`, or matches every LIVE entry on this WebSocket when `None`
+	/// (the connection-close path).
+	///
+	/// The NS/DB clones needed for the gauge decrements are gated on
+	/// `metrics_observer.is_some()` so a connection running without
+	/// metrics enabled does not pay 2N heap allocations on disconnect.
+	async fn cleanup_lqs_filtered(&self, session_filter: Option<&Uuid>) {
+		let want_metrics = self.state.metrics_observer.is_some();
+		let mut gc = Vec::new();
+		let mut decrements: Vec<(Option<String>, Option<String>)> = Vec::new();
+		// Find all live queries on this connection that match the filter.
+		self.state.live_queries.write().await.retain(|key, entry| {
+			if entry.websocket_id != self.id {
+				return true;
+			}
+			if let Some(sid) = session_filter
+				&& entry.session_id != *sid
+			{
+				return true;
+			}
+			trace!("Removing live query: {key}");
+			gc.push(*key);
+			if want_metrics {
+				decrements.push((entry.namespace.clone(), entry.database.clone()));
+			}
+			false
+		});
+		if let Some(obs) = self.state.metrics_observer.as_ref() {
+			for (ns, db) in &decrements {
+				obs.adjust_live_query_active(-1, ns.as_deref(), db.as_deref());
+			}
+		}
+		// Garbage collect the live queries on this connection
+		if let Err(err) = self.kvs().delete_queries(gc).await {
+			error!("Error handling RPC connection: {err}");
+		}
 	}
 }
 
