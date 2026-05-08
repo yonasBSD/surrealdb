@@ -6,6 +6,7 @@ use geo::Point;
 use rust_decimal::Decimal;
 use surrealdb_types::ToSql;
 
+use super::coerce::ElementPosition;
 use crate::cnf::GENERATION_ALLOCATION_LIMIT;
 use crate::expr::Kind;
 use crate::expr::kind::{GeometryKind, HasKind, KindLiteral};
@@ -26,10 +27,11 @@ pub enum CastError {
 		len: usize,
 		into: String,
 	},
-	/// Coerce failed because element of type didn't match.
+	/// Cast failed because element of type didn't match.
 	ElementOf {
 		inner: Box<CastError>,
 		into: String,
+		position: Option<ElementPosition>,
 	},
 	// Annoying error which doesn't fit in with the rest of the errors and breaks the trait
 	// pattern.
@@ -52,9 +54,18 @@ impl fmt::Display for CastError {
 			CastError::ElementOf {
 				inner,
 				into,
+				position,
 			} => {
 				inner.fmt(f)?;
-				write!(f, " when coercing an element of `{into}`")
+				match position {
+					Some(ElementPosition::Index(i)) => {
+						write!(f, " when casting element at index {i} of `{into}`")
+					}
+					Some(ElementPosition::Key(k)) => {
+						write!(f, " when casting value for key '{k}' of `{into}`")
+					}
+					None => write!(f, " when casting an element of `{into}`"),
+				}
 			}
 			CastError::InvalidLength {
 				len,
@@ -76,13 +87,13 @@ impl fmt::Display for CastError {
 }
 
 pub trait CastErrorExt {
-	fn with_element_of<F>(self, f: F) -> Self
+	fn with_element_of_at_index<F>(self, index: usize, f: F) -> Self
 	where
 		F: Fn() -> String;
 }
 
 impl<T> CastErrorExt for Result<T, CastError> {
-	fn with_element_of<F>(self, f: F) -> Self
+	fn with_element_of_at_index<F>(self, index: usize, f: F) -> Self
 	where
 		F: Fn() -> String,
 	{
@@ -91,6 +102,7 @@ impl<T> CastErrorExt for Result<T, CastError> {
 			Err(e) => Err(CastError::ElementOf {
 				inner: Box::new(e),
 				into: f(),
+				position: Some(ElementPosition::Index(index)),
 			}),
 		}
 	}
@@ -1078,9 +1090,13 @@ impl Value {
 	fn cast_to_array(self, kind: &Kind) -> Result<Array, CastError> {
 		self.cast_to::<Array>()?
 			.into_iter()
-			.map(|value| value.cast_to_kind(kind))
+			.enumerate()
+			.map(|(i, value)| {
+				value
+					.cast_to_kind(kind)
+					.with_element_of_at_index(i, || format!("array<{}>", kind.to_sql()))
+			})
 			.collect::<Result<Array, CastError>>()
-			.with_element_of(|| format!("array<{}>", kind.to_sql()))
 	}
 
 	/// Try to convert this value to ab `Array` of a certain type and length
@@ -1096,33 +1112,40 @@ impl Value {
 
 		array
 			.into_iter()
-			.map(|value| value.cast_to_kind(kind))
+			.enumerate()
+			.map(|(i, value)| {
+				value
+					.cast_to_kind(kind)
+					.with_element_of_at_index(i, || format!("array<{}>", kind.to_sql()))
+			})
 			.collect::<Result<Array, CastError>>()
-			.with_element_of(|| format!("array<{}>", kind.to_sql()))
 	}
 
 	/// Try to convert this value to a `Set` of a certain type
 	pub(crate) fn cast_to_set_type(self, kind: &Kind) -> Result<Set, CastError> {
-		let array = self.cast_to::<Array>()?;
-
-		let set = array
+		self.cast_to::<Array>()?
 			.into_iter()
-			.map(|value| value.cast_to_kind(kind))
+			.enumerate()
+			.map(|(i, value)| {
+				value
+					.cast_to_kind(kind)
+					.with_element_of_at_index(i, || format!("set<{}>", kind.to_sql()))
+			})
 			.collect::<Result<Set, CastError>>()
-			.with_element_of(|| format!("set<{}>", kind.to_sql()))?;
-
-		Ok(set)
 	}
 
 	/// Try to convert this value to a `Set` of a certain type and length
 	pub(crate) fn cast_to_set_type_len(self, kind: &Kind, len: u64) -> Result<Set, CastError> {
-		let array = self.cast_to::<Array>()?;
-
-		let set = array
+		let set = self
+			.cast_to::<Array>()?
 			.into_iter()
-			.map(|value| value.cast_to_kind(kind))
-			.collect::<Result<Set, CastError>>()
-			.with_element_of(|| format!("set<{}>", kind.to_sql()))?;
+			.enumerate()
+			.map(|(i, value)| {
+				value
+					.cast_to_kind(kind)
+					.with_element_of_at_index(i, || format!("set<{}>", kind.to_sql()))
+			})
+			.collect::<Result<Set, CastError>>()?;
 
 		if (set.len() as u64) != len {
 			return Err(CastError::InvalidLength {
