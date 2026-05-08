@@ -79,3 +79,117 @@ pub type Val = Vec<u8>;
 
 /// The Version part of a key-value pair. An alias for [`u64`].
 pub type Version = u64;
+
+pub(crate) fn is_retryable_transaction_conflict(err: &anyhow::Error) -> bool {
+	if let Some(kvs_err) = err.downcast_ref::<self::err::Error>() {
+		return kvs_err.is_retryable();
+	}
+	matches!(
+		err.downcast_ref::<crate::err::Error>(),
+		Some(crate::err::Error::Kvs(kvs_err)) if kvs_err.is_retryable()
+	)
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+	use std::collections::HashMap;
+	use std::sync::{Mutex, OnceLock};
+
+	use anyhow::Result;
+	use uuid::Uuid;
+
+	#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+	pub(crate) enum RetryableConflictSite {
+		ConcurrentIndexInitialCleanup,
+		ConcurrentIndexInitialBatch,
+		IndexCompactionQueueCleanup,
+		FullTextCompaction,
+		CountCompaction,
+		HnswCompaction,
+	}
+
+	static RETRYABLE_CONFLICTS: OnceLock<Mutex<HashMap<(RetryableConflictSite, Uuid), usize>>> =
+		OnceLock::new();
+
+	fn retryable_conflicts() -> &'static Mutex<HashMap<(RetryableConflictSite, Uuid), usize>> {
+		RETRYABLE_CONFLICTS.get_or_init(|| Mutex::new(HashMap::new()))
+	}
+
+	pub(crate) fn inject_retryable_conflict(
+		site: RetryableConflictSite,
+		node_id: Uuid,
+	) -> RetryableConflictGuard {
+		inject_retryable_conflicts(site, node_id, 1)
+	}
+
+	pub(crate) fn inject_retryable_conflicts(
+		site: RetryableConflictSite,
+		node_id: Uuid,
+		count: usize,
+	) -> RetryableConflictGuard {
+		assert!(count > 0);
+		retryable_conflicts().lock().unwrap().insert((site, node_id), count);
+		RetryableConflictGuard {
+			site,
+			node_id,
+		}
+	}
+
+	pub(crate) fn maybe_inject_retryable_conflict(
+		site: RetryableConflictSite,
+		node_id: Uuid,
+	) -> Result<()> {
+		let mut conflicts = retryable_conflicts().lock().unwrap();
+		let Some(remaining) = conflicts.get_mut(&(site, node_id)) else {
+			return Ok(());
+		};
+		*remaining -= 1;
+		if *remaining == 0 {
+			conflicts.remove(&(site, node_id));
+		}
+		Err(super::Error::TransactionConflict(format!("injected conflict at {site:?}")).into())
+	}
+
+	pub(crate) fn retryable_conflict_count(site: RetryableConflictSite, node_id: Uuid) -> usize {
+		retryable_conflicts().lock().unwrap().get(&(site, node_id)).copied().unwrap_or(0)
+	}
+
+	pub(crate) struct RetryableConflictGuard {
+		site: RetryableConflictSite,
+		node_id: Uuid,
+	}
+
+	impl Drop for RetryableConflictGuard {
+		fn drop(&mut self) {
+			retryable_conflicts().lock().unwrap().remove(&(self.site, self.node_id));
+		}
+	}
+}
+
+#[cfg(test)]
+mod retry_conflict_tests {
+	use super::is_retryable_transaction_conflict;
+
+	#[test]
+	fn retryable_transaction_conflict_accepts_direct_kvs_error() {
+		let err = anyhow::Error::new(super::Error::TransactionConflict("conflict".into()));
+
+		assert!(is_retryable_transaction_conflict(&err));
+	}
+
+	#[test]
+	fn retryable_transaction_conflict_accepts_wrapped_kvs_error() {
+		let err = anyhow::Error::new(crate::err::Error::Kvs(super::Error::TransactionConflict(
+			"conflict".into(),
+		)));
+
+		assert!(is_retryable_transaction_conflict(&err));
+	}
+
+	#[test]
+	fn retryable_transaction_conflict_rejects_non_retryable_errors() {
+		let err = anyhow::Error::new(super::Error::TransactionFinished);
+
+		assert!(!is_retryable_transaction_conflict(&err));
+	}
+}

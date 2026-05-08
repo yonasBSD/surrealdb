@@ -82,7 +82,11 @@ use crate::kvs::index::IndexBuilder;
 use crate::kvs::sequences::Sequences;
 use crate::kvs::slowlog::SlowLog;
 use crate::kvs::tasklease::{LeaseHandler, TaskLeaseType};
-use crate::kvs::{KVValue, LockType, NORMAL_BATCH_SIZE, TransactionType};
+#[cfg(test)]
+use crate::kvs::testing::{RetryableConflictSite, maybe_inject_retryable_conflict};
+use crate::kvs::{
+	KVValue, LockType, NORMAL_BATCH_SIZE, TransactionType, is_retryable_transaction_conflict,
+};
 use crate::observe::{ExecutionObserver, NoopObserver};
 use crate::sql::Ast;
 #[cfg(feature = "surrealism")]
@@ -776,6 +780,30 @@ impl Datastore {
 	pub fn builder() -> Builder {
 		Builder::new()
 	}
+
+	async fn retry_index_operation_conflict(
+		err: &anyhow::Error,
+		operation: impl Into<String>,
+	) -> bool {
+		if is_retryable_transaction_conflict(err) {
+			let operation = operation.into();
+			warn!(target: TARGET, "{operation}: {err}");
+			sleep(Duration::from_millis(100)).await;
+			true
+		} else {
+			false
+		}
+	}
+
+	async fn cancel_and_retry_index_operation_conflict(
+		txn: &Transaction,
+		err: &anyhow::Error,
+		operation: impl Into<String>,
+	) -> bool {
+		let _ = txn.cancel().await;
+		Self::retry_index_operation_conflict(err, operation).await
+	}
+
 	/// Creates a new datastore instance
 	///
 	/// # Examples
@@ -1894,7 +1922,7 @@ impl Datastore {
 		let mut count_iteration = 0;
 		let mut count_error = 0;
 		// We continue without interruptions while there are keys and the lease
-		loop {
+		'compaction: loop {
 			Self::ensure_not_cancelled(&canceller)?;
 			// Attempt to acquire a lease for the IndexCompaction task
 			// If we don't get the lease, another node is handling this task
@@ -1930,22 +1958,51 @@ impl Datastore {
 			// Failed indexes are not re-enqueued here; the next user
 			// write to the affected index will naturally trigger a new
 			// compaction request.
-			let txn = dbs.transaction(Write, Optimistic).await?;
-			if let Err(e) = Self::ensure_not_cancelled(&canceller) {
-				let _ = txn.cancel().await;
-				return Err(e);
-			}
-			for k in &keys {
-				if let Err(e) = txn.del(k).await {
-					warn!(target: TARGET, "Failed to delete compaction queue entry: {e}");
+			loop {
+				let txn = dbs.transaction(Write, Optimistic).await?;
+				if let Err(e) = Self::ensure_not_cancelled(&canceller) {
+					let _ = txn.cancel().await;
+					return Err(e);
 				}
-			}
-			if let Err(e) = Self::ensure_not_cancelled(&canceller) {
-				let _ = txn.cancel().await;
-				return Err(e);
-			}
-			if let Err(e) = txn.commit().await {
-				warn!(target: TARGET, "Failed to commit compaction queue cleanup: {e}");
+				for k in &keys {
+					if let Err(e) = txn.del(k).await {
+						warn!(target: TARGET, "Failed to delete compaction queue entry: {e}");
+					}
+				}
+				if let Err(e) = Self::ensure_not_cancelled(&canceller) {
+					let _ = txn.cancel().await;
+					return Err(e);
+				}
+				#[cfg(test)]
+				if let Err(e) = maybe_inject_retryable_conflict(
+					RetryableConflictSite::IndexCompactionQueueCleanup,
+					dbs.id,
+				) {
+					if Self::cancel_and_retry_index_operation_conflict(
+						&txn,
+						&e,
+						"Retryable conflict committing compaction queue cleanup, retrying",
+					)
+					.await
+					{
+						continue;
+					}
+					warn!(target: TARGET, "Failed to commit compaction queue cleanup: {e}");
+					break 'compaction;
+				}
+				if let Err(e) = txn.commit().await {
+					if Self::cancel_and_retry_index_operation_conflict(
+						&txn,
+						&e,
+						"Retryable conflict committing compaction queue cleanup, retrying",
+					)
+					.await
+					{
+						continue;
+					}
+					warn!(target: TARGET, "Failed to commit compaction queue cleanup: {e}");
+					break 'compaction;
+				}
 				break;
 			}
 		}
@@ -2216,11 +2273,45 @@ impl Datastore {
 						}
 						return Err(e);
 					}
-					if let Err(e) = txn.commit().await {
+					#[cfg(test)]
+					if let Err(e) = maybe_inject_retryable_conflict(
+						RetryableConflictSite::HnswCompaction,
+						self.id,
+					) {
+						let _ = txn.cancel().await;
 						if let Err(evict) =
 							self.index_stores.remove_hnsw_index(tb, ikb.clone()).await
 						{
 							warn!(target: TARGET, "Failed to evict HNSW index after compaction commit error: {evict}");
+						}
+						if Self::retry_index_operation_conflict(
+							&e,
+							format!(
+								"Retryable conflict committing HNSW compaction for {ikb}, retrying"
+							),
+						)
+						.await
+						{
+							continue;
+						}
+						return Err(e);
+					}
+					if let Err(e) = txn.commit().await {
+						let _ = txn.cancel().await;
+						if let Err(evict) =
+							self.index_stores.remove_hnsw_index(tb, ikb.clone()).await
+						{
+							warn!(target: TARGET, "Failed to evict HNSW index after compaction commit error: {evict}");
+						}
+						if Self::retry_index_operation_conflict(
+							&e,
+							format!(
+								"Retryable conflict committing HNSW compaction for {ikb}, retrying"
+							),
+						)
+						.await
+						{
+							continue;
 						}
 						return Err(e);
 					}
@@ -2233,6 +2324,14 @@ impl Datastore {
 					let _ = txn.cancel().await;
 					if let Err(evict) = self.index_stores.remove_hnsw_index(tb, ikb.clone()).await {
 						warn!(target: TARGET, "Failed to evict HNSW index after compaction error: {evict}");
+					}
+					if Self::retry_index_operation_conflict(
+						&e,
+						format!("Retryable conflict applying HNSW compaction for {ikb}, retrying"),
+					)
+					.await
+					{
+						continue;
 					}
 					return Err(e);
 				}
@@ -2305,7 +2404,38 @@ impl Datastore {
 						let _ = txn.cancel().await;
 						return Err(e);
 					}
-					txn.commit().await?;
+					#[cfg(test)]
+					if let Err(e) = maybe_inject_retryable_conflict(
+						RetryableConflictSite::FullTextCompaction,
+						self.id,
+					) {
+						if Self::cancel_and_retry_index_operation_conflict(
+							&txn,
+							&e,
+							format!(
+								"Retryable conflict committing full-text compaction for {ikb}, retrying"
+							),
+						)
+						.await
+						{
+							continue;
+						}
+						return Err(e);
+					}
+					if let Err(e) = txn.commit().await {
+						if Self::cancel_and_retry_index_operation_conflict(
+							&txn,
+							&e,
+							format!(
+								"Retryable conflict committing full-text compaction for {ikb}, retrying"
+							),
+						)
+						.await
+						{
+							continue;
+						}
+						return Err(e);
+					}
 				}
 				Ok(false) => {
 					let _ = txn.cancel().await;
@@ -2313,6 +2443,16 @@ impl Datastore {
 				}
 				Err(e) => {
 					let _ = txn.cancel().await;
+					if Self::retry_index_operation_conflict(
+						&e,
+						format!(
+							"Retryable conflict applying full-text compaction for {ikb}, retrying"
+						),
+					)
+					.await
+					{
+						continue;
+					}
 					return Err(e);
 				}
 			}
@@ -2365,7 +2505,38 @@ impl Datastore {
 						let _ = txn.cancel().await;
 						return Err(e);
 					}
-					txn.commit().await?;
+					#[cfg(test)]
+					if let Err(e) = maybe_inject_retryable_conflict(
+						RetryableConflictSite::CountCompaction,
+						self.id,
+					) {
+						if Self::cancel_and_retry_index_operation_conflict(
+							&txn,
+							&e,
+							format!(
+								"Retryable conflict committing count compaction for {ikb}, retrying"
+							),
+						)
+						.await
+						{
+							continue;
+						}
+						return Err(e);
+					}
+					if let Err(e) = txn.commit().await {
+						if Self::cancel_and_retry_index_operation_conflict(
+							&txn,
+							&e,
+							format!(
+								"Retryable conflict committing count compaction for {ikb}, retrying"
+							),
+						)
+						.await
+						{
+							continue;
+						}
+						return Err(e);
+					}
 				}
 				Ok(false) => {
 					let _ = txn.cancel().await;
@@ -2373,6 +2544,14 @@ impl Datastore {
 				}
 				Err(e) => {
 					let _ = txn.cancel().await;
+					if Self::retry_index_operation_conflict(
+						&e,
+						format!("Retryable conflict applying count compaction for {ikb}, retrying"),
+					)
+					.await
+					{
+						continue;
+					}
 					return Err(e);
 				}
 			}
@@ -3135,9 +3314,135 @@ mod test {
 	use std::future::pending;
 
 	use super::*;
+	use crate::catalog::providers::{
+		CatalogProvider, DatabaseProvider, NamespaceProvider, TableProvider,
+	};
 	use crate::iam::verify::verify_root_creds;
+	use crate::kvs::testing::{
+		RetryableConflictSite, inject_retryable_conflict, retryable_conflict_count,
+	};
 	use crate::types::{PublicValue, PublicVariables};
 	use crate::val::TableName;
+
+	async fn new_index_compaction_test_ds() -> Result<(Datastore, Session)> {
+		let ds = Datastore::new("memory").await?;
+		let session = Session::owner().with_ns("test").with_db("test");
+		let txn = ds.transaction(Write, Pessimistic).await?;
+		txn.ensure_ns_db(None, "test", "test").await?;
+		txn.commit().await?;
+		Ok((ds, session))
+	}
+
+	async fn execute_all(ds: &Datastore, session: &Session, sql: &str) -> Result<()> {
+		for result in ds.execute(sql, session, None).await? {
+			result.result?;
+		}
+		Ok(())
+	}
+
+	async fn index_key_base(ds: &Datastore, table: &str, index: &str) -> Result<IndexKeyBase> {
+		let txn = ds.transaction(Read, Optimistic).await?;
+		let ns = txn.get_ns_by_name("test", None).await?.unwrap();
+		let db = txn.get_db_by_name("test", "test", None).await?.unwrap();
+		let table = TableName::from(table);
+		let ix =
+			txn.get_tb_index(ns.namespace_id, db.database_id, &table, index, None).await?.unwrap();
+		txn.cancel().await?;
+		Ok(IndexKeyBase::new(ns.namespace_id, db.database_id, table, ix.index_id))
+	}
+
+	async fn assert_index_compaction_commit_retry(
+		site: RetryableConflictSite,
+		table: &str,
+		index: &str,
+		sql: &str,
+	) -> Result<()> {
+		let (ds, session) = new_index_compaction_test_ds().await?;
+		execute_all(&ds, &session, sql).await?;
+		let ikb = index_key_base(&ds, table, index).await?;
+		let node_id = ds.id();
+		let _guard = inject_retryable_conflict(site, node_id);
+
+		ds.process_index_compaction(&ikb, CancellationToken::new()).await?;
+
+		assert_eq!(retryable_conflict_count(site, node_id), 0);
+		Ok(())
+	}
+
+	const COUNT_COMPACTION_SQL: &str = "
+		DEFINE TABLE user SCHEMALESS;
+		DEFINE INDEX count_idx ON user COUNT;
+		CREATE user:1 SET name = 'one' RETURN NONE;
+		CREATE user:2 SET name = 'two' RETURN NONE;
+	";
+
+	const FULLTEXT_COMPACTION_SQL: &str = "
+		DEFINE ANALYZER simple TOKENIZERS blank FILTERS lowercase;
+		DEFINE TABLE doc SCHEMALESS;
+		DEFINE INDEX ft_idx ON doc FIELDS text FULLTEXT ANALYZER simple BM25 HIGHLIGHTS;
+		CREATE doc:1 SET text = 'alpha beta' RETURN NONE;
+		CREATE doc:2 SET text = 'beta gamma' RETURN NONE;
+	";
+
+	const HNSW_COMPACTION_SQL: &str = "
+		DEFINE TABLE vec SCHEMALESS;
+		DEFINE INDEX hnsw_idx ON vec FIELDS vector HNSW DIMENSION 2 DIST EUCLIDEAN TYPE F32 EFC 16 M 4;
+		CREATE vec:1 SET vector = [1, 2] RETURN NONE;
+		CREATE vec:2 SET vector = [2, 3] RETURN NONE;
+	";
+
+	#[tokio::test]
+	async fn count_index_compaction_retries_commit_conflict() -> Result<()> {
+		assert_index_compaction_commit_retry(
+			RetryableConflictSite::CountCompaction,
+			"user",
+			"count_idx",
+			COUNT_COMPACTION_SQL,
+		)
+		.await
+	}
+
+	#[tokio::test]
+	async fn fulltext_index_compaction_retries_commit_conflict() -> Result<()> {
+		assert_index_compaction_commit_retry(
+			RetryableConflictSite::FullTextCompaction,
+			"doc",
+			"ft_idx",
+			FULLTEXT_COMPACTION_SQL,
+		)
+		.await
+	}
+
+	#[tokio::test]
+	async fn hnsw_index_compaction_retries_commit_conflict() -> Result<()> {
+		assert_index_compaction_commit_retry(
+			RetryableConflictSite::HnswCompaction,
+			"vec",
+			"hnsw_idx",
+			HNSW_COMPACTION_SQL,
+		)
+		.await
+	}
+
+	#[tokio::test]
+	async fn index_compaction_retries_queue_cleanup_commit_conflict() -> Result<()> {
+		let (ds, session) = new_index_compaction_test_ds().await?;
+		execute_all(&ds, &session, COUNT_COMPACTION_SQL).await?;
+		let site = RetryableConflictSite::IndexCompactionQueueCleanup;
+		let node_id = ds.id();
+		let _guard = inject_retryable_conflict(site, node_id);
+
+		let (_, errors) = Datastore::index_compaction(
+			Arc::new(ds),
+			Duration::from_secs(1),
+			CancellationToken::new(),
+		)
+		.await?;
+
+		assert_eq!(errors, 0);
+		assert_eq!(retryable_conflict_count(site, node_id), 0);
+		Ok(())
+	}
 
 	#[tokio::test]
 	async fn archive_node_for_shutdown_reports_success() {

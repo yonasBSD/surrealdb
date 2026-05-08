@@ -32,8 +32,11 @@ use crate::key::index::ig::IndexAppending;
 use crate::key::record;
 use crate::kvs::LockType::Optimistic;
 use crate::kvs::ds::TransactionFactory;
+#[cfg(test)]
+use crate::kvs::testing::{RetryableConflictSite, maybe_inject_retryable_conflict};
 use crate::kvs::{
-	INDEXING_BATCH_SIZE, KVValue, Key, Transaction, TransactionType, Val, impl_kv_value_revisioned,
+	INDEXING_BATCH_SIZE, Key, Transaction, TransactionType, Val, impl_kv_value_revisioned,
+	is_retryable_transaction_conflict,
 };
 use crate::mem::ALLOC;
 use crate::val::{Object, RecordId, RecordIdKey, TableName, Value};
@@ -80,16 +83,6 @@ impl BuildingStatus {
 	fn is_ready(&self) -> bool {
 		matches!(self, Self::Ready { .. })
 	}
-}
-
-fn is_retryable_transaction_conflict(err: &anyhow::Error) -> bool {
-	if let Some(kvs_err) = err.downcast_ref::<crate::kvs::Error>() {
-		return kvs_err.is_retryable();
-	}
-	matches!(
-		err.downcast_ref::<Error>(),
-		Some(Error::Kvs(kvs_err)) if kvs_err.is_retryable()
-	)
 }
 
 impl From<BuildingStatus> for Value {
@@ -497,6 +490,26 @@ impl Building {
 		self.initial_build_complete.store(true, Ordering::Release);
 	}
 
+	async fn retryable_conflict(&self, err: &anyhow::Error, action: &str) -> bool {
+		if is_retryable_transaction_conflict(err) {
+			warn!("{}: {action}", self.ix.name);
+			sleep(Duration::from_millis(100)).await;
+			true
+		} else {
+			false
+		}
+	}
+
+	async fn cancel_and_retryable_conflict(
+		&self,
+		tx: &Transaction,
+		err: &anyhow::Error,
+		action: &str,
+	) -> bool {
+		let _ = tx.cancel().await;
+		self.retryable_conflict(err, action).await
+	}
+
 	async fn maybe_consume(
 		&self,
 		ctx: &FrozenContext,
@@ -614,16 +627,65 @@ impl Building {
 		// Remove existing index data.
 		{
 			self.set_status(BuildingStatus::Cleaning).await;
-			let ctx = self.new_write_tx_ctx().await?;
-			let key = crate::key::index::all::new(
-				self.ix_key.ns,
-				self.ix_key.db,
-				&self.ix_key.tb,
-				self.ix_key.ix,
-			);
-			let tx = ctx.tx();
-			catch!(tx, tx.delp(&key).await);
-			catch!(tx, tx.commit().await);
+			loop {
+				if self.is_aborted().await {
+					return Ok(());
+				}
+				let ctx = self.new_write_tx_ctx().await?;
+				let key = crate::key::index::all::new(
+					self.ix_key.ns,
+					self.ix_key.db,
+					&self.ix_key.tb,
+					self.ix_key.ix,
+				);
+				let tx = ctx.tx();
+				if let Err(err) = tx.delp(&key).await {
+					if self
+						.cancel_and_retryable_conflict(
+							&tx,
+							&err,
+							"transient conflict while cleaning existing index data, retrying",
+						)
+						.await
+					{
+						continue;
+					}
+					return Err(err);
+				}
+				#[cfg(test)]
+				if let Err(err) = maybe_inject_retryable_conflict(
+					RetryableConflictSite::ConcurrentIndexInitialCleanup,
+					self.ctx.node_id(),
+				) {
+					if self
+						.cancel_and_retryable_conflict(
+							&tx,
+							&err,
+							"transient conflict while cleaning existing index data, retrying",
+						)
+						.await
+					{
+						continue;
+					}
+					return Err(err);
+				}
+				match tx.commit().await {
+					Ok(()) => break,
+					Err(err) => {
+						if self
+							.cancel_and_retryable_conflict(
+								&tx,
+								&err,
+								"transient conflict while cleaning existing index data, retrying",
+							)
+							.await
+						{
+							continue;
+						}
+						return Err(err);
+					}
+				}
+			}
 		}
 
 		// First pass: index every record.
@@ -666,21 +728,73 @@ impl Building {
 			}
 			// Create a new context with a write transaction.
 			{
-				let ctx = self.new_write_tx_ctx().await?;
-				let tx = ctx.tx();
-				// Index the batch.
-				let indexed = catch!(
-					tx,
-					self.index_initial_batch(
-						&ctx,
-						&tx,
-						batch.result,
-						initial_count,
-						&mut v1_appending_sentinel
-					)
-					.await
-				);
-				catch!(tx, tx.commit().await);
+				let values = batch.result;
+				let indexed = loop {
+					if self.is_aborted().await {
+						return Ok(());
+					}
+					let ctx = self.new_write_tx_ctx().await?;
+					let tx = ctx.tx();
+					// Index the batch.
+					let indexed = match self
+						.index_initial_batch(
+							&ctx,
+							&tx,
+							&values,
+							initial_count,
+							&mut v1_appending_sentinel,
+						)
+						.await
+					{
+						Ok(indexed) => indexed,
+						Err(err) => {
+							if self
+								.cancel_and_retryable_conflict(
+									&tx,
+									&err,
+									"transient conflict in initial index batch, retrying",
+								)
+								.await
+							{
+								continue;
+							}
+							return Err(err);
+						}
+					};
+					#[cfg(test)]
+					if let Err(err) = maybe_inject_retryable_conflict(
+						RetryableConflictSite::ConcurrentIndexInitialBatch,
+						self.ctx.node_id(),
+					) {
+						if self
+							.cancel_and_retryable_conflict(
+								&tx,
+								&err,
+								"transient conflict on initial index batch commit, retrying",
+							)
+							.await
+						{
+							continue;
+						}
+						return Err(err);
+					}
+					match tx.commit().await {
+						Ok(()) => break indexed,
+						Err(err) => {
+							if self
+								.cancel_and_retryable_conflict(
+									&tx,
+									&err,
+									"transient conflict on initial index batch commit, retrying",
+								)
+								.await
+							{
+								continue;
+							}
+							return Err(err);
+						}
+					}
+				};
 				initial_count += indexed;
 				if !self.is_aborted().await {
 					self.set_status(BuildingStatus::Indexing {
@@ -773,15 +887,18 @@ impl Building {
 				let indexed = match self.index_appending_range(&ctx, &tx, keys, updates_count).await
 				{
 					Ok(indexed) => indexed,
-					Err(err) if is_retryable_transaction_conflict(&err) => {
-						let _ = tx.cancel().await;
-						*updates_count = saved_updates_count;
-						warn!("{}: transient conflict in appending range, retrying", self.ix.name);
-						sleep(Duration::from_millis(100)).await;
-						continue;
-					}
 					Err(err) => {
-						let _ = tx.cancel().await;
+						*updates_count = saved_updates_count;
+						if self
+							.cancel_and_retryable_conflict(
+								&tx,
+								&err,
+								"transient conflict in appending range, retrying",
+							)
+							.await
+						{
+							continue;
+						}
 						return Err(err);
 					}
 				};
@@ -813,15 +930,18 @@ impl Building {
 						})
 						.await;
 					}
-					Err(err) if is_retryable_transaction_conflict(&err) => {
-						let _ = tx.cancel().await;
-						*updates_count = saved_updates_count;
-						warn!("{}: transient conflict on commit, retrying", self.ix.name);
-						sleep(Duration::from_millis(100)).await;
-						continue;
-					}
 					Err(err) => {
-						let _ = tx.cancel().await;
+						*updates_count = saved_updates_count;
+						if self
+							.cancel_and_retryable_conflict(
+								&tx,
+								&err,
+								"transient conflict on commit, retrying",
+							)
+							.await
+						{
+							continue;
+						}
 						return Err(err);
 					}
 				}
@@ -837,7 +957,7 @@ impl Building {
 		&self,
 		ctx: &FrozenContext,
 		tx: &Transaction,
-		values: Vec<(Key, Val)>,
+		values: &[(Key, Val)],
 		initial_count: usize,
 		v1_appending_sentinel: &mut bool,
 	) -> Result<usize> {
@@ -855,9 +975,9 @@ impl Building {
 					return Ok(count);
 				}
 				self.is_beyond_threshold(Some(initial_count + count))?;
-				let key = record::RecordKey::decode_key(&k)?;
+				let key = record::RecordKey::decode_key(k)?;
 				// Parse the value.
-				let val = Record::kv_decode_value(v)?;
+				let val: Record = revision::from_slice(v.as_slice())?;
 				let rid: Arc<RecordId> = RecordId {
 					table: key.tb.into_owned(),
 					key: key.id,
@@ -1105,5 +1225,193 @@ struct BuildingFinishGuard(IndexBuilding);
 impl Drop for BuildingFinishGuard {
 	fn drop(&mut self) {
 		self.0.finished.store(true, Ordering::Relaxed);
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::time::Duration;
+
+	use tokio::time::{sleep, timeout};
+
+	use super::*;
+	use crate::catalog::providers::CatalogProvider;
+	use crate::dbs::Session;
+	use crate::kvs::testing::{
+		RetryableConflictSite, inject_retryable_conflict, inject_retryable_conflicts,
+		retryable_conflict_count,
+	};
+
+	const REPEATED_RETRY_CONFLICTS: usize = 1000;
+
+	async fn new_index_test_ds() -> Result<(crate::kvs::Datastore, Session)> {
+		let ds = crate::kvs::Datastore::new("memory").await?;
+		let session = Session::owner().with_ns("test").with_db("test");
+		let tx = ds.transaction(TransactionType::Write, Optimistic).await?;
+		tx.ensure_ns_db(None, "test", "test").await?;
+		tx.commit().await?;
+		Ok((ds, session))
+	}
+
+	async fn execute_all(ds: &crate::kvs::Datastore, session: &Session, sql: &str) -> Result<()> {
+		for result in ds.execute(sql, session, None).await? {
+			result.result?;
+		}
+		Ok(())
+	}
+
+	async fn wait_for_index_ready(ds: &crate::kvs::Datastore, session: &Session) -> Result<()> {
+		timeout(Duration::from_secs(10), async {
+			loop {
+				let mut results = ds.execute("INFO FOR INDEX test ON user", session, None).await?;
+				let value = results.remove(0).result?;
+				let json = value.into_json_value();
+				let status = json
+					.pointer("/building/status")
+					.and_then(|status| status.as_str())
+					.unwrap_or_default();
+				match status {
+					"ready" => return Ok(()),
+					"error" => anyhow::bail!("index build entered error state: {json}"),
+					_ => sleep(Duration::from_millis(20)).await,
+				}
+			}
+		})
+		.await
+		.map_err(|_| anyhow::anyhow!("timed out waiting for concurrent index build"))?
+	}
+
+	async fn wait_for_retry_conflict(
+		site: RetryableConflictSite,
+		node_id: uuid::Uuid,
+		initial_count: usize,
+	) -> Result<()> {
+		timeout(Duration::from_secs(10), async {
+			loop {
+				if retryable_conflict_count(site, node_id) < initial_count {
+					return Ok(());
+				}
+				sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.map_err(|_| anyhow::anyhow!("timed out waiting for injected retry conflict"))?
+	}
+
+	async fn wait_for_retry_conflict_count_to_stabilize(
+		site: RetryableConflictSite,
+		node_id: uuid::Uuid,
+	) -> Result<usize> {
+		timeout(Duration::from_secs(10), async {
+			let mut previous = retryable_conflict_count(site, node_id);
+			loop {
+				sleep(Duration::from_millis(250)).await;
+				let current = retryable_conflict_count(site, node_id);
+				if current == previous {
+					return Ok(current);
+				}
+				previous = current;
+			}
+		})
+		.await
+		.map_err(|_| anyhow::anyhow!("timed out waiting for retry conflict count to stabilize"))?
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn concurrent_indexing_retries_initial_cleanup_commit_conflict() -> Result<()> {
+		let (ds, session) = new_index_test_ds().await?;
+		let site = RetryableConflictSite::ConcurrentIndexInitialCleanup;
+		let node_id = ds.id();
+		let _guard = inject_retryable_conflict(site, node_id);
+
+		execute_all(
+			&ds,
+			&session,
+			"
+			DEFINE TABLE user SCHEMALESS;
+			DEFINE INDEX test ON user FIELDS email CONCURRENTLY;
+			",
+		)
+		.await?;
+		wait_for_index_ready(&ds, &session).await?;
+
+		assert_eq!(retryable_conflict_count(site, node_id), 0);
+		Ok(())
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn concurrent_indexing_retries_initial_batch_commit_conflict() -> Result<()> {
+		let (ds, session) = new_index_test_ds().await?;
+		execute_all(
+			&ds,
+			&session,
+			"
+			DEFINE TABLE user SCHEMALESS;
+			CREATE user:1 SET email = 'one@example.com' RETURN NONE;
+			CREATE user:2 SET email = 'two@example.com' RETURN NONE;
+			",
+		)
+		.await?;
+		let site = RetryableConflictSite::ConcurrentIndexInitialBatch;
+		let node_id = ds.id();
+		let _guard = inject_retryable_conflict(site, node_id);
+
+		execute_all(&ds, &session, "DEFINE INDEX test ON user FIELDS email CONCURRENTLY").await?;
+		wait_for_index_ready(&ds, &session).await?;
+
+		assert_eq!(retryable_conflict_count(site, node_id), 0);
+		Ok(())
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn concurrent_indexing_retries_initial_cleanup_stops_after_abort() -> Result<()> {
+		let (ds, session) = new_index_test_ds().await?;
+		let site = RetryableConflictSite::ConcurrentIndexInitialCleanup;
+		let node_id = ds.id();
+		let _guard = inject_retryable_conflicts(site, node_id, REPEATED_RETRY_CONFLICTS);
+
+		execute_all(
+			&ds,
+			&session,
+			"
+			DEFINE TABLE user SCHEMALESS;
+			DEFINE INDEX test ON user FIELDS email CONCURRENTLY;
+			",
+		)
+		.await?;
+		wait_for_retry_conflict(site, node_id, REPEATED_RETRY_CONFLICTS).await?;
+
+		execute_all(&ds, &session, "REMOVE INDEX test ON user").await?;
+
+		let remaining = wait_for_retry_conflict_count_to_stabilize(site, node_id).await?;
+		assert!(remaining > 0, "abort should stop retries before all conflicts are consumed");
+		Ok(())
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn concurrent_indexing_retries_initial_batch_stops_after_abort() -> Result<()> {
+		let (ds, session) = new_index_test_ds().await?;
+		execute_all(
+			&ds,
+			&session,
+			"
+			DEFINE TABLE user SCHEMALESS;
+			CREATE user:1 SET email = 'one@example.com' RETURN NONE;
+			CREATE user:2 SET email = 'two@example.com' RETURN NONE;
+			",
+		)
+		.await?;
+		let site = RetryableConflictSite::ConcurrentIndexInitialBatch;
+		let node_id = ds.id();
+		let _guard = inject_retryable_conflicts(site, node_id, REPEATED_RETRY_CONFLICTS);
+
+		execute_all(&ds, &session, "DEFINE INDEX test ON user FIELDS email CONCURRENTLY").await?;
+		wait_for_retry_conflict(site, node_id, REPEATED_RETRY_CONFLICTS).await?;
+
+		execute_all(&ds, &session, "REMOVE INDEX test ON user").await?;
+
+		let remaining = wait_for_retry_conflict_count_to_stabilize(site, node_id).await?;
+		assert!(remaining > 0, "abort should stop retries before all conflicts are consumed");
+		Ok(())
 	}
 }
