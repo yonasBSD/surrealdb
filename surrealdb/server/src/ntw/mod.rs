@@ -39,7 +39,7 @@ use http::header;
 use surrealdb::headers::{AUTH_DB, AUTH_NS, DB, ID, NS};
 use surrealdb_core::CommunityComposer;
 use surrealdb_core::channel::Receiver;
-use surrealdb_core::kvs::Datastore;
+use surrealdb_core::kvs::{Datastore, TransactionBuilderFactory};
 use surrealdb_types::Notification;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -82,8 +82,8 @@ const LOG: &str = "surrealdb::net";
 /// struct MyComposer;
 ///
 /// impl RouterFactory for MyComposer {
-///     fn configure_router() -> Router<Arc<RpcState>> {
-///         let router = CommunityComposer::configure_router();
+///     fn configure_router(router_state: Self::RouterState) -> Router<Arc<RpcState>> {
+///         let router = CommunityComposer::configure_router(router_state);
 ///         router.merge(
 ///             Router::new()
 ///                 .route("/custom", get(|| async { "Hello from custom route" }))
@@ -104,7 +104,7 @@ const LOG: &str = "surrealdb::net";
 /// struct MinimalComposer;
 ///
 /// impl RouterFactory for MinimalComposer {
-///     fn configure_router() -> Router<Arc<RpcState>> {
+///     fn configure_router(_router_state: Self::RouterState) -> Router<Arc<RpcState>> {
 ///         Router::new()
 ///             .merge(health::router())
 ///             .merge(sql::router())
@@ -114,9 +114,9 @@ const LOG: &str = "surrealdb::net";
 /// ```
 ///
 /// [`CommunityComposer`]: surrealdb_core::CommunityComposer
-pub trait RouterFactory {
+pub trait RouterFactory: TransactionBuilderFactory {
 	/// Build and return the base Router. The server will attach shared state and layers.
-	fn configure_router() -> Router<Arc<RpcState>>;
+	fn configure_router(router_state: Self::RouterState) -> Router<Arc<RpcState>>;
 }
 
 /// Default router implementation for the community edition.
@@ -125,7 +125,7 @@ pub trait RouterFactory {
 /// Consumers embedding SurrealDB can implement `RouterFactory` on their own
 /// composer to customize routes.
 impl RouterFactory for CommunityComposer {
-	fn configure_router() -> Router<Arc<RpcState>> {
+	fn configure_router(_router_state: Self::RouterState) -> Router<Arc<RpcState>> {
 		let router = Router::<Arc<RpcState>>::new()
 			// Redirect until we provide a UI
 			.route("/", get(|| async { Redirect::temporary(cnf::APP_ENDPOINT) }))
@@ -293,8 +293,9 @@ impl SurrealRouter {
 		ds: Arc<Datastore>,
 		notifications: Receiver<Notification>,
 		ct: CancellationToken,
+		router_state: F::RouterState,
 	) -> Result<Self> {
-		Self::build_with_metrics::<F>(opt, ds, notifications, ct, None).await
+		Self::build_with_metrics::<F>(opt, ds, notifications, ct, router_state, None).await
 	}
 
 	/// Build a fully-configured [`SurrealRouter`], optionally mounting the
@@ -311,6 +312,7 @@ impl SurrealRouter {
 		ds: Arc<Datastore>,
 		notifications: Receiver<Notification>,
 		ct: CancellationToken,
+		router_state: F::RouterState,
 		metrics: Option<MetricsState>,
 	) -> Result<Self> {
 		let opt = opt.into();
@@ -360,7 +362,7 @@ impl SurrealRouter {
 			AllowOrigin::list(origins)
 		};
 
-		let mut allow_header = vec![
+		let allow_header = vec![
 			header::ACCEPT,
 			header::ACCEPT_ENCODING,
 			header::AUTHORIZATION,
@@ -375,15 +377,19 @@ impl SurrealRouter {
 
 		// MCP protocol headers for cross-origin browser clients
 		#[cfg(feature = "mcp")]
-		let mcp_expose_headers = {
+		let (allow_header, mcp_expose_headers) = {
+			let mut allow_header = allow_header;
 			allow_header.push(http::HeaderName::from_static("mcp-session-id"));
 			allow_header.push(http::HeaderName::from_static("mcp-protocol-version"));
 			allow_header.push(http::HeaderName::from_static("last-event-id"));
 			allow_header.push(http::HeaderName::from_static("x-custom-auth-headers"));
-			vec![
-				http::HeaderName::from_static("mcp-session-id"),
-				http::HeaderName::from_static("mcp-protocol-version"),
-			]
+			(
+				allow_header,
+				vec![
+					http::HeaderName::from_static("mcp-session-id"),
+					http::HeaderName::from_static("mcp-protocol-version"),
+				],
+			)
 		};
 
 		// Clone the community observer once up-front so the RPC state can
@@ -439,7 +445,7 @@ impl SurrealRouter {
 			});
 
 		// Build the route tree from the RouterFactory
-		let axum_app = F::configure_router();
+		let axum_app = F::configure_router(router_state);
 
 		// Optionally merge the `/metrics` endpoint before applying middleware
 		// so it inherits the standard auth/trace layers. The `MetricsState`
@@ -564,8 +570,9 @@ pub async fn init<F: RouterFactory>(
 	ds: Arc<Datastore>,
 	recv: Receiver<Notification>,
 	ct: CancellationToken,
+	router_state: F::RouterState,
 ) -> Result<()> {
-	init_with_metrics::<F>(opt, ds, recv, ct, None).await
+	init_with_metrics::<F>(opt, ds, recv, ct, router_state, None).await
 }
 
 /// Initialize and run the SurrealDB HTTP server with optional Prometheus
@@ -581,10 +588,12 @@ pub async fn init_with_metrics<F: RouterFactory>(
 	ds: Arc<Datastore>,
 	recv: Receiver<Notification>,
 	ct: CancellationToken,
+	router_state: F::RouterState,
 	metrics: Option<MetricsState>,
 ) -> Result<()> {
 	// Build the fully-configured router
-	let surreal = SurrealRouter::build_with_metrics::<F>(opt, ds, recv, ct, metrics).await?;
+	let surreal =
+		SurrealRouter::build_with_metrics::<F>(opt, ds, recv, ct, router_state, metrics).await?;
 
 	// Get a new server handler
 	let handle = Handle::new();

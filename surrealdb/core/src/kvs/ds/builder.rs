@@ -28,7 +28,10 @@ use crate::kvs::cache::ds::DatastoreCache;
 use crate::kvs::index::IndexBuilder;
 use crate::kvs::sequences::Sequences;
 use crate::kvs::slowlog::SlowLog;
-use crate::kvs::{Datastore, TransactionBuilder, TransactionBuilderFactory, TransactionFactory};
+use crate::kvs::{
+	Datastore, TransactionBuilder, TransactionBuilderFactory, TransactionBuilderParts,
+	TransactionFactory,
+};
 use crate::observe::{ExecutionObserver, NoopObserver};
 #[cfg(feature = "surrealism")]
 use crate::surrealism::cache::SurrealismCache;
@@ -168,12 +171,31 @@ impl Builder {
 	where
 		F: TransactionBuilderFactory + BucketStoreProvider + 'static,
 	{
-		let tx_builder = composer
-			.new_transaction_builder(path, self.shutdown.clone(), self.config.clone())
-			.await?;
+		let (datastore, _) = self.build_with_factory_path_and_router_state(path, composer).await?;
+		Ok(datastore)
+	}
+
+	/// Build a datastore and return the router startup state produced by the composer.
+	///
+	/// The datastore owns the transaction builder. The returned router state is
+	/// immutable and must be passed to the matching router factory during server
+	/// startup.
+	pub async fn build_with_factory_path_and_router_state<F>(
+		self,
+		path: &str,
+		composer: F,
+	) -> Result<(Datastore, F::RouterState)>
+	where
+		F: TransactionBuilderFactory + BucketStoreProvider + 'static,
+	{
+		let TransactionBuilderParts {
+			builder,
+			router_state,
+		} = composer.new_transaction_builder(path, self.shutdown.clone(), self.config.clone()).await?;
 		let buckets = BucketsManager::new(Box::new(composer), self.config.load());
 
-		self.build_with_tx_builder_buckets(tx_builder, buckets).await
+		let datastore = self.build_with_tx_builder_buckets(builder, buckets).await?;
+		Ok((datastore, router_state))
 	}
 
 	pub(crate) async fn build_with_tx_builder_buckets(
@@ -225,5 +247,130 @@ impl Builder {
 			observer,
 			config,
 		})
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::fmt::{self, Display};
+	use std::future::Future;
+	use std::pin::Pin;
+	use std::sync::Arc;
+
+	use anyhow::{Result, bail};
+	use tokio_util::sync::CancellationToken;
+
+	use super::Builder;
+	use crate::buc::store::ObjectStore;
+	use crate::buc::{
+		BucketStoreProvider, BucketStoreProviderRequirements, Config as BucketConfig,
+	};
+	use crate::cnf::ConfigMap;
+	use crate::kvs::{
+		Metrics, Transactable, TransactionBuilder, TransactionBuilderFactory,
+		TransactionBuilderFactoryRequirements, TransactionBuilderParts,
+		TransactionBuilderRequirements,
+	};
+
+	#[derive(Clone)]
+	struct TestRouterState(Arc<usize>);
+
+	struct TestComposer {
+		state: TestRouterState,
+	}
+
+	impl BucketStoreProviderRequirements for TestComposer {}
+
+	impl BucketStoreProvider for TestComposer {
+		fn connect<'a>(
+			&self,
+			_url: &'a str,
+			_global: bool,
+			_readonly: bool,
+			_config: BucketConfig,
+		) -> Pin<Box<dyn Future<Output = Result<Arc<dyn ObjectStore>>> + 'a + Send + Sync>> {
+			Box::pin(async { bail!("test bucket connections are not used") })
+		}
+	}
+
+	impl TransactionBuilderFactoryRequirements for TestComposer {}
+
+	#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+	#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+	impl TransactionBuilderFactory for TestComposer {
+		type RouterState = TestRouterState;
+
+		async fn new_transaction_builder(
+			&self,
+			_path: &str,
+			_canceller: CancellationToken,
+			_config: ConfigMap,
+		) -> Result<TransactionBuilderParts<Self::RouterState>> {
+			Ok(TransactionBuilderParts::new(Box::new(TestTransactionBuilder), self.state.clone()))
+		}
+
+		fn path_valid(v: &str) -> Result<String> {
+			Ok(v.to_owned())
+		}
+	}
+
+	struct TestTransactionBuilder;
+
+	impl Display for TestTransactionBuilder {
+		fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+			f.write_str("test")
+		}
+	}
+
+	impl TransactionBuilderRequirements for TestTransactionBuilder {}
+
+	#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+	#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+	impl TransactionBuilder for TestTransactionBuilder {
+		async fn new_transaction(
+			&self,
+			_write: bool,
+			_lock: bool,
+		) -> Result<(Box<dyn Transactable>, bool)> {
+			unreachable!("test does not open transactions")
+		}
+
+		async fn shutdown(&self) -> Result<()> {
+			Ok(())
+		}
+
+		fn register_metrics(&self) -> Option<Metrics> {
+			None
+		}
+
+		fn collect_u64_metric(&self, _metric: &str) -> Option<u64> {
+			None
+		}
+	}
+
+	#[tokio::test]
+	async fn build_with_factory_path_returns_router_state() -> Result<()> {
+		let expected = Arc::new(7);
+		let composer = TestComposer {
+			state: TestRouterState(Arc::clone(&expected)),
+		};
+
+		let (_datastore, router_state) =
+			Builder::new().build_with_factory_path_and_router_state("test:", composer).await?;
+
+		assert!(Arc::ptr_eq(&expected, &router_state.0));
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn build_with_factory_path_keeps_legacy_shape() -> Result<()> {
+		let composer = TestComposer {
+			state: TestRouterState(Arc::new(7)),
+		};
+
+		let datastore = Builder::new().build_with_factory_path("test:", composer).await?;
+
+		assert_eq!(datastore.to_string(), "test");
+		Ok(())
 	}
 }

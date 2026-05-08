@@ -752,7 +752,7 @@ pub async fn init<C: TransactionBuilderFactory + BucketStoreProvider>(
 		no_defaults,
 		lazy_surrealism,
 	}: StartCommandDbsOptions,
-) -> Result<(Datastore, Receiver<Notification>)> {
+) -> Result<(Datastore, Receiver<Notification>, C::RouterState)> {
 	// Warn about the strict mode flag being unused.
 	if let Some(true) = strict_mode {
 		warn!(
@@ -820,7 +820,8 @@ pub async fn init<C: TransactionBuilderFactory + BucketStoreProvider>(
 	#[cfg(feature = "surrealism")]
 	let builder = builder.with_lazy_surrealism(lazy_surrealism);
 
-	let dbs = builder.build_with_factory_path::<C>(&opt.path, composer).await?;
+	let (dbs, router_state) =
+		builder.build_with_factory_path_and_router_state::<C>(&opt.path, composer).await?;
 	// Ensure the storage version is up to date to prevent corruption.
 	// OutdatedStorageVersion is a permanent condition (the data on disk is from
 	// an older version), so retrying it would waste time and delay pod restarts
@@ -878,7 +879,7 @@ pub async fn init<C: TransactionBuilderFactory + BucketStoreProvider>(
 	})
 	.await?;
 	// All ok
-	Ok((dbs, recv))
+	Ok((dbs, recv, router_state))
 }
 
 #[cfg(test)]

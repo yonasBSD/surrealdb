@@ -270,7 +270,7 @@ pub async fn init<
 		spawn_process_snapshot_refresh(canceller.clone());
 	}
 	// Start the datastore
-	let (datastore, recv) =
+	let (datastore, recv, router_state) =
 		dbs::init::<C>(composer, &config, canceller.clone(), combined_observer, dbs).await?;
 	let datastore = Arc::new(datastore);
 	// Eagerly load surrealism modules in the background unless opted out
@@ -293,8 +293,15 @@ pub async fn init<
 	// Start the node agent
 	let nodetasks = tasks::init(datastore.clone(), canceller.clone(), &config.engine);
 	// Build and run the HTTP server using the provided RouterFactory implementation
-	ntw::init_with_metrics::<C>(&config, datastore.clone(), recv, canceller.clone(), metrics_state)
-		.await?;
+	ntw::init_with_metrics::<C>(
+		&config,
+		datastore.clone(),
+		recv,
+		canceller.clone(),
+		router_state,
+		metrics_state,
+	)
+	.await?;
 	// Shutdown and stop closed tasks
 	canceller.cancel();
 	// Wait for background tasks to finish

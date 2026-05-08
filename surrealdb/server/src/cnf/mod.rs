@@ -95,6 +95,7 @@ pub static HTTP_MAX_IMPORT_BODY_SIZE: LazyLock<usize> =
 /// handshakes, tool calls with structured parameter objects) without
 /// allowing a malicious client to allocate unbounded memory before the
 /// MCP layer's per-tool argument and key caps kick in.
+#[cfg(feature = "mcp")]
 pub static HTTP_MAX_MCP_BODY_SIZE: LazyLock<usize> =
 	lazy_env_parse!(bytes, "SURREAL_HTTP_MAX_MCP_BODY_SIZE", usize, 4 << 20);
 

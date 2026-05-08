@@ -403,6 +403,35 @@ pub trait TransactionBuilder: TransactionBuilderRequirements {
 	fn collect_u64_metric(&self, metric: &str) -> Option<u64>;
 }
 
+/// Transaction-builder construction result with router startup state.
+///
+/// The datastore consumes `builder`; server startup threads `router_state` into
+/// the router factory so embedders can make immutable handles available to
+/// their HTTP routes without process globals.
+pub struct TransactionBuilderParts<S> {
+	/// Transaction builder consumed by the datastore.
+	pub builder: Box<dyn TransactionBuilder>,
+	/// Immutable router startup state produced by the composer.
+	pub router_state: S,
+}
+
+impl<S> TransactionBuilderParts<S> {
+	/// Construct transaction-builder parts with router startup state.
+	pub fn new(builder: Box<dyn TransactionBuilder>, router_state: S) -> Self {
+		Self {
+			builder,
+			router_state,
+		}
+	}
+}
+
+impl TransactionBuilderParts<()> {
+	/// Construct transaction-builder parts for composers without router state.
+	pub fn without_router_state(builder: Box<dyn TransactionBuilder>) -> Self {
+		Self::new(builder, ())
+	}
+}
+
 #[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 /// Factory that parses a datastore path and returns a concrete `TransactionBuilder`.
@@ -414,6 +443,9 @@ pub trait TransactionBuilder: TransactionBuilderRequirements {
 /// The `path_valid` helper is used by the CLI to validate the path early and
 /// provide better error messages before starting the runtime.
 pub trait TransactionBuilderFactory: TransactionBuilderFactoryRequirements {
+	/// Immutable state threaded into router construction after datastore startup.
+	type RouterState: Clone + Send + Sync + 'static;
+
 	/// Create a new transaction builder for the datastore.
 	///
 	/// # Parameters
@@ -424,7 +456,7 @@ pub trait TransactionBuilderFactory: TransactionBuilderFactoryRequirements {
 		path: &str,
 		canceller: CancellationToken,
 		config: ConfigMap,
-	) -> Result<Box<dyn TransactionBuilder>>;
+	) -> Result<TransactionBuilderParts<Self::RouterState>>;
 
 	/// Validate a datastore path string.
 	fn path_valid(v: &str) -> Result<String>;
@@ -464,13 +496,15 @@ impl TransactionBuilderFactoryRequirements for CommunityComposer {}
 #[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl TransactionBuilderFactory for CommunityComposer {
+	type RouterState = ();
+
 	#[allow(unused_variables)]
 	async fn new_transaction_builder(
 		&self,
 		path: &str,
 		_canceller: CancellationToken,
 		config: ConfigMap,
-	) -> Result<Box<dyn TransactionBuilder>> {
+	) -> Result<TransactionBuilderParts<Self::RouterState>> {
 		// Extract query parameters from the path before scheme extraction
 		let (raw_path, config_string) = match path.split_once('?') {
 			Some((p, q)) => (p, Some(q)),
@@ -524,7 +558,9 @@ impl TransactionBuilderFactory for CommunityComposer {
 					// Initialise the storage engine
 					let v = super::mem::Datastore::new(config).await.map(DatastoreFlavor::Mem)?;
 					info!(target: TARGET, "Started kvs store in {flavour}");
-					Ok(Box::<DatastoreFlavor>::new(v))
+					Ok(TransactionBuilderParts::without_router_state(Box::<DatastoreFlavor>::new(
+						v,
+					)))
 				}
 				#[cfg(not(feature = "kv-mem"))]
 				bail!(Error::Kvs(crate::kvs::Error::Datastore("Cannot connect to the `memory` storage engine as it is not enabled in this build of SurrealDB".to_owned())));
@@ -542,7 +578,9 @@ impl TransactionBuilderFactory for CommunityComposer {
 						.await
 						.map(DatastoreFlavor::RocksDB)?;
 					info!(target: TARGET, "Started {flavour} kvs store");
-					Ok(Box::<DatastoreFlavor>::new(v))
+					Ok(TransactionBuilderParts::without_router_state(Box::<DatastoreFlavor>::new(
+						v,
+					)))
 				}
 				#[cfg(not(feature = "kv-rocksdb"))]
 				bail!(Error::Kvs(crate::kvs::Error::Datastore("Cannot connect to the `rocksdb` storage engine as it is not enabled in this build of SurrealDB".to_owned())));
@@ -560,7 +598,9 @@ impl TransactionBuilderFactory for CommunityComposer {
 						.await
 						.map(DatastoreFlavor::SurrealKV)?;
 					info!(target: TARGET, "Started {flavour} kvs store");
-					Ok(Box::<DatastoreFlavor>::new(v))
+					Ok(TransactionBuilderParts::without_router_state(Box::<DatastoreFlavor>::new(
+						v,
+					)))
 				}
 				#[cfg(not(feature = "kv-surrealkv"))]
 				bail!(Error::Kvs(crate::kvs::Error::Datastore("Cannot connect to the `surrealkv` storage engine as it is not enabled in this build of SurrealDB".to_owned())));
@@ -572,7 +612,9 @@ impl TransactionBuilderFactory for CommunityComposer {
 					let v =
 						super::indxdb::Datastore::new(&path).await.map(DatastoreFlavor::IndxDB)?;
 					info!(target: TARGET, "Started {flavour} kvs store");
-					Ok(Box::<DatastoreFlavor>::new(v))
+					Ok(TransactionBuilderParts::without_router_state(Box::<DatastoreFlavor>::new(
+						v,
+					)))
 				}
 				#[cfg(not(feature = "kv-indxdb"))]
 				bail!(Error::Kvs(crate::kvs::Error::Datastore("Cannot connect to the `indxdb` storage engine as it is not enabled in this build of SurrealDB".to_owned())));
@@ -583,7 +625,9 @@ impl TransactionBuilderFactory for CommunityComposer {
 				{
 					let v = super::tikv::Datastore::new(&path).await.map(DatastoreFlavor::TiKV)?;
 					info!(target: TARGET, "Started {flavour} kvs store");
-					Ok(Box::<DatastoreFlavor>::new(v))
+					Ok(TransactionBuilderParts::without_router_state(Box::<DatastoreFlavor>::new(
+						v,
+					)))
 				}
 				#[cfg(not(feature = "kv-tikv"))]
 				bail!(Error::Kvs(crate::kvs::Error::Datastore("Cannot connect to the `tikv` storage engine as it is not enabled in this build of SurrealDB".to_owned())));

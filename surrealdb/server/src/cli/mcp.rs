@@ -123,7 +123,7 @@ pub async fn init<
 	);
 
 	let canceller = CancellationToken::new();
-	let (datastore, _recv) =
+	let (datastore, _recv, _router_state) =
 		dbs::init::<C>(composer, &config, canceller.clone(), observer, dbs_opts).await?;
 	let datastore = Arc::new(datastore);
 
