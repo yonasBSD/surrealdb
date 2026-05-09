@@ -73,9 +73,12 @@ impl Accumulator for TimeMinAccumulator {
 	}
 
 	fn finalize(&self) -> Result<Value> {
+		// Streaming executor only. The materialised-view path
+		// (`catalog/aggregation.rs`) still emits `Datetime::MAX_UTC` for empty
+		// groups; aligning it requires bumping `AggregationStat`'s revision.
 		match &self.min {
 			Some(d) => Ok(Value::Datetime(d.clone())),
-			None => Ok(Value::Datetime(Datetime::MAX_UTC)),
+			None => Ok(Value::None),
 		}
 	}
 
@@ -157,9 +160,12 @@ impl Accumulator for TimeMaxAccumulator {
 	}
 
 	fn finalize(&self) -> Result<Value> {
+		// Streaming executor only. The materialised-view path
+		// (`catalog/aggregation.rs`) still emits `Datetime::MIN_UTC` for empty
+		// groups; aligning it requires bumping `AggregationStat`'s revision.
 		match &self.max {
 			Some(d) => Ok(Value::Datetime(d.clone())),
-			None => Ok(Value::Datetime(Datetime::MIN_UTC)),
+			None => Ok(Value::None),
 		}
 	}
 
@@ -208,7 +214,7 @@ mod tests {
 		let func = TimeMin;
 		let acc = func.create_accumulator();
 		let result = acc.finalize().unwrap();
-		assert_eq!(*as_datetime(&result), Datetime::MAX_UTC);
+		assert_eq!(result, Value::None);
 	}
 
 	#[test]
@@ -265,6 +271,31 @@ mod tests {
 	}
 
 	#[test]
+	fn time_min_merge_into_empty() {
+		// Exercise the `self.min == None, other.min == Some` branch of merge.
+		let func = TimeMin;
+		let mut acc1 = func.create_accumulator();
+
+		let mut acc2 = func.create_accumulator();
+		let dt = make_datetime(2024, 1, 1);
+		acc2.update(Value::Datetime(dt.clone())).unwrap();
+
+		acc1.merge(acc2).unwrap();
+		let result = acc1.finalize().unwrap();
+		assert_eq!(*as_datetime(&result), dt);
+	}
+
+	#[test]
+	fn time_min_merge_both_empty() {
+		let func = TimeMin;
+		let mut acc1 = func.create_accumulator();
+		let acc2 = func.create_accumulator();
+		acc1.merge(acc2).unwrap();
+		let result = acc1.finalize().unwrap();
+		assert_eq!(result, Value::None);
+	}
+
+	#[test]
 	fn time_min_reset() {
 		let func = TimeMin;
 		let mut acc = func.create_accumulator();
@@ -272,7 +303,20 @@ mod tests {
 		acc.update(Value::Datetime(dt)).unwrap();
 		acc.reset();
 		let result = acc.finalize().unwrap();
-		assert_eq!(*as_datetime(&result), Datetime::MAX_UTC);
+		assert_eq!(result, Value::None);
+	}
+
+	#[test]
+	fn time_min_skips_non_datetime() {
+		// Type-mismatched values (including arrays) are silently skipped,
+		// matching how `math::*` aggregators handle non-numbers. The group
+		// then finalizes to NONE.
+		let func = TimeMin;
+		let mut acc = func.create_accumulator();
+		acc.update(Value::Array(Default::default())).unwrap();
+		acc.update(Value::None).unwrap();
+		let result = acc.finalize().unwrap();
+		assert_eq!(result, Value::None);
 	}
 
 	// -------------------------------------------------------------------------
@@ -284,7 +328,7 @@ mod tests {
 		let func = TimeMax;
 		let acc = func.create_accumulator();
 		let result = acc.finalize().unwrap();
-		assert_eq!(*as_datetime(&result), Datetime::MIN_UTC);
+		assert_eq!(result, Value::None);
 	}
 
 	#[test]
@@ -341,6 +385,31 @@ mod tests {
 	}
 
 	#[test]
+	fn time_max_merge_into_empty() {
+		// Exercise the `self.max == None, other.max == Some` branch of merge.
+		let func = TimeMax;
+		let mut acc1 = func.create_accumulator();
+
+		let mut acc2 = func.create_accumulator();
+		let dt = make_datetime(2024, 12, 31);
+		acc2.update(Value::Datetime(dt.clone())).unwrap();
+
+		acc1.merge(acc2).unwrap();
+		let result = acc1.finalize().unwrap();
+		assert_eq!(*as_datetime(&result), dt);
+	}
+
+	#[test]
+	fn time_max_merge_both_empty() {
+		let func = TimeMax;
+		let mut acc1 = func.create_accumulator();
+		let acc2 = func.create_accumulator();
+		acc1.merge(acc2).unwrap();
+		let result = acc1.finalize().unwrap();
+		assert_eq!(result, Value::None);
+	}
+
+	#[test]
 	fn time_max_reset() {
 		let func = TimeMax;
 		let mut acc = func.create_accumulator();
@@ -348,6 +417,16 @@ mod tests {
 		acc.update(Value::Datetime(dt)).unwrap();
 		acc.reset();
 		let result = acc.finalize().unwrap();
-		assert_eq!(*as_datetime(&result), Datetime::MIN_UTC);
+		assert_eq!(result, Value::None);
+	}
+
+	#[test]
+	fn time_max_skips_non_datetime() {
+		let func = TimeMax;
+		let mut acc = func.create_accumulator();
+		acc.update(Value::Array(Default::default())).unwrap();
+		acc.update(Value::None).unwrap();
+		let result = acc.finalize().unwrap();
+		assert_eq!(result, Value::None);
 	}
 }

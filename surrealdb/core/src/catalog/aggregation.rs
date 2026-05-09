@@ -455,7 +455,11 @@ pub fn create_field_document(group: &[Value], stats: &[AggregationStat]) -> Obje
 				count,
 				..
 			} => {
-				let num = if *count <= 1 {
+				// Match the scalar `math::stddev` and the streaming aggregator:
+				// NaN for an empty group, 0 for a single element.
+				let num = if *count == 0 {
+					Number::from(f64::NAN)
+				} else if *count == 1 {
 					Number::from(0.0)
 				} else {
 					let mean = *sum / Number::from(*count);
@@ -474,7 +478,11 @@ pub fn create_field_document(group: &[Value], stats: &[AggregationStat]) -> Obje
 				count,
 				..
 			} => {
-				let num = if *count <= 1 {
+				// Match the scalar `math::variance` and the streaming aggregator:
+				// NaN for an empty group, 0 for a single element.
+				let num = if *count == 0 {
+					Number::from(f64::NAN)
+				} else if *count == 1 {
 					Number::from(0.0)
 				} else {
 					let mean = *sum / Number::from(*count);
