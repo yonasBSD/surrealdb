@@ -472,7 +472,7 @@ impl DefineTableStatement {
 						right: Box::new(Expr::Literal(Literal::Integer(2))),
 					};
 					FunctionCall {
-						receiver: Function::Normal("count".to_string()),
+						receiver: Function::Normal("math::sum".to_string()),
 						arguments: vec![expr],
 					}
 				}
@@ -675,14 +675,14 @@ impl DefineTableStatement {
 						});
 					}
 					Aggregation::DatetimeMin(arg) => {
-						let idx = required_values[&SelectAggr::Base(Aggregation::DatetimeMax(arg))];
+						let idx = required_values[&SelectAggr::Base(Aggregation::DatetimeMin(arg))];
 						let Value::Datetime(d) = &aggregate_stats[idx] else {
 							fail!("initial select statement did not return the right value")
 						};
 
-						stats.push(AggregationStat::TimeMax {
+						stats.push(AggregationStat::TimeMin {
 							arg,
-							max: d.clone(),
+							min: d.clone(),
 						});
 					}
 					Aggregation::StdDev(arg) => {
