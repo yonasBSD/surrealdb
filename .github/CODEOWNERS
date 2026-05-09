@@ -28,6 +28,7 @@ deny.toml @surrealdb/security
 # Code for fuzzing configuration
 /fuzz/ @surrealdb/security
 SECURITY.md @surrealdb/security
+SECURITY_GUIDE.md @surrealdb/security
 
 # AI instruction files (attack surface for prompt injection via PRs)
 CLAUDE.md @surrealdb/security

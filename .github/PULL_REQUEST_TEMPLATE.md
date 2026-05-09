@@ -36,6 +36,8 @@ No details provided.
 - Could error messages or logs expose internal details?
 - Are resource limits enforced for any new user-controlled operations?
 
+See SECURITY_GUIDE.md for the security invariants reviewers will check.
+
 If there are no security implications, briefly state why (e.g. "documentation-only change").
 If there are security implications, or you're uncertain, please assign the `security-review` label to this PR
 and request a security review by a member of the @surrealdb/security team. -->
