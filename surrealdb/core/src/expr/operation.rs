@@ -54,7 +54,16 @@ pub(crate) enum Operation {
 impl Operation {
 	/// Converts a value to a JSON path.
 	fn value_to_jsonpath(val: &Value) -> Vec<Strand> {
-		val.to_raw_string().trim_start_matches('/').split(&['.', '/']).map(Strand::from).collect()
+		// Per RFC 6901, an empty JSON Pointer ("") refers to the root document.
+		// Splitting an empty string would produce `[Strand("")]` rather than the
+		// empty `Vec` round-trip target of `path_to_jsonpath(&[])`.
+		let raw = val.to_raw_string();
+		let trimmed = raw.trim_start_matches('/');
+		if trimmed.is_empty() {
+			Vec::new()
+		} else {
+			trimmed.split(&['.', '/']).map(Strand::from).collect()
+		}
 	}
 
 	/// Converts the operation to a JSON patch object.
@@ -286,6 +295,34 @@ mod tests {
 		});
 		roundtrip(&Operation::Test {
 			path,
+			value,
+		});
+	}
+
+	#[test]
+	fn round_trip_root_path() {
+		// Empty path Vec must round-trip through the JSON Patch object form,
+		// otherwise diff/patch silently no-ops on top-level scalars (issue 7239).
+		let empty: Vec<Strand> = Vec::new();
+		let value = Value::from("Hello there!");
+
+		roundtrip(&Operation::Add {
+			path: empty.clone(),
+			value: value.clone(),
+		});
+		roundtrip(&Operation::Remove {
+			path: empty.clone(),
+		});
+		roundtrip(&Operation::Replace {
+			path: empty.clone(),
+			value: value.clone(),
+		});
+		roundtrip(&Operation::Change {
+			path: empty.clone(),
+			value: value.clone(),
+		});
+		roundtrip(&Operation::Test {
+			path: empty,
 			value,
 		});
 	}

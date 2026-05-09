@@ -151,4 +151,50 @@ mod tests {
 		let res = Operation::value_to_operations(res).unwrap();
 		assert_eq!(res, old.diff(&now));
 	}
+
+	#[test]
+	fn diff_change_text_root() {
+		// Issue 7239: diffing two strings at the root must emit an empty path,
+		// which serializes to "" (RFC 6901 root pointer).
+		let old = parse_val!("'test'");
+		let now = parse_val!("'text'");
+		let ops = old.diff(&now);
+		assert_eq!(ops.len(), 1);
+		match &ops[0] {
+			Operation::Change {
+				path,
+				value: _,
+			} => {
+				assert!(path.is_empty(), "expected empty path, got {path:?}");
+			}
+			other => panic!("expected Operation::Change, got {other:?}"),
+		}
+		// Verify the JSON Patch serialization produces path "".
+		let patch = Operation::operations_to_value(ops);
+		let expected =
+			parse_val!("[{ op: 'change', path: '', value: '@@ -1,4 +1,4 @@\n te\n-s\n+x\n t\n' }]");
+		assert_eq!(patch, expected);
+	}
+
+	#[test]
+	fn diff_replace_root() {
+		// Issue 7239: diffing two non-string scalars at the root must emit
+		// an Operation::Replace with an empty path.
+		let old = parse_val!("1");
+		let now = parse_val!("2");
+		let ops = old.diff(&now);
+		assert_eq!(ops.len(), 1);
+		match &ops[0] {
+			Operation::Replace {
+				path,
+				value: _,
+			} => {
+				assert!(path.is_empty(), "expected empty path, got {path:?}");
+			}
+			other => panic!("expected Operation::Replace, got {other:?}"),
+		}
+		let patch = Operation::operations_to_value(ops);
+		let expected = parse_val!("[{ op: 'replace', path: '', value: 2 }]");
+		assert_eq!(patch, expected);
+	}
 }

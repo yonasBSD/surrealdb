@@ -165,6 +165,7 @@ impl Value {
 
 #[cfg(test)]
 mod tests {
+	use crate::expr::Operation;
 	use crate::syn;
 
 	macro_rules! parse_val {
@@ -336,5 +337,42 @@ mod tests {
 		assert!(val.patch(ops).is_err());
 		// It is important to test if patches applied even if test operation fails
 		assert_eq!(val, should);
+	}
+
+	#[tokio::test]
+	async fn patch_change_root() {
+		// Issue 7239: empty-path patch ops must target the root value.
+		let mut val = parse_val!("'Hello'");
+		let ops = parse_val!(
+			"[{ op: 'change', path: '', value: '@@ -1,5 +1,12 @@\n Hello\n+ there!\n' }]"
+		);
+		val.patch(ops).unwrap();
+		assert_eq!(val, parse_val!("'Hello there!'"));
+	}
+
+	#[tokio::test]
+	async fn patch_replace_root() {
+		let mut val = parse_val!("1");
+		let ops = parse_val!("[{ op: 'replace', path: '', value: 2 }]");
+		val.patch(ops).unwrap();
+		assert_eq!(val, parse_val!("2"));
+	}
+
+	#[tokio::test]
+	async fn patch_diff_roundtrip_string_root() {
+		let mut start = parse_val!("'Hello'");
+		let after = parse_val!("'Hello there!'");
+		let ops = Operation::operations_to_value(start.diff(&after));
+		start.patch(ops).unwrap();
+		assert_eq!(start, after);
+	}
+
+	#[tokio::test]
+	async fn patch_diff_roundtrip_number_root() {
+		let mut start = parse_val!("1");
+		let after = parse_val!("2");
+		let ops = Operation::operations_to_value(start.diff(&after));
+		start.patch(ops).unwrap();
+		assert_eq!(start, after);
 	}
 }
