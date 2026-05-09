@@ -239,30 +239,11 @@ impl Document {
 		// First of all, let's check to see if the WHERE
 		// clause of the LIVE query is matched by this
 		// document. If it is then we can continue.
-		match self.lq_check(stk, &ctx, &opt, &live_subscription, &doc).await {
+		let lq_check_result = match self.lq_check(stk, &ctx, &opt, &live_subscription, &doc).await {
 			Err(IgnoreError::Ignore) => return Ok(()),
-			Err(IgnoreError::Error(e)) => {
-				// The WHERE clause raised an evaluation error (e.g. InvalidFunctionArguments,
-				// THROW). Surface it to the subscriber as an Action::Error notification so
-				// they can diagnose the broken query rather than silently receiving nothing.
-				// We still return Ok(()) to avoid aborting the triggering write transaction.
-				if let Ok(rid_public) =
-					convert_value_to_public_value(Value::RecordId(rid.as_ref().clone()))
-				{
-					sender
-						.send(PublicNotification::new(
-							live_subscription.id.into(),
-							session_id,
-							PublicAction::Error,
-							rid_public,
-							PublicValue::String(e.to_string()),
-						))
-						.await;
-				}
-				return Ok(());
-			}
-			Ok(_) => (),
-		}
+			Err(IgnoreError::Error(e)) => Err(e),
+			Ok(_) => Ok(()),
+		};
 		// Secondly, let's check to see if any PERMISSIONS
 		// clause for this table allows this document to
 		// be viewed by the user who created this LIVE
@@ -273,6 +254,26 @@ impl Document {
 			Ok(_) => (),
 		}
 		if !sender.can_be_sent(ctx.node_id(), &live_subscription)? {
+			return Ok(());
+		}
+		if let Err(e) = lq_check_result {
+			// The WHERE clause raised an evaluation error (e.g. InvalidFunctionArguments,
+			// THROW). Surface it to the subscriber as an Action::Error notification so
+			// they can diagnose the broken query rather than silently receiving nothing.
+			// We still return Ok(()) to avoid aborting the triggering write transaction.
+			if let Ok(rid_public) =
+				convert_value_to_public_value(Value::RecordId(rid.as_ref().clone()))
+			{
+				sender
+					.send(PublicNotification::new(
+						live_subscription.id.into(),
+						session_id,
+						PublicAction::Error,
+						rid_public,
+						PublicValue::String(e.to_string()),
+					))
+					.await;
+			}
 			return Ok(());
 		}
 		// Let's check what type of statement
