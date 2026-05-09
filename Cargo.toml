@@ -431,6 +431,15 @@ large_types_passed_by_value = "warn"
 # https://rust-lang.github.io/rust-clippy/master/#lossy_float_literal
 lossy_float_literal = "warn"
 
+# Checks for usage of Mutex<X> where an atomic will do.
+# https://rust-lang.github.io/rust-clippy/master/#mutex_atomic
+mutex_atomic = "warn"
+
+# Checks for functions taking arguments by value where the argument could be
+# borrowed (i.e. the body only needs `&T`).
+# https://rust-lang.github.io/rust-clippy/master/#needless_pass_by_value
+needless_pass_by_value = "warn"
+
 # Checks for binding to underscore prefixed variable without side-effects.
 # https://rust-lang.github.io/rust-clippy/master/index.html#no_effect_underscore_binding
 no_effect_underscore_binding = "warn"

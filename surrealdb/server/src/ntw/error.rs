@@ -146,19 +146,19 @@ impl IntoResponse for ResponseError {
 
 		// Check for surrealdb_types::Error
 		let err = match err.downcast::<surrealdb_types::Error>() {
-			Ok(e) => return types_error_into_response(e),
+			Ok(e) => return types_error_into_response(&e),
 			Err(e) => e,
 		};
 
 		// Convert via core downcast (handles core::err::Error internally)
 		// or fall back to anyhow chain preservation.
-		types_error_into_response(anyhow_to_types_error(err))
+		types_error_into_response(&anyhow_to_types_error(err))
 	}
 }
 
 /// Map a structured [`surrealdb_types::Error`] to an HTTP response with the appropriate status
 /// code based on the error kind and details.
-fn types_error_into_response(e: surrealdb_types::Error) -> Response {
+fn types_error_into_response(e: &surrealdb_types::Error) -> Response {
 	if e.is_not_allowed() {
 		let (code, details, description, information) = match e.not_allowed_details() {
 			Some(NotAllowedError::Auth(AuthError::InvalidAuth))

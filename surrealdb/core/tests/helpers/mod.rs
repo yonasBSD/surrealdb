@@ -444,7 +444,7 @@ impl Test {
 	/// Compliant with NaN and Constants.
 	#[track_caller]
 	#[allow(dead_code)]
-	pub fn expect_value_info<I: Display>(&mut self, val: Value, info: I) -> Result<&mut Self> {
+	pub fn expect_value_info<I: Display>(&mut self, val: &Value, info: I) -> Result<&mut Self> {
 		let tmp = self.next_value()?;
 		// Then check they are indeed the same values
 		//
@@ -472,7 +472,7 @@ impl Test {
 
 	#[track_caller]
 	#[allow(dead_code)]
-	pub fn expect_value(&mut self, val: Value) -> Result<&mut Self> {
+	pub fn expect_value(&mut self, val: &Value) -> Result<&mut Self> {
 		self.expect_value_info(val, "")
 	}
 
@@ -482,7 +482,7 @@ impl Test {
 	#[allow(dead_code)]
 	pub fn expect_values(&mut self, values: &[Value]) -> Result<&mut Self> {
 		for value in values {
-			self.expect_value(value.clone())?;
+			self.expect_value(value)?;
 		}
 		Ok(self)
 	}
@@ -498,7 +498,7 @@ impl Test {
 	#[allow(dead_code)]
 	pub fn expect_val_info<I: Display>(&mut self, val: &str, info: I) -> Result<&mut Self> {
 		self.expect_value_info(
-			syn::value(val).unwrap_or_else(|e| panic!("INVALID VALUE {e}\n\n{info}:\n{val}")),
+			&syn::value(val).unwrap_or_else(|e| panic!("INVALID VALUE {e}\n\n{info}:\n{val}")),
 			info,
 		)
 	}
@@ -606,6 +606,6 @@ impl Test {
 	) -> Result<&mut Self> {
 		let val: Vec<u8> = val.into();
 		let val = Value::Bytes(val.into());
-		self.expect_value_info(val, info)
+		self.expect_value_info(&val, info)
 	}
 }

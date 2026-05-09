@@ -147,7 +147,7 @@ impl Function {
 				let result =
 					stk.run(|stk| val.block.compute(stk, &ctx, &opt, doc)).await.catch_return()?;
 				// Validate the return value
-				validate_return(name, val.returns.as_ref(), result)
+				validate_return(name.as_str(), val.returns.as_ref(), result)
 			}
 			Function::Module(module, sub) => {
 				let mod_name = format!("mod::{module}");
@@ -177,7 +177,7 @@ impl Function {
 				let result = executable.run(stk, ctx, opt, doc, args, sub.as_deref()).await?;
 
 				// Validate the return value
-				validate_return(fnc_name, signature.returns.as_ref(), result)
+				validate_return(fnc_name.as_str(), signature.returns.as_ref(), result)
 			}
 			Function::Silo {
 				org,
@@ -214,7 +214,7 @@ impl Function {
 				let result = executable.run(stk, ctx, opt, doc, args, sub.as_deref()).await?;
 
 				// Validate the return value
-				validate_return(fnc_name, signature.returns.as_ref(), result)
+				validate_return(fnc_name.as_str(), signature.returns.as_ref(), result)
 			}
 		}
 	}
@@ -329,12 +329,12 @@ fn validate_args(name: &str, args: &[Value], sig: &[Kind]) -> FlowResult<()> {
 	Ok(())
 }
 
-fn validate_return(name: String, return_kind: Option<&Kind>, result: Value) -> FlowResult<Value> {
+fn validate_return(name: &str, return_kind: Option<&Kind>, result: Value) -> FlowResult<Value> {
 	match return_kind {
 		Some(kind) => result
 			.coerce_to_kind(kind)
 			.map_err(|e| Error::ReturnCoerce {
-				name: name.clone(),
+				name: name.to_string(),
 				error: Box::new(e),
 			})
 			.map_err(anyhow::Error::new)

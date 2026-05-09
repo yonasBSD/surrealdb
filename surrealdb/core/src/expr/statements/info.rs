@@ -64,14 +64,14 @@ impl InfoStatement {
 				// Create the result set
 				if *structured {
 					let object = map! {
-						"accesses" => process(txn.all_root_accesses(version).await?),
+						"accesses" => process(&txn.all_root_accesses(version).await?),
 						"defaults" => txn.get_default_config().await?
 							.map(|x| x.as_ref().clone().structure())
 							.unwrap_or_else(|| Value::Object(Default::default())),
-						"namespaces" => process(txn.all_ns(version).await?),
-						"nodes" => process(txn.all_nodes().await?),
+						"namespaces" => process(&txn.all_ns(version).await?),
+						"nodes" => process(&txn.all_nodes().await?),
 						"system" => system().await,
-						"users" => process(txn.all_root_users(version).await?),
+						"users" => process(&txn.all_root_users(version).await?),
 						"config" => ctx.dynamic_configuration().clone().structure()
 					};
 					Ok(Value::Object(Object::from(object)))
@@ -137,9 +137,9 @@ impl InfoStatement {
 				// Create the result set
 				if *structured {
 					let object = map! {
-						"accesses" => process(txn.all_ns_accesses(ns, version).await?),
-						"databases" => process(txn.all_db(ns, version).await?),
-						"users" => process(txn.all_ns_users(ns, version).await?),
+						"accesses" => process(&txn.all_ns_accesses(ns, version).await?),
+						"databases" => process(&txn.all_db(ns, version).await?),
+						"users" => process(&txn.all_ns_users(ns, version).await?),
 					};
 					Ok(Value::Object(Object::from(object)))
 				} else {
@@ -190,18 +190,18 @@ impl InfoStatement {
 				// Create the result set
 				let res = if *structured {
 					let object = map! {
-						"accesses" => process(txn.all_db_accesses(ns, db, version).await?),
-						"apis" => process(txn.all_db_apis(ns, db, version).await?),
-						"analyzers" => process(txn.all_db_analyzers(ns, db, version).await?),
-						"buckets" => process(txn.all_db_buckets(ns, db, version).await?),
-						"functions" => process(txn.all_db_functions(ns, db, version).await?),
+						"accesses" => process(&txn.all_db_accesses(ns, db, version).await?),
+						"apis" => process(&txn.all_db_apis(ns, db, version).await?),
+						"analyzers" => process(&txn.all_db_analyzers(ns, db, version).await?),
+						"buckets" => process(&txn.all_db_buckets(ns, db, version).await?),
+						"functions" => process(&txn.all_db_functions(ns, db, version).await?),
 						"modules" => process_modules(ctx, ns, db, txn.all_db_modules(ns, db, version).await?).await,
-						"models" => process(txn.all_db_models(ns, db, version).await?),
-						"params" => process(txn.all_db_params(ns, db, version).await?),
-						"tables" => process(txn.all_tb(ns, db, version).await?),
-						"users" => process(txn.all_db_users(ns, db, version).await?),
-						"configs" => process(txn.all_db_configs(ns, db, version).await?),
-						"sequences" => process(txn.all_db_sequences(ns, db, version).await?),
+						"models" => process(&txn.all_db_models(ns, db, version).await?),
+						"params" => process(&txn.all_db_params(ns, db, version).await?),
+						"tables" => process(&txn.all_tb(ns, db, version).await?),
+						"users" => process(&txn.all_db_users(ns, db, version).await?),
+						"configs" => process(&txn.all_db_configs(ns, db, version).await?),
+						"sequences" => process(&txn.all_db_sequences(ns, db, version).await?),
 					};
 					Value::Object(Object::from(object))
 				} else {
@@ -318,11 +318,11 @@ impl InfoStatement {
 				// Create the result set
 				Ok(if *structured {
 					Value::from(map! {
-						"events" => process(txn.all_tb_events(ns, db, &tb, version).await?),
-						"fields" => process(txn.all_tb_fields(ns, db, &tb, version).await?),
-						"indexes" => process(txn.all_tb_indexes(ns, db, &tb, version).await?),
-						"lives" => process(txn.all_tb_lives(ns, db, &tb, version).await?),
-						"tables" => process(txn.all_tb_views(ns, db, &tb, version).await?),
+						"events" => process(&txn.all_tb_events(ns, db, &tb, version).await?),
+						"fields" => process(&txn.all_tb_fields(ns, db, &tb, version).await?),
+						"indexes" => process(&txn.all_tb_indexes(ns, db, &tb, version).await?),
+						"lives" => process(&txn.all_tb_lives(ns, db, &tb, version).await?),
+						"tables" => process(&txn.all_tb_views(ns, db, &tb, version).await?),
 					})
 				} else {
 					Value::from(map! {
@@ -443,7 +443,7 @@ pub(crate) trait InfoStructure {
 	fn structure(self) -> Value;
 }
 
-fn process<T>(a: Arc<[T]>) -> Value
+fn process<T>(a: &Arc<[T]>) -> Value
 where
 	T: InfoStructure + Clone,
 {

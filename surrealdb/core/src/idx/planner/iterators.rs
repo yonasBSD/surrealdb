@@ -1243,8 +1243,8 @@ impl UniqueRangeThingIterator {
 		ns: NamespaceId,
 		db: DatabaseId,
 		ix: &IndexDefinition,
-		from: RangeValue,
-		to: RangeValue,
+		from: &RangeValue,
+		to: &RangeValue,
 	) -> Result<RangeScan> {
 		let from_bound = from.value.as_ref().map(|v| (v.as_ref(), from.inclusive));
 		let to_bound = to.value.as_ref().map(|v| (v.as_ref(), to.inclusive));
@@ -1258,8 +1258,8 @@ impl UniqueRangeThingIterator {
 		ns: NamespaceId,
 		db: DatabaseId,
 		ix: &IndexDefinition,
-		from: RangeValue,
-		to: RangeValue,
+		from: &RangeValue,
+		to: &RangeValue,
 	) -> Result<Self> {
 		let r = Self::range_scan(ns, db, ix, from, to)?;
 		Ok(Self {
@@ -1275,7 +1275,9 @@ impl UniqueRangeThingIterator {
 		db: DatabaseId,
 		ix: &IndexDefinition,
 	) -> Result<Self> {
-		Self::new(irf, ns, db, ix, RangeValue::default(), RangeValue::default())
+		let from = RangeValue::default();
+		let to = RangeValue::default();
+		Self::new(irf, ns, db, ix, &from, &to)
 	}
 
 	pub(super) fn compound_range(
@@ -1419,8 +1421,8 @@ impl UniqueRangeReverseThingIterator {
 		ns: NamespaceId,
 		db: DatabaseId,
 		ix: &IndexDefinition,
-		from: RangeValue,
-		to: RangeValue,
+		from: &RangeValue,
+		to: &RangeValue,
 	) -> Result<Self> {
 		let r = ReverseRangeScan::new(UniqueRangeThingIterator::range_scan(ns, db, ix, from, to)?);
 		Ok(Self {
@@ -1436,7 +1438,9 @@ impl UniqueRangeReverseThingIterator {
 		db: DatabaseId,
 		ix: &IndexDefinition,
 	) -> Result<Self> {
-		Self::new(irf, ns, db, ix, RangeValue::default(), RangeValue::default())
+		let from = RangeValue::default();
+		let to = RangeValue::default();
+		Self::new(irf, ns, db, ix, &from, &to)
 	}
 
 	async fn next_batch<B: IteratorBatch>(

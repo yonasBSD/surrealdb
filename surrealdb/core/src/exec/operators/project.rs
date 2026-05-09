@@ -47,7 +47,7 @@ fn parse_output_path(name: &str) -> FieldPath {
 /// Internally wraps the object in a `Value::Object` so that
 /// `Value::set_at_field_path` can be used, then unwraps the result back.
 #[inline]
-fn set_field_on_object(obj: &mut Object, path: &FieldPath, value: Value) {
+fn set_field_on_object(obj: &mut Object, path: &FieldPath, value: &Value) {
 	let mut target = Value::Object(std::mem::take(obj));
 	target.set_at_field_path(path, value);
 	if let Value::Object(new_obj) = target {
@@ -83,9 +83,9 @@ impl FieldSelection {
 	/// `idiom_to_field_path` on the parsed idiom, which preserves the
 	/// distinction between `AS foo.bar` (nested) and `` AS `foo.bar` ``
 	/// (flat).
-	pub fn new(output_name: String, expr: Arc<dyn PhysicalExpr>) -> Self {
+	pub fn new(output_name: &str, expr: Arc<dyn PhysicalExpr>) -> Self {
 		Self {
-			output_path: parse_output_path(&output_name),
+			output_path: parse_output_path(output_name),
 			expr,
 			has_explicit_alias: false,
 		}
@@ -342,7 +342,7 @@ impl ExecOperator for Project {
 								set_field_on_object(
 									&mut objects[i],
 									&field.output_path,
-									field_value,
+									&field_value,
 								);
 							}
 						}
@@ -395,14 +395,14 @@ async fn evaluate_and_set_field(
 			} else {
 				Value::Array(bindings.into_iter().map(|(_, v)| v).collect::<Vec<_>>().into())
 			};
-			set_field_on_object(obj, &field.output_path, value);
+			set_field_on_object(obj, &field.output_path, &value);
 		} else {
 			// No alias - use the dynamic field names from the function
 			for (idiom, value) in bindings {
 				if let Ok(path) = FieldPath::try_from(&idiom)
 					&& !path.is_empty()
 				{
-					set_field_on_object(obj, &path, value);
+					set_field_on_object(obj, &path, &value);
 				}
 			}
 		}
@@ -411,7 +411,7 @@ async fn evaluate_and_set_field(
 	}
 
 	let field_value = field.expr.evaluate(eval_ctx).await?;
-	set_field_on_object(obj, &field.output_path, field_value);
+	set_field_on_object(obj, &field.output_path, &field_value);
 	Ok(())
 }
 

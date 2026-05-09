@@ -965,7 +965,7 @@ impl Document {
 					};
 
 					if *after >= *max {
-						*max = after.clone();
+						*max = *after;
 					} else if *before == *max {
 						recalculations.push(Recalculation {
 							function: "time::max".to_string(),
@@ -993,7 +993,7 @@ impl Document {
 					};
 
 					if *after <= *min {
-						*min = after.clone();
+						*min = *after;
 					} else if *before == *min && *after != *min {
 						recalculations.push(Recalculation {
 							function: "time::min".to_string(),

@@ -143,7 +143,7 @@ impl Operation {
 
 	/// Returns the operaton encoded in the object, or an error if the object
 	/// does not contain a valid operation.
-	pub fn operation_from_object(object: Object) -> Result<Operation, PatchError> {
+	pub fn operation_from_object(object: &Object) -> Result<Operation, PatchError> {
 		let Some(op) = object.get("op") else {
 			return Err(PatchError {
 				message: "Key 'op' missing".to_owned(),
@@ -227,7 +227,7 @@ impl Operation {
 					message: "Patch operations should be an array of objects".to_owned(),
 				});
 			};
-			res.push(Operation::operation_from_object(o)?)
+			res.push(Operation::operation_from_object(&o)?)
 		}
 		Ok(res)
 	}
@@ -248,11 +248,11 @@ impl ToSql for Operation {
 mod tests {
 	use super::*;
 
-	fn roundtrip(op: Operation) {
+	fn roundtrip(op: &Operation) {
 		let obj = op.clone().into_object();
-		let decoded = Operation::operation_from_object(obj)
+		let decoded = Operation::operation_from_object(&obj)
 			.expect("operation_from_object should accept into_object output");
-		assert_eq!(op, decoded);
+		assert_eq!(*op, decoded);
 	}
 
 	#[test]
@@ -261,30 +261,30 @@ mod tests {
 		let from: Vec<Strand> = vec!["c".into(), "d".into()];
 		let value = Value::Bool(true);
 
-		roundtrip(Operation::Add {
+		roundtrip(&Operation::Add {
 			path: path.clone(),
 			value: value.clone(),
 		});
-		roundtrip(Operation::Remove {
+		roundtrip(&Operation::Remove {
 			path: path.clone(),
 		});
-		roundtrip(Operation::Replace {
-			path: path.clone(),
-			value: value.clone(),
-		});
-		roundtrip(Operation::Change {
+		roundtrip(&Operation::Replace {
 			path: path.clone(),
 			value: value.clone(),
 		});
-		roundtrip(Operation::Copy {
+		roundtrip(&Operation::Change {
+			path: path.clone(),
+			value: value.clone(),
+		});
+		roundtrip(&Operation::Copy {
 			path: path.clone(),
 			from: from.clone(),
 		});
-		roundtrip(Operation::Move {
+		roundtrip(&Operation::Move {
 			path: path.clone(),
 			from,
 		});
-		roundtrip(Operation::Test {
+		roundtrip(&Operation::Test {
 			path,
 			value,
 		});

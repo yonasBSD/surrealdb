@@ -483,25 +483,25 @@ mod tests {
 		bytes
 	}
 
-	fn revision_decode<T: DeserializeRevisioned>(bytes: Vec<u8>) -> T {
-		DeserializeRevisioned::deserialize_revisioned(&mut bytes.as_slice()).unwrap()
+	fn revision_decode<T: DeserializeRevisioned>(bytes: &[u8]) -> T {
+		DeserializeRevisioned::deserialize_revisioned(&mut &*bytes).unwrap()
 	}
 
 	#[test]
 	fn revision_1_index_variants_keep_their_main_discriminants() {
-		let index = revision_decode::<Index>(revision_encode(&OldIndex::Count(None)));
+		let index = revision_decode::<Index>(&revision_encode(&OldIndex::Count(None)));
 		assert_eq!(index, Index::Count(None));
 	}
 
 	#[test]
 	fn revision_1_distance_variants_keep_their_main_discriminants() {
-		let distance = revision_decode::<Distance>(revision_encode(&OldDistance::Pearson));
+		let distance = revision_decode::<Distance>(&revision_encode(&OldDistance::Pearson));
 		assert_eq!(distance, Distance::Pearson);
 	}
 
 	#[test]
 	fn revision_1_vector_type_variants_keep_their_main_discriminants() {
-		let vector_type = revision_decode::<VectorType>(revision_encode(&OldVectorType::I16));
+		let vector_type = revision_decode::<VectorType>(&revision_encode(&OldVectorType::I16));
 		assert_eq!(vector_type, VectorType::I16);
 	}
 }

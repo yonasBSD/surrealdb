@@ -373,7 +373,7 @@ mod test {
 	use super::RouterRequest;
 	use crate::types::{Array, Number, SurrealValue, Value};
 
-	fn assert_converts<S, D, I>(req: RouterRequest, s: S, d: D)
+	fn assert_converts<S, D, I>(req: &RouterRequest, s: S, d: D)
 	where
 		S: FnOnce(&Value) -> I,
 		D: FnOnce(I) -> Value,
@@ -414,7 +414,7 @@ mod test {
 		};
 
 		assert_converts(
-			request,
+			&request,
 			|i| surrealdb_core::rpc::format::flatbuffers::encode(i).unwrap(),
 			|b| surrealdb_core::rpc::format::flatbuffers::decode(&b).unwrap(),
 		);

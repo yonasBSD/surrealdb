@@ -39,7 +39,7 @@ use crate::expr::decimal::DecimalLexEncoder;
 use crate::fnc::util::math::ToFloat;
 use crate::val::{TryAdd, TryDiv, TryFloatDiv, TryMul, TryNeg, TryPow, TryRem, TrySub};
 
-#[derive(Encode, BorrowDecode)]
+#[derive(Copy, Clone, Encode, BorrowDecode)]
 pub(crate) enum NumberKind {
 	Int,
 	Float,

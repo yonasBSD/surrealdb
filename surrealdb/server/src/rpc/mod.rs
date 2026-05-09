@@ -189,7 +189,7 @@ pub async fn graceful_shutdown(state: Arc<RpcState>) {
 ///
 /// Unlike [`graceful_shutdown`], this immediately drains the WebSocket map
 /// without waiting for in-flight messages to be delivered.
-pub fn shutdown(state: Arc<RpcState>) {
+pub fn shutdown(state: &Arc<RpcState>) {
 	// Close all WebSocket connections immediately
 	if let Ok(mut writer) = state.web_sockets.try_write() {
 		writer.drain();

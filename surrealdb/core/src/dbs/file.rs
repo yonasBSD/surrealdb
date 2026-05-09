@@ -55,13 +55,13 @@ impl FileCollector {
 		if let Some(mut writer) = self.writer.take() {
 			#[cfg(not(target_family = "wasm"))]
 			let writer = spawn_blocking(move || {
-				writer.push(value)?;
+				writer.push(&value)?;
 				Ok::<FileWriter, Error>(writer)
 			})
 			.await
 			.map_err(|e| Error::Internal(format!("{e}")))??;
 			#[cfg(target_family = "wasm")]
-			writer.push(value)?;
+			writer.push(&value)?;
 			self.len += 1;
 			self.writer = Some(writer);
 			Ok(())
@@ -215,9 +215,9 @@ impl FileWriter {
 		Ok(())
 	}
 
-	fn write_value<W: Write>(writer: &mut W, value: Value) -> Result<usize, Error> {
+	fn write_value<W: Write>(writer: &mut W, value: &Value) -> Result<usize, Error> {
 		let mut val = Vec::new();
-		SerializeRevisioned::serialize_revisioned(&value, &mut val)?;
+		SerializeRevisioned::serialize_revisioned(value, &mut val)?;
 		// Write the size of the buffer in the index
 		Self::write_usize(writer, val.len())?;
 		// Write the buffer in the records
@@ -225,7 +225,7 @@ impl FileWriter {
 		Ok(val.len())
 	}
 
-	fn push(&mut self, value: Value) -> Result<(), Error> {
+	fn push(&mut self, value: &Value) -> Result<(), Error> {
 		// Serialize the value in a buffer
 		let len = Self::write_value(&mut self.records, value)?;
 		// Increment the offset of the next record
@@ -422,7 +422,7 @@ impl ExternalChunk<Value> for ValueExternalChunk {
 		items: impl IntoIterator<Item = Value>,
 	) -> Result<(), Self::SerializationError> {
 		for item in items {
-			FileWriter::write_value(chunk_writer, item)?;
+			FileWriter::write_value(chunk_writer, &item)?;
 		}
 		Ok(())
 	}

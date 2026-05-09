@@ -32,10 +32,10 @@ pub(super) trait Routine {
 pub(super) fn bench_routine<R>(
 	b: &mut Bencher<'_, WallTime>,
 	db: &'static Surreal<Any>,
-	routine: R,
+	routine: &R,
 	num_ops: usize,
 ) where
-	R: Routine,
+	R: Routine + ?Sized,
 {
 	// Run the runtime and return the duration, accounting for the number of
 	// operations on each run

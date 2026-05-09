@@ -110,7 +110,7 @@ pub async fn get_database_schema(
 		}),
 	};
 
-	Ok(serialize_body(body))
+	Ok(serialize_body(&body))
 }
 
 /// Walk the `tables` map of an `INFO FOR DB` body and replace each
@@ -265,7 +265,7 @@ pub async fn get_table_schema(
 		}),
 	};
 
-	Ok(serialize_body(body))
+	Ok(serialize_body(&body))
 }
 
 /// Validate a URI-embedded identifier segment (namespace or database name).
@@ -285,8 +285,8 @@ fn validate_identifier_segment(field: &str, value: &str) -> Result<(), ErrorData
 /// Pretty-serialise a schema body. The fallback is a valid JSON literal so
 /// an MCP client always receives parseable JSON even on the vanishingly
 /// rare serialisation failure.
-fn serialize_body(body: serde_json::Value) -> String {
-	serde_json::to_string_pretty(&body).unwrap_or_else(|e| {
+fn serialize_body(body: &serde_json::Value) -> String {
+	serde_json::to_string_pretty(body).unwrap_or_else(|e| {
 		tracing::warn!(
 			target: "surrealdb::mcp",
 			error = %e,

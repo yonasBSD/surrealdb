@@ -153,18 +153,18 @@ async fn execute_database_info(
 	// Create the result set
 	if structured {
 		let object = map! {
-			"accesses" => process(txn.all_db_accesses(ns, db, version).await?),
-			"apis" => process(txn.all_db_apis(ns, db, version).await?),
-			"analyzers" => process(txn.all_db_analyzers(ns, db, version).await?),
-			"buckets" => process(txn.all_db_buckets(ns, db, version).await?),
-			"functions" => process(txn.all_db_functions(ns, db, version).await?),
+			"accesses" => process(&txn.all_db_accesses(ns, db, version).await?),
+			"apis" => process(&txn.all_db_apis(ns, db, version).await?),
+			"analyzers" => process(&txn.all_db_analyzers(ns, db, version).await?),
+			"buckets" => process(&txn.all_db_buckets(ns, db, version).await?),
+			"functions" => process(&txn.all_db_functions(ns, db, version).await?),
 			"modules" => crate::expr::statements::info::process_modules(ctx.ctx(), ns, db, txn.all_db_modules(ns, db, version).await?).await,
-			"models" => process(txn.all_db_models(ns, db, version).await?),
-			"params" => process(txn.all_db_params(ns, db, version).await?),
-			"tables" => process(txn.all_tb(ns, db, version).await?),
-			"users" => process(txn.all_db_users(ns, db, version).await?),
-			"configs" => process(txn.all_db_configs(ns, db, version).await?),
-			"sequences" => process(txn.all_db_sequences(ns, db, version).await?),
+			"models" => process(&txn.all_db_models(ns, db, version).await?),
+			"params" => process(&txn.all_db_params(ns, db, version).await?),
+			"tables" => process(&txn.all_tb(ns, db, version).await?),
+			"users" => process(&txn.all_db_users(ns, db, version).await?),
+			"configs" => process(&txn.all_db_configs(ns, db, version).await?),
+			"sequences" => process(&txn.all_db_sequences(ns, db, version).await?),
 		};
 		Ok(Value::Object(Object::from(object)))
 	} else {
@@ -258,7 +258,7 @@ async fn execute_database_info(
 	}
 }
 
-fn process<T>(a: Arc<[T]>) -> Value
+fn process<T>(a: &Arc<[T]>) -> Value
 where
 	T: InfoStructure + Clone,
 {

@@ -44,7 +44,7 @@ pub(crate) fn try_literal_to_value(
 		Literal::Decimal(d) => Some(Value::Number(Number::Decimal(*d))),
 		Literal::String(s) => Some(Value::String(s.clone())),
 		Literal::Uuid(u) => Some(Value::Uuid(*u)),
-		Literal::Datetime(dt) => Some(Value::Datetime(dt.clone())),
+		Literal::Datetime(dt) => Some(Value::Datetime(*dt)),
 		Literal::Duration(d) => Some(Value::Duration(*d)),
 		Literal::RecordId(rid) => {
 			// Convert simple record ID literals (Number, String, Uuid keys).

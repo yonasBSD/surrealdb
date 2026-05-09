@@ -168,7 +168,7 @@ impl Executor {
 		counters
 	}
 
-	fn execute_option_statement(&mut self, stmt: OptionStatement) -> Result<()> {
+	fn execute_option_statement(&mut self, stmt: &OptionStatement) -> Result<()> {
 		// Allowed to run?
 		self.ctx.is_allowed(&self.opt, Action::Edit, ResourceKind::Option, &Base::Db)?;
 
@@ -1383,7 +1383,7 @@ impl Executor {
 
 					return Ok(());
 				}
-				TopLevelExpr::Option(stmt) => match self.execute_option_statement(stmt) {
+				TopLevelExpr::Option(stmt) => match self.execute_option_statement(&stmt) {
 					Ok(_) => {
 						// OPTION returns NONE
 						self.results.push(QueryResult {
@@ -1724,7 +1724,7 @@ impl Executor {
 				Some(Ok(TopLevelExpr::Option(ref stmt)))
 					if stmt.name.eq_ignore_ascii_case("IMPORT") && stmt.what =>
 				{
-					this.execute_option_statement(stmt.clone())?;
+					this.execute_option_statement(stmt)?;
 				}
 				Some(Err(e)) => {
 					bail!(Error::InvalidStatement(e.to_string()));
@@ -1780,7 +1780,7 @@ impl Executor {
 								.to_string()
 						));
 					}
-					let result = this.execute_option_statement(stmt);
+					let result = this.execute_option_statement(&stmt);
 					let outcome = Outcome::from(&result);
 					// `execute_option_statement` returns `anyhow::Result`; the
 					// only failure today is a permission denial via the

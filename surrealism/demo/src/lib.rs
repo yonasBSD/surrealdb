@@ -1,3 +1,5 @@
+#![allow(clippy::needless_pass_by_value)]
+
 use std::sync::OnceLock;
 
 use anyhow::Result;

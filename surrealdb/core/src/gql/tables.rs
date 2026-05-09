@@ -128,7 +128,7 @@ pub(crate) struct CachedRecord {
 /// used in `SelectStatement.version`.
 fn version_to_expr(version: &Option<Datetime>) -> Expr {
 	match version {
-		Some(dt) => Expr::Literal(Literal::Datetime(dt.clone())),
+		Some(dt) => Expr::Literal(Literal::Datetime(*dt)),
 		None => Expr::Literal(Literal::None),
 	}
 }
@@ -583,7 +583,7 @@ fn make_nested_object_field_resolver(
 
 			// Extract record ID and optional version
 			let (rid, version) = match ctx.parent_value.try_downcast_ref::<VersionedRecord>() {
-				Ok(vr) => (vr.rid.clone(), vr.version.clone()),
+				Ok(vr) => (vr.rid.clone(), vr.version),
 				Err(_) => {
 					let rid = ctx.parent_value.try_downcast_ref::<RecordId>()?;
 					(rid.clone(), None)
@@ -666,7 +666,7 @@ fn objects_to_cached_records(
 				};
 				Ok(FieldValue::owned_any(CachedRecord {
 					rid,
-					version: version.clone(),
+					version,
 					data: obj,
 				}))
 			}
@@ -997,7 +997,7 @@ fn build_table_type(
 		});
 		if !filter_already_exists {
 			let type_filter = Type::InputObject(filter_from_type(
-				kind.clone(),
+				kind,
 				type_filter_name.clone(),
 				types,
 				Some(&enum_scope),
@@ -1196,7 +1196,7 @@ fn make_table_field_resolver(
 				let sess = ctx.data::<Arc<Session>>()?;
 
 				let (rid, version) = match ctx.parent_value.try_downcast_ref::<VersionedRecord>() {
-					Ok(vr) => (vr.rid.clone(), vr.version.clone()),
+					Ok(vr) => (vr.rid.clone(), vr.version),
 					Err(_) => {
 						let rid = ctx.parent_value.try_downcast_ref::<RecordId>()?;
 						(rid.clone(), None)
@@ -1248,7 +1248,7 @@ async fn resolve_field_value(
 				Value::Object(obj) => {
 					let field_val = FieldValue::owned_any(CachedRecord {
 						rid: target_rid.clone(),
-						version: version.clone(),
+						version: *version,
 						data: obj,
 					});
 					let field_val = match field_kind {
@@ -1359,9 +1359,9 @@ fn make_relation_field_resolver(
 			// Try CachedRecord first, then VersionedRecord, then plain RecordId.
 			let (rid, version) =
 				if let Ok(cached) = ctx.parent_value.try_downcast_ref::<CachedRecord>() {
-					(cached.rid.clone(), cached.version.clone())
+					(cached.rid.clone(), cached.version)
 				} else if let Ok(vr) = ctx.parent_value.try_downcast_ref::<VersionedRecord>() {
-					(vr.rid.clone(), vr.version.clone())
+					(vr.rid.clone(), vr.version)
 				} else {
 					let rid = ctx.parent_value.try_downcast_ref::<RecordId>()?;
 					(rid.clone(), None)
@@ -1449,14 +1449,14 @@ fn filter_id() -> InputObject {
 /// `option<record<T>>` is normalised to the inner record kind so filters
 /// use the target table's filter type rather than a plain ID filter.
 fn filter_from_type(
-	kind: Kind,
+	kind: &Kind,
 	filter_name: String,
 	types: &mut Vec<Type>,
 	enum_scope: Option<&str>,
 ) -> Result<InputObject, GqlError> {
 	// Normalise `option<record<T>>` (Kind::Either([None, Record([T])])) down to the
 	// inner record kind so filters are generated correctly with ID-based filtering.
-	let effective_kind = match &kind {
+	let effective_kind = match kind {
 		Kind::Either(ks) => {
 			let non_none: Vec<&Kind> =
 				ks.iter().filter(|k| !matches!(k, Kind::None | Kind::Null)).collect();
@@ -1669,6 +1669,7 @@ fn negate(filter: &GqlValue, fds: &[FieldDefinition], tb_name: &str) -> Result<E
 	})
 }
 
+#[derive(Clone, Copy)]
 enum AggregateOp {
 	And,
 	Or,

@@ -875,7 +875,7 @@ impl Capabilities {
 	#[cfg(feature = "surrealism")]
 	pub fn validate_surrealism_capabilities(
 		&self,
-		capabilities: SurrealismCapabilities,
+		capabilities: &SurrealismCapabilities,
 	) -> anyhow::Result<()> {
 		use surrealism_runtime::capabilities::FunctionTargets;
 

@@ -300,7 +300,7 @@ pub trait Transactable: requirements::TransactionRequirements {
 			return Err(Error::TransactionFinished);
 		}
 		// Continue with function logic
-		let range = util::to_prefix_range(key)?;
+		let range = util::to_prefix_range(&key)?;
 		self.getr(range, version).await
 	}
 
@@ -352,7 +352,7 @@ pub trait Transactable: requirements::TransactionRequirements {
 			return Err(Error::TransactionReadonly);
 		}
 		// Continue with function logic
-		let range = util::to_prefix_range(key)?;
+		let range = util::to_prefix_range(&key)?;
 		self.delr(range).await
 	}
 
@@ -397,7 +397,7 @@ pub trait Transactable: requirements::TransactionRequirements {
 			return Err(Error::TransactionReadonly);
 		}
 		// Continue with function logic
-		let range = util::to_prefix_range(key)?;
+		let range = util::to_prefix_range(&key)?;
 		self.clrr(range).await
 	}
 

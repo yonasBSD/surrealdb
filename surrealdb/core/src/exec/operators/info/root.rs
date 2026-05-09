@@ -136,14 +136,14 @@ async fn execute_root_info(
 
 	if structured {
 		let object = map! {
-			"accesses" => process(txn.all_root_accesses(version).await?),
+			"accesses" => process(&txn.all_root_accesses(version).await?),
 			"defaults" => txn.get_default_config().await?
 				.map(|x| x.as_ref().clone().structure())
 				.unwrap_or_else(|| Value::Object(Default::default())),
-			"namespaces" => process(txn.all_ns(version).await?),
-			"nodes" => process(txn.all_nodes().await?),
+			"namespaces" => process(&txn.all_ns(version).await?),
+			"nodes" => process(&txn.all_nodes().await?),
 			"system" => system().await,
-			"users" => process(txn.all_root_users(version).await?),
+			"users" => process(&txn.all_root_users(version).await?),
 			"config" => ctx.ctx().dynamic_configuration().clone().structure()
 		};
 		Ok(Value::Object(Object::from(object)))
@@ -189,7 +189,7 @@ async fn execute_root_info(
 	}
 }
 
-fn process<T>(a: Arc<[T]>) -> Value
+fn process<T>(a: &Arc<[T]>) -> Value
 where
 	T: InfoStructure + Clone,
 {

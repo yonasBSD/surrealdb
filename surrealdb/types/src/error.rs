@@ -347,6 +347,7 @@ impl Error {
 	/// The outer error message is used as the top-level message and each source is attached as a
 	/// nested `cause`, making debugging easier for consumers that inspect chained errors.
 	#[doc(hidden)]
+	#[allow(clippy::needless_pass_by_value)] // Public API: callers pass owned `anyhow::Error`.
 	pub fn from_anyhow_with_chain(error: anyhow::Error) -> Self {
 		let chain: Vec<String> = error.chain().map(|e| e.to_string()).collect();
 		if chain.is_empty() {

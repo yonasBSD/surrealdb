@@ -3251,7 +3251,7 @@ async fn function_vector_angle() -> Result<()> {
 	)
 	.await?
 	.expect_vals(&["1.5707963267948966", "0.36774908225917935", "1.7128722906354115"])?
-	.expect_value(Value::Number(Number::NAN))?;
+	.expect_value(&Value::Number(Number::NAN))?;
 
 	check_test_is_error(
 		r#"

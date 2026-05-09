@@ -386,7 +386,7 @@ pub fn add_to_aggregation_stats(arguments: &[Value], stats: &mut [AggregationSta
 				};
 
 				if *max < *d {
-					*max = d.clone();
+					*max = *d;
 				}
 			}
 			AggregationStat::TimeMin {
@@ -404,7 +404,7 @@ pub fn add_to_aggregation_stats(arguments: &[Value], stats: &mut [AggregationSta
 				};
 
 				if *min > *d {
-					*min = d.clone();
+					*min = *d;
 				}
 			}
 			AggregationStat::Accumulate {
@@ -493,11 +493,11 @@ pub fn create_field_document(group: &[Value], stats: &[AggregationStat]) -> Obje
 			AggregationStat::TimeMax {
 				max,
 				..
-			} => max.clone().into(),
+			} => (*max).into(),
 			AggregationStat::TimeMin {
 				min,
 				..
-			} => min.clone().into(),
+			} => (*min).into(),
 			AggregationStat::Accumulate {
 				values,
 				..

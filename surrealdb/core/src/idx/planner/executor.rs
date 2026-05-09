@@ -576,7 +576,7 @@ impl QueryExecutor {
 				return Ok(Some(Self::new_index_range_iterator(ir, ns, db, ix, from, to, sc)?));
 			}
 			Index::Uniq => {
-				return Ok(Some(Self::new_unique_range_iterator(ir, ns, db, ix, from, to, sc)?));
+				return Ok(Some(Self::new_unique_range_iterator(ir, ns, db, ix, &from, &to, sc)?));
 			}
 			_ => {}
 		}
@@ -607,8 +607,8 @@ impl QueryExecutor {
 		ns: NamespaceId,
 		db: DatabaseId,
 		ix: &IndexDefinition,
-		from: RangeValue,
-		to: RangeValue,
+		from: &RangeValue,
+		to: &RangeValue,
 		sc: ScanDirection,
 	) -> Result<RecordIterator> {
 		Ok(match sc {

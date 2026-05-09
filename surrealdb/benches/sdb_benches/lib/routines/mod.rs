@@ -33,11 +33,11 @@ pub(super) trait Routine {
 /// Execute the setup, benchmark the `run` function, and execute the cleanup.
 pub(super) fn bench_routine<R>(
 	b: &mut Bencher<'_, WallTime>,
-	ds: Arc<Datastore>,
-	routine: R,
+	ds: &Arc<Datastore>,
+	routine: &R,
 	num_ops: usize,
 ) where
-	R: Routine,
+	R: Routine + ?Sized,
 {
 	// Run the runtime and return the duration, accounting for the number of
 	// operations on each run

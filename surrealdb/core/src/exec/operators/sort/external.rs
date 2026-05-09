@@ -204,7 +204,7 @@ impl ExecOperator for ExternalSort {
 					// Use spawn_blocking for file I/O
 					let mut w = writer;
 					w = spawn_blocking(move || {
-						w.push(keyed)?;
+						w.push(&keyed)?;
 						Ok::<TempFileWriter, Error>(w)
 					})
 					.await
@@ -320,7 +320,7 @@ impl TempFileWriter {
 		Ok(val.len())
 	}
 
-	fn push(&mut self, keyed: KeyedValue) -> Result<(), Error> {
+	fn push(&mut self, keyed: &KeyedValue) -> Result<(), Error> {
 		// Write number of keys
 		Self::write_usize(&mut self.records, keyed.keys.len())?;
 		// Write each key

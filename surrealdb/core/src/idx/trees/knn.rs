@@ -395,7 +395,7 @@ impl KnnResultBuilder {
 
 	/// Add the result to the priority list.
 	/// Returns any evicted ids, so any filter cache can be freed
-	pub(super) fn add_graph_result(&mut self, dist: f64, added_docs: Ids64) -> Vec<VectorId> {
+	pub(super) fn add_graph_result(&mut self, dist: f64, added_docs: &Ids64) -> Vec<VectorId> {
 		let mut evicted_ids = Vec::with_capacity(added_docs.len() as usize);
 		for doc_id in added_docs.iter() {
 			if let Some(evited_id) = self.add_vector_id_result(dist, VectorId::DocId(doc_id)) {
@@ -673,10 +673,10 @@ pub(super) mod tests {
 	#[test]
 	fn knn_result_builder_test() {
 		let mut b = KnnResultBuilder::new(7);
-		b.add_graph_result(0.0, Ids64::One(5));
-		b.add_graph_result(0.2, Ids64::Vec3([0, 1, 2]));
-		b.add_graph_result(0.2, Ids64::One(3));
-		b.add_graph_result(0.2, Ids64::Vec2([6, 8]));
+		b.add_graph_result(0.0, &Ids64::One(5));
+		b.add_graph_result(0.2, &Ids64::Vec3([0, 1, 2]));
+		b.add_graph_result(0.2, &Ids64::One(3));
+		b.add_graph_result(0.2, &Ids64::Vec2([6, 8]));
 		let res = b.collect();
 		assert_eq!(
 			res,

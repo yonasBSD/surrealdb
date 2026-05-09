@@ -188,6 +188,7 @@ impl ExpressionRegistry {
 	///
 	/// If the same expression key is already registered at a later compute point,
 	/// promotes it to the earlier point (matching `register` behaviour).
+	#[allow(clippy::needless_pass_by_value)] // `expr_key` is moved into `dedup_key` in the no-alias path; borrowing forces an extra allocation in the planner hot path.
 	pub fn register_physical(
 		&mut self,
 		expr_key: String,

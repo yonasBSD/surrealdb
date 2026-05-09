@@ -63,7 +63,7 @@ impl TermDocument {
 }
 
 #[revisioned(revision = 1)]
-#[derive(Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 /// Tracks document length and count statistics for the index
 pub(crate) struct DocLengthAndCount {
 	/// The total length of all documents in the index
@@ -140,7 +140,7 @@ impl QueryTerms {
 	}
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub(crate) struct Bm25Params {
 	pub(in crate::idx) k1: f32,
 	pub(in crate::idx) b: f32,
@@ -771,7 +771,7 @@ impl FullTextIndex {
 	pub(crate) async fn new_scorer(&self, ctx: &FrozenContext) -> Result<Option<Scorer>> {
 		if let Some(bm25) = &self.bm25 {
 			let dlc = self.compute_doc_length_and_count(&ctx.tx(), None).await?;
-			let sc = Scorer::new(dlc, bm25.clone());
+			let sc = Scorer::new(dlc, *bm25);
 			return Ok(Some(sc));
 		}
 		Ok(None)
@@ -999,7 +999,7 @@ impl FullTextIndex {
 	) -> Result<Value> {
 		let doc_id = self.get_doc_id(tx, thg).await?;
 		if let Some(doc_id) = doc_id {
-			let mut hl = Highlighter::new(hlp, idiom, doc);
+			let mut hl = Highlighter::new(&hlp, idiom, doc);
 			for tk in qt.tokens.list() {
 				if let Some(td) =
 					self.get_term_document(tx, doc_id, qt.tokens.get_token_string(tk)?).await?

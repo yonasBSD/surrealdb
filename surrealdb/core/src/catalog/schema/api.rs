@@ -49,13 +49,13 @@ impl ApiDefinition {
 	/// path.
 	pub(crate) fn find_definition<'a>(
 		definitions: &'a [ApiDefinition],
-		segments: Vec<&str>,
+		segments: &[&str],
 		method: ApiMethod,
 	) -> Option<(&'a ApiDefinition, Object)> {
 		let mut specificity = 0;
 		let mut res = None;
 		for api in definitions.iter() {
-			if let Some(params) = api.path.fit(segments.as_slice())
+			if let Some(params) = api.path.fit(segments)
 				&& (api.fallback.is_some()
 					|| api.actions.iter().any(|x| x.methods.contains(&method)))
 			{

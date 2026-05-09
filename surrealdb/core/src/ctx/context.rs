@@ -1263,7 +1263,7 @@ impl Context {
 					SurrealismPackage::from_reader(std::io::Cursor::new(surli), &unpack_opts)?;
 
 				self.get_capabilities()
-					.validate_surrealism_capabilities(package.config.capabilities.clone())?;
+					.validate_surrealism_capabilities(&package.config.capabilities)?;
 
 				let org = package.config.meta.organisation.clone();
 				let name = package.config.meta.name.clone();

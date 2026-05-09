@@ -161,11 +161,11 @@ async fn execute_table_info(
 	// Create the result set
 	if structured {
 		Ok(Value::from(map! {
-			"events" => process(txn.all_tb_events(ns, db, &tb, version).await?),
-			"fields" => process(txn.all_tb_fields(ns, db, &tb, version).await?),
-			"indexes" => process(txn.all_tb_indexes(ns, db, &tb, version).await?),
-			"lives" => process(txn.all_tb_lives(ns, db, &tb, version).await?),
-			"tables" => process(txn.all_tb_views(ns, db, &tb, version).await?),
+			"events" => process(&txn.all_tb_events(ns, db, &tb, version).await?),
+			"fields" => process(&txn.all_tb_fields(ns, db, &tb, version).await?),
+			"indexes" => process(&txn.all_tb_indexes(ns, db, &tb, version).await?),
+			"lives" => process(&txn.all_tb_lives(ns, db, &tb, version).await?),
+			"tables" => process(&txn.all_tb_views(ns, db, &tb, version).await?),
 		}))
 	} else {
 		Ok(Value::from(map! {
@@ -208,7 +208,7 @@ async fn execute_table_info(
 	}
 }
 
-fn process<T>(a: Arc<[T]>) -> Value
+fn process<T>(a: &Arc<[T]>) -> Value
 where
 	T: InfoStructure + Clone,
 {

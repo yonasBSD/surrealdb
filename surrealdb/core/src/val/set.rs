@@ -74,7 +74,7 @@ impl Set {
 	}
 
 	/// Return the union of this set with another (A ∪ B)
-	pub fn union(self, other: Set) -> Set {
+	pub fn union(&self, other: &Set) -> Set {
 		Set(self.0.union(&other.0))
 	}
 
@@ -84,12 +84,12 @@ impl Set {
 	}
 
 	/// Return the symmetric difference (A △ B) - elements in either but not both
-	pub fn symmetric_difference(self, other: Set) -> Set {
+	pub fn symmetric_difference(&self, other: &Set) -> Set {
 		Set(self.0.symmetric_difference(&other.0))
 	}
 
 	/// Return the relative complement (A \ B) - elements in self but not in other
-	pub fn complement(self, other: Set) -> Set {
+	pub fn complement(&self, other: &Set) -> Set {
 		Set(self.0.difference(&other.0))
 	}
 

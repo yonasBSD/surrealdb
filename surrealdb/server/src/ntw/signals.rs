@@ -65,7 +65,7 @@ pub fn graceful_shutdown(
 				// Close all HTTP connections immediately
 				http_handle.shutdown();
 				// Close all WebSocket connections immediately
-				rpc::shutdown(state);
+				rpc::shutdown(&state);
 				// Cancel the cancellation token
 				canceller.cancel();
 				// Flush all telemetry data
@@ -82,7 +82,7 @@ pub fn graceful_shutdown(
 				// Close all HTTP connections immediately
 				http_handle.shutdown();
 				// Close all WebSocket connections immediately
-				rpc::shutdown(state);
+				rpc::shutdown(&state);
 				// Cancel the cancellation token
 				canceller.cancel();
 				// Flush all telemetry data

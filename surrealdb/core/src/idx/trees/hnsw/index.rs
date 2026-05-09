@@ -805,7 +805,7 @@ impl HnswIndex {
 					}
 					evicted_docs
 				} else {
-					builder.add_graph_result(e_dist, docs)
+					builder.add_graph_result(e_dist, &docs)
 				};
 				evicted_docs_func(evicted_docs);
 			}

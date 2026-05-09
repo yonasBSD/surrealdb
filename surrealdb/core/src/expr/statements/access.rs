@@ -138,15 +138,9 @@ pub fn access_object_from_grant(grant: &catalog::AccessGrant) -> Object {
 	res.insert("id".to_owned(), Value::from(grant.id.clone()));
 	res.insert("ac".to_owned(), Value::from(grant.ac.clone()));
 	res.insert("type".to_owned(), Value::from(grant.grant.variant()));
-	res.insert("creation".to_owned(), Value::from(grant.creation.clone()));
-	res.insert(
-		"expiration".to_owned(),
-		grant.expiration.clone().map(Value::from).unwrap_or(Value::None),
-	);
-	res.insert(
-		"revocation".to_owned(),
-		grant.revocation.clone().map(Value::from).unwrap_or(Value::None),
-	);
+	res.insert("creation".to_owned(), Value::from(grant.creation));
+	res.insert("expiration".to_owned(), grant.expiration.map(Value::from).unwrap_or(Value::None));
+	res.insert("revocation".to_owned(), grant.revocation.map(Value::from).unwrap_or(Value::None));
 	let mut sub = Object::default();
 	match &grant.subject {
 		catalog::Subject::Record(id) => sub.insert("record".to_owned(), Value::from(id.clone())),

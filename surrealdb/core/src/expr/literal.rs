@@ -127,7 +127,7 @@ impl Literal {
 				Value::Object(Object::from(map))
 			}
 			Literal::Duration(duration) => Value::Duration(*duration),
-			Literal::Datetime(datetime) => Value::Datetime(datetime.clone()),
+			Literal::Datetime(datetime) => Value::Datetime(*datetime),
 			Literal::Uuid(uuid) => Value::Uuid(*uuid),
 			Literal::Geometry(geometry) => Value::Geometry(geometry.clone()),
 			Literal::File(file) => Value::File(file.clone()),

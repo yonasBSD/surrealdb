@@ -1011,6 +1011,7 @@ mod tests {
 
 	#[test]
 	fn array_first() {
+		#[allow(clippy::needless_pass_by_value)]
 		fn test(arr: Array, expected: Value) {
 			assert_eq!(first((arr,)).unwrap(), expected);
 		}
@@ -1021,6 +1022,7 @@ mod tests {
 
 	#[test]
 	fn array_last() {
+		#[allow(clippy::needless_pass_by_value)]
 		fn test(arr: Array, expected: Value) {
 			assert_eq!(last((arr,)).unwrap(), expected);
 		}
@@ -1031,6 +1033,7 @@ mod tests {
 
 	#[test]
 	fn array_at() {
+		#[allow(clippy::needless_pass_by_value)]
 		fn test(arr: Array, i: i64, expected: Value) {
 			assert_eq!(at((arr, i)).unwrap(), expected);
 		}

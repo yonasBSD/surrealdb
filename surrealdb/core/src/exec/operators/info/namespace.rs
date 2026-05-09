@@ -131,9 +131,9 @@ async fn execute_namespace_info(
 
 	if structured {
 		let object = map! {
-			"accesses" => process(txn.all_ns_accesses(ns, version).await?),
-			"databases" => process(txn.all_db(ns, version).await?),
-			"users" => process(txn.all_ns_users(ns, version).await?),
+			"accesses" => process(&txn.all_ns_accesses(ns, version).await?),
+			"databases" => process(&txn.all_db(ns, version).await?),
+			"users" => process(&txn.all_ns_users(ns, version).await?),
 		};
 		Ok(Value::Object(Object::from(object)))
 	} else {
@@ -164,7 +164,7 @@ async fn execute_namespace_info(
 	}
 }
 
-fn process<T>(a: Arc<[T]>) -> Value
+fn process<T>(a: &Arc<[T]>) -> Value
 where
 	T: InfoStructure + Clone,
 {

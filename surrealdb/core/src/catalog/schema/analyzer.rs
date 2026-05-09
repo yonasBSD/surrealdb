@@ -54,7 +54,7 @@ impl InfoStructure for AnalyzerDefinition {
 					.collect::<Array>()
 					.into(),
 			"filters", if let Some(v) = self.filters =>
-				v.into_iter().map(filter_structure_value).collect::<Array>().into(),
+				v.into_iter().map(|f| filter_structure_value(&f)).collect::<Array>().into(),
 			"comment", if let Some(v) = self.comment => v.into(),
 		})
 	}
@@ -71,7 +71,7 @@ fn tokenizer_structure_strand(t: Tokenizer) -> Strand {
 }
 
 #[inline]
-fn filter_structure_value(f: Filter) -> Value {
+fn filter_structure_value(f: &Filter) -> Value {
 	match f {
 		Filter::Ascii => Value::String(Strand::new_static("ASCII")),
 		Filter::Lowercase => Value::String(Strand::new_static("LOWERCASE")),

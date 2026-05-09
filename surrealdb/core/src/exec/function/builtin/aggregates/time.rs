@@ -44,7 +44,7 @@ impl Accumulator for TimeMinAccumulator {
 					if d < *current {
 						d
 					} else {
-						current.clone()
+						*current
 					}
 				}
 			});
@@ -59,12 +59,12 @@ impl Accumulator for TimeMinAccumulator {
 			.ok_or_else(|| anyhow::anyhow!("Cannot merge incompatible accumulators"))?;
 		if let Some(other_min) = &other.min {
 			self.min = Some(match &self.min {
-				None => other_min.clone(),
+				None => *other_min,
 				Some(current) => {
 					if *other_min < *current {
-						other_min.clone()
+						*other_min
 					} else {
-						current.clone()
+						*current
 					}
 				}
 			});
@@ -77,7 +77,7 @@ impl Accumulator for TimeMinAccumulator {
 		// (`catalog/aggregation.rs`) still emits `Datetime::MAX_UTC` for empty
 		// groups; aligning it requires bumping `AggregationStat`'s revision.
 		match &self.min {
-			Some(d) => Ok(Value::Datetime(d.clone())),
+			Some(d) => Ok(Value::Datetime(*d)),
 			None => Ok(Value::None),
 		}
 	}
@@ -131,7 +131,7 @@ impl Accumulator for TimeMaxAccumulator {
 					if d > *current {
 						d
 					} else {
-						current.clone()
+						*current
 					}
 				}
 			});
@@ -146,12 +146,12 @@ impl Accumulator for TimeMaxAccumulator {
 			.ok_or_else(|| anyhow::anyhow!("Cannot merge incompatible accumulators"))?;
 		if let Some(other_max) = &other.max {
 			self.max = Some(match &self.max {
-				None => other_max.clone(),
+				None => *other_max,
 				Some(current) => {
 					if *other_max > *current {
-						other_max.clone()
+						*other_max
 					} else {
-						current.clone()
+						*current
 					}
 				}
 			});
@@ -164,7 +164,7 @@ impl Accumulator for TimeMaxAccumulator {
 		// (`catalog/aggregation.rs`) still emits `Datetime::MIN_UTC` for empty
 		// groups; aligning it requires bumping `AggregationStat`'s revision.
 		match &self.max {
-			Some(d) => Ok(Value::Datetime(d.clone())),
+			Some(d) => Ok(Value::Datetime(*d)),
 			None => Ok(Value::None),
 		}
 	}
@@ -222,7 +222,7 @@ mod tests {
 		let func = TimeMin;
 		let mut acc = func.create_accumulator();
 		let dt = make_datetime(2024, 6, 15);
-		acc.update(Value::Datetime(dt.clone())).unwrap();
+		acc.update(Value::Datetime(dt)).unwrap();
 		let result = acc.finalize().unwrap();
 		assert_eq!(*as_datetime(&result), dt);
 	}
@@ -235,7 +235,7 @@ mod tests {
 		let dt2 = make_datetime(2024, 1, 1);
 		let dt3 = make_datetime(2024, 12, 31);
 		acc.update(Value::Datetime(dt1)).unwrap();
-		acc.update(Value::Datetime(dt2.clone())).unwrap();
+		acc.update(Value::Datetime(dt2)).unwrap();
 		acc.update(Value::Datetime(dt3)).unwrap();
 		let result = acc.finalize().unwrap();
 		assert_eq!(*as_datetime(&result), dt2);
@@ -250,7 +250,7 @@ mod tests {
 
 		let mut acc2 = func.create_accumulator();
 		let dt2 = make_datetime(2024, 1, 1);
-		acc2.update(Value::Datetime(dt2.clone())).unwrap();
+		acc2.update(Value::Datetime(dt2)).unwrap();
 
 		acc1.merge(acc2).unwrap();
 		let result = acc1.finalize().unwrap();
@@ -262,7 +262,7 @@ mod tests {
 		let func = TimeMin;
 		let mut acc1 = func.create_accumulator();
 		let dt = make_datetime(2024, 6, 15);
-		acc1.update(Value::Datetime(dt.clone())).unwrap();
+		acc1.update(Value::Datetime(dt)).unwrap();
 
 		let acc2 = func.create_accumulator();
 		acc1.merge(acc2).unwrap();
@@ -278,7 +278,7 @@ mod tests {
 
 		let mut acc2 = func.create_accumulator();
 		let dt = make_datetime(2024, 1, 1);
-		acc2.update(Value::Datetime(dt.clone())).unwrap();
+		acc2.update(Value::Datetime(dt)).unwrap();
 
 		acc1.merge(acc2).unwrap();
 		let result = acc1.finalize().unwrap();
@@ -336,7 +336,7 @@ mod tests {
 		let func = TimeMax;
 		let mut acc = func.create_accumulator();
 		let dt = make_datetime(2024, 6, 15);
-		acc.update(Value::Datetime(dt.clone())).unwrap();
+		acc.update(Value::Datetime(dt)).unwrap();
 		let result = acc.finalize().unwrap();
 		assert_eq!(*as_datetime(&result), dt);
 	}
@@ -350,7 +350,7 @@ mod tests {
 		let dt3 = make_datetime(2024, 12, 31);
 		acc.update(Value::Datetime(dt1)).unwrap();
 		acc.update(Value::Datetime(dt2)).unwrap();
-		acc.update(Value::Datetime(dt3.clone())).unwrap();
+		acc.update(Value::Datetime(dt3)).unwrap();
 		let result = acc.finalize().unwrap();
 		assert_eq!(*as_datetime(&result), dt3);
 	}
@@ -364,7 +364,7 @@ mod tests {
 
 		let mut acc2 = func.create_accumulator();
 		let dt2 = make_datetime(2024, 12, 31);
-		acc2.update(Value::Datetime(dt2.clone())).unwrap();
+		acc2.update(Value::Datetime(dt2)).unwrap();
 
 		acc1.merge(acc2).unwrap();
 		let result = acc1.finalize().unwrap();
@@ -376,7 +376,7 @@ mod tests {
 		let func = TimeMax;
 		let mut acc1 = func.create_accumulator();
 		let dt = make_datetime(2024, 6, 15);
-		acc1.update(Value::Datetime(dt.clone())).unwrap();
+		acc1.update(Value::Datetime(dt)).unwrap();
 
 		let acc2 = func.create_accumulator();
 		acc1.merge(acc2).unwrap();
@@ -392,7 +392,7 @@ mod tests {
 
 		let mut acc2 = func.create_accumulator();
 		let dt = make_datetime(2024, 12, 31);
-		acc2.update(Value::Datetime(dt.clone())).unwrap();
+		acc2.update(Value::Datetime(dt)).unwrap();
 
 		acc1.merge(acc2).unwrap();
 		let result = acc1.finalize().unwrap();

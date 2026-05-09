@@ -1045,7 +1045,7 @@ impl Transaction {
 		K: KVKey + Debug,
 	{
 		let rng = match prefix_key {
-			Some(prefix_key) => Some(util::to_prefix_range(prefix_key)?),
+			Some(prefix_key) => Some(util::to_prefix_range(&prefix_key)?),
 			None => None,
 		};
 		self.tr.inner.compact(rng).await
@@ -1214,7 +1214,7 @@ impl NamespaceProvider for Transaction {
 
 		// Invalidate the cached list of all namespaces
 		let list_key = cache::tx::Lookup::Nss;
-		self.cache.remove(list_key);
+		self.cache.remove(&list_key);
 
 		// Populate cache
 		let cached_ns = Arc::new(ns.clone());
@@ -1363,7 +1363,7 @@ impl DatabaseProvider for Transaction {
 
 		// Invalidate the cached list of all databases for this namespace
 		let list_key = cache::tx::Lookup::Dbs(db.namespace_id);
-		self.cache.remove(list_key);
+		self.cache.remove(&list_key);
 
 		// Populate cache
 		let cached_db = Arc::new(db.clone());
@@ -1391,11 +1391,11 @@ impl DatabaseProvider for Transaction {
 
 		// Invalidate the cached list of all databases for this namespace
 		let list_key = cache::tx::Lookup::Dbs(db.namespace_id);
-		self.cache.remove(list_key);
+		self.cache.remove(&list_key);
 
 		// Invalidate the cached database entry
 		let db_key = cache::tx::Lookup::DbByName(ns, &db.name);
-		self.cache.remove(db_key);
+		self.cache.remove(&db_key);
 
 		Ok(Some(()))
 	}
@@ -1841,7 +1841,7 @@ impl DatabaseProvider for Transaction {
 
 		// Invalidate the cached list of all functions for this database
 		let list_key = cache::tx::Lookup::Fcs(ns, db);
-		self.cache.remove(list_key);
+		self.cache.remove(&list_key);
 
 		// Set the entry in the cache
 		let qey = cache::tx::Lookup::Fc(ns, db, &fc.name);
@@ -1863,7 +1863,7 @@ impl DatabaseProvider for Transaction {
 
 		// Invalidate the cached list of all modules for this database
 		let list_key = cache::tx::Lookup::Mds(ns, db);
-		self.cache.remove(list_key);
+		self.cache.remove(&list_key);
 
 		// Set the entry in the cache
 		let qey = cache::tx::Lookup::Md(ns, db, &name);
@@ -1884,7 +1884,7 @@ impl DatabaseProvider for Transaction {
 
 		// Invalidate the cached list of all params for this database
 		let list_key = cache::tx::Lookup::Pas(ns, db);
-		self.cache.remove(list_key);
+		self.cache.remove(&list_key);
 
 		// Set the entry in the cache
 		let qey = cache::tx::Lookup::Pa(ns, db, &pa.name);
@@ -2087,7 +2087,7 @@ impl TableProvider for Transaction {
 
 		// Invalidate the cached list of all tables for this database
 		let list_key = cache::tx::Lookup::Tbs(tb.namespace_id, tb.database_id);
-		self.cache.remove(list_key);
+		self.cache.remove(&list_key);
 
 		// Populate cache
 		let cached_tb = Arc::new(tb.clone());
@@ -2116,13 +2116,13 @@ impl TableProvider for Transaction {
 
 		// Invalidate the cached list of all tables for this database
 		let list_key = cache::tx::Lookup::Tbs(tb.namespace_id, tb.database_id);
-		self.cache.remove(list_key);
+		self.cache.remove(&list_key);
 
 		// Clear the cache
 		let qey = cache::tx::Lookup::Tb(tb.namespace_id, tb.database_id, &tb.name);
-		self.cache.remove(qey);
+		self.cache.remove(&qey);
 		let qey = cache::tx::Lookup::TbByName(ns, db, &tb.name);
-		self.cache.remove(qey);
+		self.cache.remove(&qey);
 
 		Ok(())
 	}
@@ -2140,13 +2140,13 @@ impl TableProvider for Transaction {
 
 		// Invalidate the cached list of all tables for this database
 		let list_key = cache::tx::Lookup::Tbs(tb.namespace_id, tb.database_id);
-		self.cache.remove(list_key);
+		self.cache.remove(&list_key);
 
 		// Clear the cache
 		let qey = cache::tx::Lookup::Tb(tb.namespace_id, tb.database_id, &tb.name);
-		self.cache.remove(qey);
+		self.cache.remove(&qey);
 		let qey = cache::tx::Lookup::TbByName(ns, db, &tb.name);
-		self.cache.remove(qey);
+		self.cache.remove(&qey);
 
 		Ok(())
 	}
@@ -2382,7 +2382,7 @@ impl TableProvider for Transaction {
 
 		// Invalidate the cached list of all fields for this table
 		let list_key = cache::tx::Lookup::Fds(ns, db, tb.as_ref());
-		self.cache.remove(list_key);
+		self.cache.remove(&list_key);
 
 		// Set the entry in the cache
 		let qey = cache::tx::Lookup::Fd(ns, db, tb, &name);
@@ -2456,7 +2456,7 @@ impl TableProvider for Transaction {
 
 		// Invalidate the cached list of all indexes for this table
 		let list_key = cache::tx::Lookup::Ixs(ns, db, tb.as_ref());
-		self.cache.remove(list_key);
+		self.cache.remove(&list_key);
 
 		// Set the entry in the cache
 		let qey = cache::tx::Lookup::Ix(ns, db, tb, &ix.name);
@@ -2487,11 +2487,11 @@ impl TableProvider for Transaction {
 
 		// Invalidate the cached list of all indexes for this table
 		let list_key = cache::tx::Lookup::Ixs(ns, db, tb.as_ref());
-		self.cache.remove(list_key);
+		self.cache.remove(&list_key);
 
 		// Invalidate the cached index entry
 		let index_key = cache::tx::Lookup::Ix(ns, db, tb.as_ref(), &ix.name);
-		self.cache.remove(index_key);
+		self.cache.remove(&index_key);
 
 		Ok(())
 	}
@@ -2625,7 +2625,7 @@ impl TableProvider for Transaction {
 		self.del(&key).await?;
 		// Clear the value from the cache
 		let qey = cache::tx::Lookup::Record(ns, db, tb, id);
-		self.cache.remove(qey);
+		self.cache.remove(&qey);
 		// Return nothing
 		Ok(())
 	}
@@ -2825,7 +2825,7 @@ impl UserProvider for Transaction {
 
 		// Invalidate the cached list of all root users
 		let list_key = cache::tx::Lookup::Rus;
-		self.cache.remove(list_key);
+		self.cache.remove(&list_key);
 
 		// Set the entry in the cache
 		let qey = cache::tx::Lookup::Ru(&us.name);
@@ -2841,7 +2841,7 @@ impl UserProvider for Transaction {
 
 		// Invalidate the cached list of all namespace users
 		let list_key = cache::tx::Lookup::Nus(ns);
-		self.cache.remove(list_key);
+		self.cache.remove(&list_key);
 
 		// Set the entry in the cache
 		let qey = cache::tx::Lookup::Nu(ns, &us.name);
@@ -2862,7 +2862,7 @@ impl UserProvider for Transaction {
 
 		// Invalidate the cached list of all database users
 		let list_key = cache::tx::Lookup::Dus(ns, db);
-		self.cache.remove(list_key);
+		self.cache.remove(&list_key);
 
 		// Set the entry in the cache
 		let qey = cache::tx::Lookup::Du(ns, db, &us.name);
@@ -3246,13 +3246,13 @@ impl AuthorisationProvider for Transaction {
 
 		// Invalidate the cached list of all root accesses
 		let list_key = cache::tx::Lookup::Ras;
-		self.cache.remove(list_key);
+		self.cache.remove(&list_key);
 
 		// Invalidate the cached access entry and grants
 		let access_key = cache::tx::Lookup::Ra(ra);
-		self.cache.remove(access_key);
+		self.cache.remove(&access_key);
 		let grants_key = cache::tx::Lookup::Rgs(ra);
-		self.cache.remove(grants_key);
+		self.cache.remove(&grants_key);
 
 		Ok(())
 	}
@@ -3267,13 +3267,13 @@ impl AuthorisationProvider for Transaction {
 
 		// Invalidate the cached list of all namespace accesses
 		let list_key = cache::tx::Lookup::Nas(ns);
-		self.cache.remove(list_key);
+		self.cache.remove(&list_key);
 
 		// Invalidate the cached access entry and grants
 		let access_key = cache::tx::Lookup::Na(ns, na);
-		self.cache.remove(access_key);
+		self.cache.remove(&access_key);
 		let grants_key = cache::tx::Lookup::Ngs(ns, na);
-		self.cache.remove(grants_key);
+		self.cache.remove(&grants_key);
 
 		Ok(())
 	}
@@ -3288,13 +3288,13 @@ impl AuthorisationProvider for Transaction {
 
 		// Invalidate the cached list of all database accesses
 		let list_key = cache::tx::Lookup::Das(ns, db);
-		self.cache.remove(list_key);
+		self.cache.remove(&list_key);
 
 		// Invalidate the cached access entry and grants
 		let access_key = cache::tx::Lookup::Da(ns, db, da);
-		self.cache.remove(access_key);
+		self.cache.remove(&access_key);
 		let grants_key = cache::tx::Lookup::Dgs(ns, db, da);
-		self.cache.remove(grants_key);
+		self.cache.remove(&grants_key);
 
 		Ok(())
 	}
@@ -3372,7 +3372,7 @@ impl ApiProvider for Transaction {
 
 		// Invalidate the cached list of all APIs for this database
 		let list_key = cache::tx::Lookup::Aps(ns, db);
-		self.cache.remove(list_key);
+		self.cache.remove(&list_key);
 
 		// Set the entry in the cache
 		let qey = cache::tx::Lookup::Ap(ns, db, &name);

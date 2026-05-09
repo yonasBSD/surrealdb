@@ -50,6 +50,7 @@ pub fn invalid_params(msg: impl Into<String>) -> TypesError {
 }
 
 /// Internal error (wraps anyhow).
+#[allow(clippy::needless_pass_by_value)] // Public API: callers pass owned `anyhow::Error`.
 pub fn internal_error(err: anyhow::Error) -> TypesError {
 	TypesError::from_anyhow_with_chain(err)
 }

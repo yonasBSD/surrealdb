@@ -17,6 +17,7 @@ use crate::syn::parser::{ParseResult, Parser};
 use crate::syn::token::{DistanceKind, Span, TokenKind, VectorTypeKind, t};
 use crate::types::PublicDuration;
 
+#[derive(Clone, Copy)]
 pub(crate) enum MissingKind {
 	Split,
 	Order,

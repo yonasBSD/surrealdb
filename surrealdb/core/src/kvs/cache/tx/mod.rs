@@ -52,8 +52,8 @@ impl TransactionCache {
 	}
 
 	/// Remove an item from the datastore cache
-	pub(crate) fn remove(&self, lookup: Lookup) {
-		self.cache.remove(&lookup);
+	pub(crate) fn remove(&self, lookup: &Lookup<'_>) {
+		self.cache.remove(lookup);
 	}
 
 	/// Clear all items from the datastore cache

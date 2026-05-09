@@ -764,7 +764,7 @@ mod tests {
 	#[test]
 	fn string_replace() {
 		#[track_caller]
-		fn test(base: &str, pattern: Value, replacement: &str, expected: &str) {
+		fn test(base: &str, pattern: &Value, replacement: &str, expected: &str) {
 			assert_eq!(
 				replace((base.to_string(), pattern.clone(), replacement.to_string())).unwrap(),
 				Value::from(expected),
@@ -775,8 +775,8 @@ mod tests {
 			);
 		}
 
-		test("foo bar", Value::Regex("foo".parse().unwrap()), "bar", "bar bar");
-		test("foo bar", "bar".into(), "foo", "foo foo");
+		test("foo bar", &Value::Regex("foo".parse().unwrap()), "bar", "bar bar");
+		test("foo bar", &"bar".into(), "foo", "foo foo");
 	}
 
 	#[test]

@@ -16,7 +16,7 @@ pub fn advance_key(key: &mut [u8]) {
 	}
 }
 
-pub fn to_prefix_range<K: KVKey>(key: K) -> Result<Range<Vec<u8>>> {
+pub fn to_prefix_range<K: KVKey>(key: &K) -> Result<Range<Vec<u8>>> {
 	let start = key.encode_key()?;
 	let mut end = start.clone();
 	end.push(0xff);

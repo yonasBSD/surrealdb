@@ -330,6 +330,6 @@ async fn relate_enforced() -> Result<()> {
 	}",
 	)
 	.unwrap();
-	t.expect_value(info)?;
+	t.expect_value(&info)?;
 	Ok(())
 }

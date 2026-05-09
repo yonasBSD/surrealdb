@@ -430,7 +430,7 @@ impl<'ctx> Planner<'ctx> {
 								Ok(output_path) => {
 									FieldSelection::from_field_path(output_path, expr)
 								}
-								Err(output_name) => FieldSelection::new(output_name, expr),
+								Err(output_name) => FieldSelection::new(output_name.as_str(), expr),
 							}
 						};
 

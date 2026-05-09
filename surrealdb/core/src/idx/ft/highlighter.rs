@@ -32,7 +32,7 @@ pub(super) struct Highlighter {
 }
 
 impl Highlighter {
-	pub(super) fn new(hlp: HighlightParams, idiom: &Idiom, doc: &Value) -> Self {
+	pub(super) fn new(hlp: &HighlightParams, idiom: &Idiom, doc: &Value) -> Self {
 		let prefix = hlp.prefix.to_raw_string().chars().collect();
 		let suffix = hlp.suffix.to_raw_string().chars().collect();
 		// Extract the fields we want to highlight

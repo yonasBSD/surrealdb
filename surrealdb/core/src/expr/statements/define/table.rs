@@ -671,7 +671,7 @@ impl DefineTableStatement {
 
 						stats.push(AggregationStat::TimeMax {
 							arg,
-							max: d.clone(),
+							max: *d,
 						});
 					}
 					Aggregation::DatetimeMin(arg) => {
@@ -682,7 +682,7 @@ impl DefineTableStatement {
 
 						stats.push(AggregationStat::TimeMin {
 							arg,
-							min: d.clone(),
+							min: *d,
 						});
 					}
 					Aggregation::StdDev(arg) => {

@@ -1661,7 +1661,7 @@ impl Datastore {
 						// Decode the data for this live query
 						let val: NodeLiveQuery = KVValue::kv_decode_value(v.clone())?;
 						// Get the key for this node live query
-						let nlq = catch!(txn, crate::key::node::lq::Lq::decode_key(k.clone()));
+						let nlq = catch!(txn, crate::key::node::lq::Lq::decode_key(k));
 						// Check that the node for this query is archived
 						if archived.contains(&nlq.nd) {
 							// Get the key for this table live query
@@ -3195,6 +3195,7 @@ impl Datastore {
 
 	/// Checks the required permissions level for this session
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::ds", skip(self, sess))]
+	#[allow(clippy::needless_pass_by_value)] // Public API: ergonomic for callers passing `ResourceKind::X.on_db(ns, db)` inline.
 	pub fn check(&self, sess: &Session, action: Action, resource: Resource) -> Result<()> {
 		// Check if the session has expired
 		ensure!(!sess.expired(), Error::ExpiredSession);
@@ -3351,7 +3352,7 @@ impl Datastore {
 		let apis = tx.all_db_apis(db.namespace_id, db.database_id, None).await?;
 		let segments: Vec<&str> = path.split('/').filter(|x| !x.is_empty()).collect();
 
-		let res = match ApiDefinition::find_definition(apis.as_ref(), segments, req.method) {
+		let res = match ApiDefinition::find_definition(apis.as_ref(), &segments, req.method) {
 			Some((api, params)) => {
 				debug!(
 					request_id = %req.request_id,
@@ -3376,10 +3377,7 @@ impl Datastore {
 					"No API definition found for path"
 				);
 				tx.cancel().await?;
-				return Ok(ApiResponse::from_error(
-					ApiError::NotFound.into(),
-					req.request_id.clone(),
-				));
+				return Ok(ApiResponse::from_error(ApiError::NotFound, req.request_id.clone()));
 			}
 		};
 

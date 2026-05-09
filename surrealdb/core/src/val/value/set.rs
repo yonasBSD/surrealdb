@@ -249,8 +249,8 @@ impl Value {
 	/// Unlike `set()`, this doesn't require async/computation - just navigation.
 	/// When encountering an array, applies the remaining path to all elements.
 	/// This is used for output path navigation in the projection operator.
-	pub fn set_at_field_path(&mut self, path: &FieldPath, val: Value) {
-		self.set_at_field_path_depth(path, &val, 0);
+	pub fn set_at_field_path(&mut self, path: &FieldPath, val: &Value) {
+		self.set_at_field_path_depth(path, val, 0);
 	}
 
 	fn set_at_field_path_depth(&mut self, path: &FieldPath, val: &Value, depth: usize) {

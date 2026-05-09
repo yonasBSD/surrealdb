@@ -1564,7 +1564,7 @@ mod tests {
 							ctx.tx.cancel().await.unwrap();
 							let res = builder.collect();
 							assert_eq!(res.len(), knn, "Different size - knn: {knn}",);
-							let brute_force_res = collection.knn(pt, Distance::Euclidean, knn);
+							let brute_force_res = collection.knn(pt, &Distance::Euclidean, knn);
 							let rec = compute_recall(&brute_force_res, &res);
 							if rec == 1.0 {
 								assert_eq!(brute_force_res, res);
@@ -1632,12 +1632,12 @@ mod tests {
 	}
 
 	impl TestCollection {
-		fn knn(&self, pt: &SharedVector, dist: Distance, n: usize) -> KnnResult {
+		fn knn(&self, pt: &SharedVector, dist: &Distance, n: usize) -> KnnResult {
 			let mut b = KnnResultBuilder::new(n);
 			for (doc_id, doc_pt) in self.to_vec_ref() {
 				let d = dist.calculate(doc_pt, pt);
 				if b.check_add(d) {
-					b.add_graph_result(d, Ids64::One(*doc_id));
+					b.add_graph_result(d, &Ids64::One(*doc_id));
 				}
 			}
 			b.collect()

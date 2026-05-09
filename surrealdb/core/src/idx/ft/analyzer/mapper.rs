@@ -35,7 +35,7 @@ impl Mapper {
 
 	fn add_line_tree(
 		terms: &mut Tree<VariableSizeKey, String>,
-		line: String,
+		line: &str,
 		line_number: usize,
 	) -> Result<()> {
 		let Some((word, rest)) = line.split_once('\t') else {
@@ -70,7 +70,7 @@ impl Mapper {
 		let mut line_number = 0;
 		while let Some(line) = lines.next_line().await? {
 			yield_now!();
-			Self::add_line_tree(terms, line, line_number)?;
+			Self::add_line_tree(terms, &line, line_number)?;
 			line_number += 1;
 		}
 		Ok(())
@@ -83,7 +83,7 @@ impl Mapper {
 		let mut line_number = 0;
 		for line_result in reader.lines() {
 			let line = line_result?;
-			Self::add_line_tree(terms, line, line_number)?;
+			Self::add_line_tree(terms, &line, line_number)?;
 			line_number += 1;
 		}
 		Ok(())

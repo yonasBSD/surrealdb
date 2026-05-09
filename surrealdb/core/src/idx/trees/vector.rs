@@ -1044,7 +1044,7 @@ mod tests {
 		bytes
 	}
 
-	fn test_distance(dist: Distance, a1: &[f64], a2: &[f64], res: f64) {
+	fn test_distance(dist: &Distance, a1: &[f64], a2: &[f64], res: f64) {
 		// Convert the arrays to Vec<Number>
 		let mut v1 = vec![];
 		a1.iter().for_each(|&n| v1.push(n.into()));
@@ -1061,7 +1061,7 @@ mod tests {
 		assert_eq!(dist.calculate(&v1, &v2), res);
 	}
 
-	fn test_distance_collection(dist: Distance, size: usize, dim: usize) {
+	fn test_distance_collection(dist: &Distance, size: usize, dim: usize) {
 		let mut rng = get_seed_rnd();
 		for vt in [
 			VectorType::F64,
@@ -1073,7 +1073,7 @@ mod tests {
 			VectorType::I8,
 			VectorType::U8,
 		] {
-			let r#gen = RandomItemGenerator::new(&dist, dim);
+			let r#gen = RandomItemGenerator::new(dist, dim);
 			let mut num_zero = 0;
 			for i in 0..size {
 				let v1 = new_random_vec(&mut rng, vt, dim, &r#gen);
@@ -1096,55 +1096,55 @@ mod tests {
 
 	#[test]
 	fn test_distance_chebyshev() {
-		test_distance_collection(Distance::Chebyshev, 100, 1536);
-		test_distance(Distance::Chebyshev, &[1.0, 2.0, 3.0], &[2.0, 3.0, 4.0], 1.0);
+		test_distance_collection(&Distance::Chebyshev, 100, 1536);
+		test_distance(&Distance::Chebyshev, &[1.0, 2.0, 3.0], &[2.0, 3.0, 4.0], 1.0);
 	}
 
 	#[test]
 	fn test_distance_cosine() {
-		test_distance_collection(Distance::Cosine, 100, 1536);
-		test_distance(Distance::Cosine, &[1.0, 2.0, 3.0], &[2.0, 3.0, 4.0], 0.007416666029069652);
+		test_distance_collection(&Distance::Cosine, 100, 1536);
+		test_distance(&Distance::Cosine, &[1.0, 2.0, 3.0], &[2.0, 3.0, 4.0], 0.007416666029069652);
 	}
 
 	#[test]
 	fn test_distance_cosine_normalized() {
-		test_distance_collection(Distance::CosineNormalized, 100, 1536);
-		test_distance(Distance::CosineNormalized, &[1.0, 0.0, 0.0], &[0.5, 0.5, 0.0], 0.5);
+		test_distance_collection(&Distance::CosineNormalized, 100, 1536);
+		test_distance(&Distance::CosineNormalized, &[1.0, 0.0, 0.0], &[0.5, 0.5, 0.0], 0.5);
 	}
 
 	#[test]
 	fn test_distance_euclidean() {
-		test_distance_collection(Distance::Euclidean, 100, 1536);
-		test_distance(Distance::Euclidean, &[1.0, 2.0, 3.0], &[2.0, 3.0, 4.0], 1.7320508075688772);
+		test_distance_collection(&Distance::Euclidean, 100, 1536);
+		test_distance(&Distance::Euclidean, &[1.0, 2.0, 3.0], &[2.0, 3.0, 4.0], 1.7320508075688772);
 	}
 
 	#[test]
 	fn test_distance_hamming() {
-		test_distance_collection(Distance::Hamming, 100, 1536);
-		test_distance(Distance::Hamming, &[1.0, 2.0, 3.0], &[2.0, 3.0, 4.0], 3.0);
+		test_distance_collection(&Distance::Hamming, 100, 1536);
+		test_distance(&Distance::Hamming, &[1.0, 2.0, 3.0], &[2.0, 3.0, 4.0], 3.0);
 	}
 
 	#[test]
 	fn test_distance_inner_product() {
-		test_distance_collection(Distance::InnerProduct, 100, 1536);
-		test_distance(Distance::InnerProduct, &[1.0, 2.0, 3.0], &[2.0, 3.0, 4.0], -20.0);
+		test_distance_collection(&Distance::InnerProduct, 100, 1536);
+		test_distance(&Distance::InnerProduct, &[1.0, 2.0, 3.0], &[2.0, 3.0, 4.0], -20.0);
 	}
 
 	#[test]
 	fn test_distance_jaccard() {
-		test_distance_collection(Distance::Jaccard, 100, 768);
-		test_distance(Distance::Jaccard, &[1.0, 2.0, 3.0], &[2.0, 3.0, 4.0], 0.5);
+		test_distance_collection(&Distance::Jaccard, 100, 768);
+		test_distance(&Distance::Jaccard, &[1.0, 2.0, 3.0], &[2.0, 3.0, 4.0], 0.5);
 	}
 	#[test]
 	fn test_distance_manhattan() {
-		test_distance_collection(Distance::Manhattan, 100, 1536);
-		test_distance(Distance::Manhattan, &[1.0, 2.0, 3.0], &[2.0, 3.0, 4.0], 3.0);
+		test_distance_collection(&Distance::Manhattan, 100, 1536);
+		test_distance(&Distance::Manhattan, &[1.0, 2.0, 3.0], &[2.0, 3.0, 4.0], 3.0);
 	}
 	#[test]
 	fn test_distance_minkowski() {
-		test_distance_collection(Distance::Minkowski(3.into()), 100, 1536);
+		test_distance_collection(&Distance::Minkowski(3.into()), 100, 1536);
 		test_distance(
-			Distance::Minkowski(3.into()),
+			&Distance::Minkowski(3.into()),
 			&[1.0, 2.0, 3.0],
 			&[2.0, 3.0, 4.0],
 			1.4422495703074083,
@@ -1153,8 +1153,8 @@ mod tests {
 
 	#[test]
 	fn test_distance_pearson() {
-		test_distance_collection(Distance::Pearson, 100, 1536);
-		test_distance(Distance::Pearson, &[1.0, 2.0, 3.0], &[2.0, 3.0, 4.0], 1.0);
+		test_distance_collection(&Distance::Pearson, 100, 1536);
+		test_distance(&Distance::Pearson, &[1.0, 2.0, 3.0], &[2.0, 3.0, 4.0], 1.0);
 	}
 
 	#[test]

@@ -384,18 +384,18 @@ mod test {
 		*r
 	}
 
-	fn round_trip(r: Range) {
-		let enc = storekey::encode_vec(&r).unwrap();
+	fn round_trip(r: &Range) {
+		let enc = storekey::encode_vec(r).unwrap();
 		let dec = storekey::decode_borrow(&enc).unwrap();
-		assert_eq!(r, dec)
+		assert_eq!(r, &dec)
 	}
 
-	fn ensure_order(a: Range, b: Range) {
-		let a_enc = storekey::encode_vec(&a).unwrap();
-		let b_enc = storekey::encode_vec(&b).unwrap();
+	fn ensure_order(a: &Range, b: &Range) {
+		let a_enc = storekey::encode_vec(a).unwrap();
+		let b_enc = storekey::encode_vec(b).unwrap();
 
 		assert_eq!(
-			a.cmp(&b),
+			a.cmp(b),
 			a_enc.cmp(&b_enc),
 			"ordering of {a:?} {b:?} is not correct after encoding"
 		);
@@ -403,22 +403,22 @@ mod test {
 
 	#[test]
 	fn encode_decode() {
-		round_trip(r("1..2"));
-		round_trip(r(".."));
-		round_trip(r("1>.."));
-		round_trip(r("1>..=3"));
-		round_trip(r("..3"));
-		round_trip(r("'a'..'b'"));
+		round_trip(&r("1..2"));
+		round_trip(&r(".."));
+		round_trip(&r("1>.."));
+		round_trip(&r("1>..=3"));
+		round_trip(&r("..3"));
+		round_trip(&r("'a'..'b'"));
 	}
 
 	#[test]
 	fn encoding_ordering() {
-		ensure_order(r(".."), r(".."));
-		ensure_order(r(".."), r("1.."));
-		ensure_order(r("1.."), r("1>.."));
-		ensure_order(r(".."), r("..1"));
-		ensure_order(r(".."), r("..=1"));
-		ensure_order(r("1.."), r("2.."));
-		ensure_order(r("'a'.."), r("'b'.."));
+		ensure_order(&r(".."), &r(".."));
+		ensure_order(&r(".."), &r("1.."));
+		ensure_order(&r("1.."), &r("1>.."));
+		ensure_order(&r(".."), &r("..1"));
+		ensure_order(&r(".."), &r("..=1"));
+		ensure_order(&r("1.."), &r("2.."));
+		ensure_order(&r("'a'.."), &r("'b'.."));
 	}
 }
