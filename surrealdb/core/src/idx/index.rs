@@ -22,7 +22,8 @@ use uuid::Uuid;
 
 use crate::catalog::providers::TableProvider;
 use crate::catalog::{
-	DatabaseId, FullTextParams, HnswParams, Index, IndexDefinition, NamespaceId, TableId,
+	DatabaseId, DiskAnnParams, FullTextParams, HnswParams, Index, IndexDefinition, NamespaceId,
+	TableId,
 };
 use crate::ctx::FrozenContext;
 use crate::dbs::Options;
@@ -31,6 +32,8 @@ use crate::expr::{Cond, Part};
 use crate::idx::IndexKeyBase;
 use crate::idx::ft::fulltext::{FullTextCompactionPlan, FullTextIndex};
 use crate::idx::planner::iterators::{IndexCountCompactionPlan, IndexCountThingIterator};
+#[cfg(not(target_family = "wasm"))]
+use crate::idx::trees::diskann::index::{DiskAnnCompactionPlan, DiskAnnIndex};
 use crate::idx::trees::hnsw::index::{HnswCompactionPlan, HnswIndex};
 use crate::idx::trees::store::IndexStores;
 use crate::key;
@@ -123,6 +126,7 @@ impl<'a> IndexOperation<'a> {
 			Index::Idx => self.index_non_unique().await,
 			Index::FullText(p) => self.index_fulltext(stk, p, require_compaction).await,
 			Index::Hnsw(p) => self.index_hnsw(p, require_compaction).await,
+			Index::DiskAnn(p) => self.index_diskann(p, require_compaction).await,
 			Index::Count(c) => self.index_count(stk, c.as_ref(), require_compaction).await,
 		}
 	}
@@ -339,6 +343,33 @@ impl<'a> IndexOperation<'a> {
 		Ok(false)
 	}
 
+	#[cfg(not(target_family = "wasm"))]
+	/// Creates the read-phase plan for DiskANN pending compaction.
+	pub(crate) async fn prepare_diskann_compaction(
+		ctx: &FrozenContext,
+		ikb: &IndexKeyBase,
+	) -> Result<DiskAnnCompactionPlan> {
+		DiskAnnIndex::prepare_compaction(ctx, ikb).await
+	}
+
+	#[cfg(not(target_family = "wasm"))]
+	/// Applies a prepared DiskANN pending compaction plan.
+	pub(crate) async fn apply_diskann_compaction(
+		ctx: &FrozenContext,
+		ixs: &IndexStores,
+		ikb: &IndexKeyBase,
+		ix: &IndexDefinition,
+		p: &DiskAnnParams,
+		plan: DiskAnnCompactionPlan,
+	) -> Result<bool> {
+		let tx = ctx.tx();
+		if let Some(tb) = tx.get_tb(ikb.ns(), ikb.db(), ikb.table(), None).await? {
+			let diskann = ixs.get_index_diskann(ikb.ns(), ikb.db(), tb.table_id, ix, p).await?;
+			return diskann.apply_compaction(ctx, plan).await;
+		}
+		Ok(false)
+	}
+
 	/// Creates the read-phase plan for count-index compaction.
 	pub(crate) async fn prepare_count_compaction(
 		ikb: &IndexKeyBase,
@@ -460,6 +491,33 @@ impl<'a> IndexOperation<'a> {
 			*require_compaction = true;
 		}
 		Ok(())
+	}
+
+	async fn index_diskann(
+		&mut self,
+		p: &DiskAnnParams,
+		require_compaction: &mut bool,
+	) -> Result<()> {
+		#[cfg(target_family = "wasm")]
+		{
+			let _ = (p, require_compaction);
+			bail!("DISKANN indexes are not supported on WASM targets")
+		}
+		#[cfg(not(target_family = "wasm"))]
+		{
+			let diskann = self
+				.ctx
+				.get_index_stores()
+				.get_index_diskann(self.ns, self.db, self.tb, self.ix, p)
+				.await?;
+			let old_values = self.o.take();
+			let new_values = self.n.take();
+			if old_values.is_some() || new_values.is_some() {
+				diskann.index(self.ctx, &self.rid.key, old_values, new_values).await?;
+				*require_compaction = true;
+			}
+			Ok(())
+		}
 	}
 }
 

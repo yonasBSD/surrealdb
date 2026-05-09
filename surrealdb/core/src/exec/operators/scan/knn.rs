@@ -1,8 +1,8 @@
-//! KNN scan operator for HNSW index-backed vector search.
+//! KNN scan operator for ANN index-backed vector search.
 //!
-//! This operator performs approximate nearest-neighbor search using an HNSW
-//! index. It retrieves the top-K records closest to a query vector, ordered
-//! by distance (nearest first).
+//! This operator performs approximate nearest-neighbor search using an ANN
+//! index. It retrieves the top-K records closest to a query vector, ordered by
+//! distance (nearest first).
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -29,19 +29,19 @@ use crate::iam::Action;
 use crate::kvs::CachePolicy;
 use crate::val::Number;
 
-/// KNN scan operator using an HNSW index.
+/// KNN scan operator using an ANN index.
 ///
-/// Executes an approximate nearest-neighbor search against an HNSW index
+/// Executes an approximate nearest-neighbor search against an ANN index
 /// and returns the top-K matching records ordered by distance.
 #[derive(Debug)]
 pub struct KnnScan {
-	/// Reference to the HNSW index definition
+	/// Reference to the ANN index definition
 	pub index_ref: IndexRef,
 	/// The query vector to search for nearest neighbors of
 	pub vector: Vec<Number>,
 	/// Number of nearest neighbors to return
 	pub k: u32,
-	/// HNSW search expansion factor
+	/// ANN search expansion factor
 	pub ef: u32,
 	/// Table name for record fetching
 	pub table_name: crate::val::TableName,
@@ -54,10 +54,10 @@ pub struct KnnScan {
 	pub(crate) metrics: Arc<OperatorMetrics>,
 	/// KNN distance context, shared with IndexFunctionExec for vector::distance::knn().
 	pub(crate) knn_context: Option<Arc<crate::exec::function::KnnContext>>,
-	/// Residual WHERE condition (non-KNN predicates) to push down into HNSW
-	/// search. When present, the HNSW search will only consider candidates
-	/// that satisfy this condition, preventing non-matching rows from
-	/// consuming top-K slots.
+	/// Residual WHERE condition (non-KNN predicates) to push down into ANN
+	/// search. When present, the ANN search will only consider candidates that
+	/// satisfy this condition, preventing non-matching rows from consuming
+	/// top-K slots.
 	pub(crate) residual_cond: Option<Cond>,
 	/// Projection-aware field set for computed-field materialization.
 	/// Outer `None` = sub-operator mode (parent handles fields).
@@ -229,72 +229,107 @@ impl ExecOperator for KnnScan {
 				None => super::pipeline::FieldState::empty(),
 			};
 
-			// Get the HNSW parameters from the index definition
+			// Get the ANN parameters from the index definition
 			let index_def = index_ref.definition();
-			let hnsw_params = match &index_def.index {
-				Index::Hnsw(params) => params,
+			let knn_results = match &index_def.index {
+				Index::Hnsw(hnsw_params) => {
+					// Obtain the shared HNSW index
+					let hnsw_index = frozen_ctx
+						.get_index_stores()
+						.get_index_hnsw(
+							ns.namespace_id,
+							db.database_id,
+							frozen_ctx,
+							table_id,
+							index_def,
+							hnsw_params,
+						)
+						.await
+						.context("Failed to get HNSW index")?;
+
+					// Ensure the HNSW index state is current
+					hnsw_index
+						.check_state(frozen_ctx)
+						.await
+						.context("Failed to check HNSW index state")?;
+
+					let cond_filter = match (residual_cond.clone(), ctx.options()) {
+						(Some(cond), Some(opt)) => Some((opt, Arc::new(cond))),
+						_ => None,
+					};
+
+					let mut stack = TreeStack::new();
+					stack
+						.enter(|stk| {
+							let hnsw_index = &hnsw_index;
+							let vector = &vector;
+							async move {
+								hnsw_index
+									.knn_search(
+										frozen_ctx,
+										stk,
+										vector,
+										k as usize,
+										ef as usize,
+										cond_filter,
+									)
+									.await
+							}
+						})
+						.finish()
+						.await
+						.context("HNSW KNN search failed")?
+				}
+				#[cfg(not(target_family = "wasm"))]
+				Index::DiskAnn(diskann_params) => {
+					let diskann_index = frozen_ctx
+						.get_index_stores()
+						.get_index_diskann(
+							ns.namespace_id,
+							db.database_id,
+							table_id,
+							index_def,
+							diskann_params,
+						)
+						.await
+						.context("Failed to get DiskANN index")?;
+
+					diskann_index.check_state().await.context("Failed to check DiskANN index state")?;
+
+					let cond_filter = match (residual_cond.clone(), ctx.options()) {
+						(Some(cond), Some(opt)) => Some((opt, Arc::new(cond))),
+						_ => None,
+					};
+
+					let mut stack = TreeStack::new();
+					stack
+						.enter(|stk| {
+							let diskann_index = &diskann_index;
+							let vector = &vector;
+							async move {
+								diskann_index
+									.knn_search(
+										frozen_ctx,
+										stk,
+										vector,
+										k as usize,
+										ef as usize,
+										cond_filter,
+									)
+									.await
+							}
+						})
+						.finish()
+						.await
+						.context("DiskANN KNN search failed")?
+				}
 				_ => {
 					Err(ControlFlow::Err(anyhow::anyhow!(
-						"Index '{}' is not an HNSW index",
+						"Index '{}' is not an ANN index",
 						index_def.name
 					)))?;
 					unreachable!()
 				}
-			};
-
-			// Obtain the shared HNSW index
-			let hnsw_index = frozen_ctx
-				.get_index_stores()
-				.get_index_hnsw(
-					ns.namespace_id,
-					db.database_id,
-					frozen_ctx,
-					table_id,
-					index_def,
-					hnsw_params,
-				)
-				.await
-				.context("Failed to get HNSW index")?;
-
-			// Ensure the HNSW index state is current
-			hnsw_index
-				.check_state(frozen_ctx)
-				.await
-				.context("Failed to check HNSW index state")?;
-
-			// Build condition checker. When there are residual (non-KNN) predicates
-			// in the WHERE clause, push them into the HNSW search so that rows
-			// not satisfying the condition do not consume top-K slots.
-			let cond_filter = match (residual_cond, ctx.options()) {
-				(Some(cond), Some(opt)) => {
-					Some((opt, Arc::new(cond)))
-				}
-				_ => None
-			};
-
-			// Execute the KNN search using a TreeStack for recursion safety
-			let knn_results = {
-				let mut stack = TreeStack::new();
-				stack
-					.enter(|stk| {
-						let hnsw_index = &hnsw_index;
-						let vector = &vector;
-						async move {
-							hnsw_index
-								.knn_search(
-									frozen_ctx,
-									stk,
-									vector,
-									k as usize,
-									ef as usize,
-									cond_filter,
-								)
-								.await
-						}
-					})
-					.finish()
-					.await
-					.context("HNSW KNN search failed")?
 			};
 
 			let mut rids = Vec::with_capacity(knn_results.len());

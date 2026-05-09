@@ -126,7 +126,7 @@ impl<'a> arbitrary::Arbitrary<'a> for DefineIndexStatement {
 				}
 				cols
 			}
-			Index::Hnsw(_) | Index::FullText(_) => vec![u.arbitrary()?],
+			Index::Hnsw(_) | Index::DiskAnn(_) | Index::FullText(_) => vec![u.arbitrary()?],
 			Index::Count(_) => Vec::new(),
 		};
 

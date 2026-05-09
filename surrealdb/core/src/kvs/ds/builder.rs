@@ -227,7 +227,7 @@ impl Builder {
 			transaction_timeout: self.transaction_timeout,
 			notification_channel: self.notify_channel,
 			capabilities,
-			index_stores: IndexStores::new(config.hnsw_cache_size),
+			index_stores: IndexStores::new(config.hnsw_cache_size, config.diskann_cache_size),
 			index_builder: IndexBuilder::new(tf.clone()),
 			#[cfg(feature = "jwks")]
 			jwks_cache: Arc::new(RwLock::new(JwksCache::new())),

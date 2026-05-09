@@ -598,18 +598,21 @@ mod tests {
 	use reblessive::tree::Stk;
 	use test_log::test;
 
-	use crate::catalog::providers::CatalogProvider;
+	use crate::catalog::providers::{CatalogProvider, TableProvider};
 	use crate::catalog::{
 		DatabaseId, Distance, HnswParams, IndexId, NamespaceId, TableDefinition, TableId,
 		VectorType,
 	};
 	use crate::ctx::{Context, FrozenContext};
+	use crate::dbs::Session;
 	use crate::idx::IndexKeyBase;
 	use crate::idx::seqdocids::DocId;
 	use crate::idx::trees::hnsw::docs::VecDocs;
 	use crate::idx::trees::hnsw::flavor::HnswFlavor;
 	use crate::idx::trees::hnsw::index::{HnswContext, HnswIndex};
-	use crate::idx::trees::hnsw::{ElementId, HnswRecordPendingUpdate, HnswSearch, VectorId};
+	use crate::idx::trees::hnsw::{
+		ElementId, HnswRecordPendingUpdate, HnswSearch, HnswState, VectorId,
+	};
 	use crate::idx::trees::knn::tests::{TestCollection, new_vectors_from_file};
 	use crate::idx::trees::knn::{Ids64, KnnResult, KnnResultBuilder};
 	use crate::idx::trees::vector::{SerializedVector, SharedVector, Vector};
@@ -698,7 +701,8 @@ mod tests {
 		let tb = TableId(3);
 		let tb = TableDefinition::new(ns, db, tb, "tb".into());
 		let ikb = IndexKeyBase::new(ns, db, "tb".into(), IndexId(4));
-		let vec_docs = VecDocs::new(ikb.clone(), false);
+		let vec_docs =
+			VecDocs::new(ikb.clone(), tb.table_id, ds.index_store().vector_cache().clone(), false);
 		let mut h = HnswFlavor::new(
 			tb.table_id,
 			IndexKeyBase::new(NamespaceId(1), DatabaseId(2), tb.name.clone(), IndexId(4)),
@@ -804,6 +808,42 @@ mod tests {
 		for f in futures {
 			f.await.expect("Task error");
 		}
+		Ok(())
+	}
+
+	#[test(tokio::test(flavor = "multi_thread"))]
+	async fn test_hnsw_u8_euclidean() -> Result<()> {
+		let p = new_params(5, VectorType::U8, Distance::Euclidean, 24, 500, false, false, false);
+		test_hnsw(30, p).await;
+		Ok(())
+	}
+
+	#[test(tokio::test(flavor = "multi_thread"))]
+	async fn test_hnsw_inner_product_smoke() -> Result<()> {
+		let ds = Datastore::new("memory").await?;
+		{
+			let tx = ds.transaction(TransactionType::Write, Optimistic).await?;
+			tx.ensure_ns_db(None, "test", "test").await?;
+			tx.commit().await?;
+		}
+		let session = Session::owner().with_ns("test").with_db("test");
+		let sql = "
+			DEFINE INDEX hnsw_pts ON pts FIELDS point HNSW DIMENSION 2 DIST INNER_PRODUCT TYPE F32 EFC 100 M 12;
+			CREATE pts:1 SET point = [1f, 0f];
+			CREATE pts:2 SET point = [2f, 0f];
+			CREATE pts:3 SET point = [0f, 1f];
+		";
+		for response in ds.execute(sql, &session, None).await? {
+			response.result?;
+		}
+
+		let mut response =
+			ds.execute("SELECT id FROM pts WHERE point <|2,40|> [1f, 0f];", &session, None).await?;
+		let result = response.remove(0).result?;
+		let surrealdb_types::Value::Array(result) = result else {
+			panic!("Expected array result");
+		};
+		assert_eq!(result.len(), 2);
 		Ok(())
 	}
 
@@ -1041,7 +1081,8 @@ mod tests {
 		let ikb = IndexKeyBase::new(NamespaceId(1), DatabaseId(2), "tb".into(), IndexId(4));
 		let p = new_params(2, VectorType::I16, Distance::Euclidean, 3, 500, true, true, true);
 		let ds = Arc::new(Datastore::new("memory").await.unwrap());
-		let vec_docs = VecDocs::new(ikb.clone(), false);
+		let vec_docs =
+			VecDocs::new(ikb.clone(), TableId(3), ds.index_store().vector_cache().clone(), false);
 		let mut h =
 			HnswFlavor::new(TableId(3), ikb.clone(), &p, ds.index_store().vector_cache().clone())
 				.unwrap();
@@ -1120,6 +1161,101 @@ mod tests {
 		assert_eq!(pending.old_vectors, vec![serialized(&first)]);
 		assert!(pending.new_vectors.is_empty());
 		tx.cancel().await?;
+		Ok(())
+	}
+
+	#[test(tokio::test(flavor = "multi_thread"))]
+	async fn hnsw_compaction_deletes_pending_key_after_final_batch() -> Result<()> {
+		let ds = Datastore::new("memory").await?;
+		let ikb = IndexKeyBase::new(NamespaceId(1), DatabaseId(2), "tb".into(), IndexId(4));
+		let p = new_params(2, VectorType::I16, Distance::Euclidean, 3, 500, true, true, true);
+		let id = RecordIdKey::Number(1);
+		let first = new_i16_vec(1, 1);
+		let h = {
+			let ctx = new_ctx(&ds, TransactionType::Write).await;
+			let tx = ctx.tx();
+			let h = HnswIndex::new(
+				ctx.get_index_stores().vector_cache().clone(),
+				&tx,
+				ikb.clone(),
+				TableId(3),
+				&p,
+			)
+			.await?;
+			h.index(&ctx, &id, None, Some(vector_content(&first))).await?;
+			tx.commit().await?;
+			h
+		};
+
+		let plan = {
+			let ctx = new_ctx(&ds, TransactionType::Read).await;
+			let plan = HnswIndex::prepare_compaction(&ctx, &ikb).await?;
+			ctx.tx().cancel().await?;
+			plan
+		};
+		assert!(plan.has_work());
+		assert!(!plan.has_more());
+
+		{
+			let ctx = new_ctx(&ds, TransactionType::Write).await;
+			assert!(h.apply_compaction(&ctx, plan).await?);
+			ctx.tx().commit().await?;
+		}
+
+		{
+			let ctx = new_ctx(&ds, TransactionType::Read).await;
+			assert!(ctx.tx().get::<_>(&ikb.new_hr_key(&id), None).await?.is_none());
+			ctx.tx().cancel().await?;
+		}
+		Ok(())
+	}
+
+	#[test(tokio::test(flavor = "multi_thread"))]
+	async fn hnsw_empty_compaction_plan_preserves_concurrent_pending_write() -> Result<()> {
+		let ds = Datastore::new("memory").await?;
+		let ikb = IndexKeyBase::new(NamespaceId(1), DatabaseId(2), "tb".into(), IndexId(4));
+		let p = new_params(2, VectorType::I16, Distance::Euclidean, 3, 500, true, true, true);
+		let h = {
+			let ctx = new_ctx(&ds, TransactionType::Write).await;
+			let tx = ctx.tx();
+			let h = HnswIndex::new(
+				ctx.get_index_stores().vector_cache().clone(),
+				&tx,
+				ikb.clone(),
+				TableId(3),
+				&p,
+			)
+			.await?;
+			tx.commit().await?;
+			h
+		};
+		let id = RecordIdKey::Number(1);
+		let first = new_i16_vec(1, 1);
+
+		let plan = {
+			let ctx = new_ctx(&ds, TransactionType::Read).await;
+			let plan = HnswIndex::prepare_compaction(&ctx, &ikb).await?;
+			ctx.tx().cancel().await?;
+			plan
+		};
+		assert!(!plan.has_work());
+
+		{
+			let ctx = new_ctx(&ds, TransactionType::Write).await;
+			h.index(&ctx, &id, None, Some(vector_content(&first))).await?;
+			ctx.tx().commit().await?;
+		}
+		{
+			let ctx = new_ctx(&ds, TransactionType::Write).await;
+			assert!(!h.apply_compaction(&ctx, plan).await?);
+			ctx.tx().cancel().await?;
+		}
+
+		{
+			let ctx = new_ctx(&ds, TransactionType::Read).await;
+			assert!(ctx.tx().get::<_>(&ikb.new_hr_key(&id), None).await?.is_some());
+			ctx.tx().cancel().await?;
+		}
 		Ok(())
 	}
 
@@ -1280,6 +1416,71 @@ mod tests {
 			assert!(!h.apply_compaction(&ctx, plan_2).await?);
 			ctx.tx().cancel().await?;
 		}
+		Ok(())
+	}
+
+	#[test(tokio::test(flavor = "multi_thread"))]
+	async fn hnsw_blocking_define_index_compacts_pending_vectors() -> Result<()> {
+		let ds = Datastore::new("memory").await?;
+		let db = {
+			let tx = ds.transaction(TransactionType::Write, Optimistic).await?;
+			let db = tx.ensure_ns_db(None, "test", "test").await?;
+			tx.commit().await?;
+			db
+		};
+		let session = Session::owner().with_ns("test").with_db("test");
+		let sql = "
+			CREATE pts:1 SET point = [1f, 2f];
+			CREATE pts:2 SET point = [2f, 3f];
+			CREATE pts:3 SET point = [3f, 4f];
+			DEFINE INDEX hnsw_pts ON pts FIELDS point HNSW DIMENSION 2 DIST EUCLIDEAN TYPE F32 EFC 100 M 12;
+		";
+		for response in ds.execute(sql, &session, None).await? {
+			response.result?;
+		}
+
+		let tx = ds.transaction(TransactionType::Read, Optimistic).await?;
+		let tb = "pts".into();
+		let ix =
+			tx.get_tb_index(db.namespace_id, db.database_id, &tb, "hnsw_pts", None).await?.unwrap();
+		let ikb = IndexKeyBase::new(db.namespace_id, db.database_id, tb, ix.index_id);
+		let pending_records = tx.getr(ikb.new_hr_range()?, None).await?;
+		let pending_appends = tx.getr(ikb.new_hp_range()?, None).await?;
+		let state: HnswState = tx.get(&ikb.new_hs_key(), None).await?.unwrap();
+		tx.cancel().await?;
+
+		assert!(pending_records.is_empty());
+		assert!(pending_appends.is_empty());
+		assert_eq!(state.next_element_id, 3);
+		Ok(())
+	}
+
+	#[test(tokio::test(flavor = "multi_thread"))]
+	async fn hnsw_query_reads_record_keyed_pending_vectors() -> Result<()> {
+		let ds = Datastore::new("memory").await?;
+		{
+			let tx = ds.transaction(TransactionType::Write, Optimistic).await?;
+			tx.ensure_ns_db(None, "test", "test").await?;
+			tx.commit().await?;
+		}
+		let session = Session::owner().with_ns("test").with_db("test");
+		let sql = "
+			DEFINE INDEX hnsw_pts ON pts FIELDS point HNSW DIMENSION 2 DIST EUCLIDEAN TYPE F32 EFC 100 M 12;
+			CREATE pts:1 SET point = [1f, 2f];
+			CREATE pts:2 SET point = [2f, 3f];
+			CREATE pts:3 SET point = [3f, 4f];
+		";
+		for response in ds.execute(sql, &session, None).await? {
+			response.result?;
+		}
+
+		let mut response =
+			ds.execute("SELECT id FROM pts WHERE point <|2,40|> [1f, 2f];", &session, None).await?;
+		let result = response.remove(0).result?;
+		let surrealdb_types::Value::Array(result) = result else {
+			panic!("Expected array result");
+		};
+		assert_eq!(result.len(), 2);
 		Ok(())
 	}
 

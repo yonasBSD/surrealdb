@@ -18,7 +18,17 @@ use crate::idx::seqdocids::DocId;
 use crate::idx::trees::hnsw::ElementId;
 use crate::idx::trees::vector::SerializedVector;
 use crate::key::index::dc::Dc;
+use crate::key::index::dd::{Dd, DdRoot};
+use crate::key::index::de::De;
+use crate::key::index::dg::Dg;
+use crate::key::index::dh::Dh;
+use crate::key::index::di::Di;
 use crate::key::index::dl::Dl;
+use crate::key::index::dn::Dn;
+use crate::key::index::dp::Dp;
+use crate::key::index::dq::Dq;
+use crate::key::index::dr::{DiskAnnRecordPending, DiskAnnRecordPendingPrefix};
+use crate::key::index::ds::Ds;
 use crate::key::index::dv::Dv;
 use crate::key::index::hd::{Hd, HdRoot};
 use crate::key::index::he::He;
@@ -180,6 +190,71 @@ impl IndexKeyBase {
 
 	fn new_hs_key(&self) -> Hs<'_> {
 		Hs::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix)
+	}
+
+	/// Root key storing DiskANN document-id allocator state.
+	fn new_dd_root_key(&self) -> DdRoot<'_> {
+		DdRoot::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix)
+	}
+
+	/// Key mapping a compact DiskANN document ID to a record key.
+	fn new_dd_key(&self, doc_id: DocId) -> Dd<'_> {
+		Dd::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix, doc_id)
+	}
+
+	/// Key storing a DiskANN graph element vector/status payload.
+	fn new_de_key(&self, element_id: ElementId) -> De<'_> {
+		De::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix, element_id)
+	}
+
+	/// Range covering all DiskANN graph element payloads.
+	fn new_de_range(&self) -> Result<Range<Key>> {
+		De::range(self.0.ns, self.0.db, &self.0.tb, self.0.ix)
+	}
+
+	/// Key storing the DiskANN pending compaction generation.
+	fn new_dg_key(&self) -> Dg<'_> {
+		Dg::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix)
+	}
+
+	/// Key mapping a vector hash to DiskANN hashed-vector document mappings.
+	fn new_dh_key(&self, hash: [u8; 32]) -> Dh<'_> {
+		Dh::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix, hash)
+	}
+
+	/// Key mapping a record key to a compact DiskANN document ID.
+	fn new_di_key<'a>(&'a self, id: &'a RecordIdKey) -> Di<'a> {
+		Di::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix, id)
+	}
+
+	/// Key storing one DiskANN graph adjacency list.
+	fn new_dn_key(&self, element_id: ElementId) -> Dn<'_> {
+		Dn::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix, element_id)
+	}
+
+	/// Key storing one shard of the distributed-safe DiskANN pending-state guard.
+	fn new_dp_key(&self, shard: u16) -> Dp<'_> {
+		Dp::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix, shard)
+	}
+
+	/// Key mapping an exact serialized vector to its DiskANN document set.
+	fn new_dq_key<'a>(&'a self, vec: &'a SerializedVector) -> Dq<'a> {
+		Dq::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix, vec)
+	}
+
+	/// Key storing the pending DiskANN update for one record.
+	fn new_dr_key<'a>(&'a self, id: &'a RecordIdKey) -> DiskAnnRecordPending<'a> {
+		DiskAnnRecordPending::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix, id)
+	}
+
+	/// Range covering record-keyed DiskANN pending updates.
+	fn new_dr_range(&self) -> Result<Range<Key>> {
+		DiskAnnRecordPendingPrefix::range(self.0.ns, self.0.db, &self.0.tb, self.0.ix)
+	}
+
+	/// Key storing the DiskANN graph state.
+	fn new_ds_key(&self) -> Ds<'_> {
+		Ds::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix)
 	}
 
 	fn new_ii_key(&self, doc_id: DocId) -> Ii<'_> {

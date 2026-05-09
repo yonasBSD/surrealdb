@@ -91,14 +91,14 @@ pub enum AccessPath {
 		operator: MatchesOperator,
 	},
 
-	/// KNN vector search using an HNSW index.
+	/// KNN vector search using an ANN index.
 	KnnSearch {
 		index_ref: IndexRef,
 		/// The query vector to search for nearest neighbors of
 		vector: Vec<Number>,
 		/// Number of nearest neighbors to return
 		k: u32,
-		/// HNSW search expansion factor
+		/// ANN search expansion factor
 		ef: u32,
 	},
 
@@ -158,13 +158,13 @@ pub enum BTreeAccess {
 		operator: crate::expr::operator::MatchesOperator,
 	},
 
-	/// KNN vector search access via HNSW index.
+	/// KNN vector search access via ANN index.
 	Knn {
 		/// The query vector
 		vector: Vec<Number>,
 		/// Number of nearest neighbors
 		k: u32,
-		/// HNSW search expansion factor
+		/// ANN search expansion factor
 		ef: u32,
 	},
 }

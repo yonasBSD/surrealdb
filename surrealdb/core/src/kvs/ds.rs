@@ -1,3 +1,4 @@
+use std::any::{Any, TypeId};
 #[cfg(not(target_family = "wasm"))]
 use std::collections::HashMap;
 #[cfg(target_family = "wasm")]
@@ -405,6 +406,15 @@ pub trait TransactionBuilder: TransactionBuilderRequirements {
 	///
 	/// - `metric`: The name of the metric to collect.
 	fn collect_u64_metric(&self, metric: &str) -> Option<u64>;
+
+	/// Returns an immutable backend-specific extension handle.
+	///
+	/// Backends expose only stable, shareable handles through this hook. The
+	/// default implementation keeps community datastores free of extension
+	/// state.
+	fn extension(&self, _: TypeId) -> Option<Arc<dyn Any + Send + Sync>> {
+		None
+	}
 }
 
 /// Transaction-builder construction result with router startup state.
@@ -880,7 +890,10 @@ impl Datastore {
 			transaction_timeout: self.transaction_timeout,
 			capabilities: self.capabilities.clone(),
 			notification_channel: self.notification_channel,
-			index_stores: IndexStores::new(self.config.hnsw_cache_size),
+			index_stores: IndexStores::new(
+				self.config.hnsw_cache_size,
+				self.config.diskann_cache_size,
+			),
 			index_builder: IndexBuilder::new(self.transaction_factory.clone()),
 			#[cfg(feature = "jwks")]
 			jwks_cache: Arc::new(Default::default()),
@@ -2143,7 +2156,7 @@ impl Datastore {
 	///
 	/// Looks up the index definition identified by `ikb` and dispatches to
 	/// the appropriate compaction implementation based on the index type:
-	/// full-text, count, or HNSW. Indexes that are being removed
+	/// full-text, count, HNSW, or DiskANN. Indexes that are being removed
 	/// (`prepare_remove`), not found, or of an unsupported type are silently
 	/// skipped with a trace log.
 	async fn process_index_compaction(
@@ -2172,6 +2185,10 @@ impl Datastore {
 					// HNSW compaction owns its pending-key allocation and pending-range
 					// drain semantics separately from full-text/count compaction.
 					self.process_hnsw_compaction(ikb, &canceller).await?;
+				}
+				#[cfg(not(target_family = "wasm"))]
+				Index::DiskAnn(_) => {
+					self.process_diskann_compaction(ikb, &canceller).await?;
 				}
 				_ => {
 					trace!(target: TARGET, "Index compaction: Index {:?} does not support compaction, skipping", ikb);
@@ -2332,6 +2349,124 @@ impl Datastore {
 					.await
 					{
 						continue;
+					}
+					return Err(e);
+				}
+			}
+			Self::ensure_not_cancelled(canceller)?;
+			if !has_more {
+				return Ok(());
+			}
+		}
+	}
+
+	#[cfg(not(target_family = "wasm"))]
+	/// Runs DiskANN compaction as bounded read-plan/write-apply batches.
+	async fn process_diskann_compaction(
+		&self,
+		ikb: &IndexKeyBase,
+		canceller: &CancellationToken,
+	) -> Result<()> {
+		loop {
+			Self::ensure_not_cancelled(canceller)?;
+			let prepared = {
+				let txn = Arc::new(self.transaction(Read, Optimistic).await?);
+				let res: Result<
+					Option<(
+						crate::catalog::TableId,
+						crate::idx::trees::diskann::index::DiskAnnCompactionPlan,
+					)>,
+				> = async {
+					let Some(tb) = txn.get_tb(ikb.ns(), ikb.db(), ikb.table(), None).await? else {
+						return Ok(None);
+					};
+					match txn
+						.get_tb_index_by_id(ikb.ns(), ikb.db(), ikb.table(), ikb.index(), None)
+						.await?
+					{
+						Some(ix)
+							if !ix.prepare_remove && matches!(&ix.index, Index::DiskAnn(_)) =>
+						{
+							let mut ctx = self.setup_ctx()?;
+							ctx.set_transaction(txn.clone());
+							let ctx = ctx.freeze();
+							let plan =
+								IndexOperation::prepare_diskann_compaction(&ctx, ikb).await?;
+							Ok(Some((tb.table_id, plan)))
+						}
+						_ => Ok(None),
+					}
+				}
+				.await;
+				let _ = txn.cancel().await;
+				res?
+			};
+			let Some((tb, plan)) = prepared else {
+				return Ok(());
+			};
+			if !plan.requires_apply() {
+				return Ok(());
+			}
+			let has_more = plan.has_more();
+			Self::ensure_not_cancelled(canceller)?;
+
+			let txn = Arc::new(self.transaction(Write, Optimistic).await?);
+			let res: Result<bool> = async {
+				match txn
+					.get_tb_index_by_id(ikb.ns(), ikb.db(), ikb.table(), ikb.index(), None)
+					.await?
+				{
+					Some(ix) if !ix.prepare_remove => match &ix.index {
+						Index::DiskAnn(p) => {
+							let mut ctx = self.setup_ctx()?;
+							ctx.set_transaction(txn.clone());
+							let ctx = ctx.freeze();
+							IndexOperation::apply_diskann_compaction(
+								&ctx,
+								&self.index_stores,
+								ikb,
+								&ix,
+								p,
+								plan,
+							)
+							.await
+						}
+						_ => Ok(false),
+					},
+					_ => Ok(false),
+				}
+			}
+			.await;
+			match res {
+				Ok(true) => {
+					if let Err(e) = Self::ensure_not_cancelled(canceller) {
+						let _ = txn.cancel().await;
+						if let Err(evict) =
+							self.index_stores.remove_diskann_index(tb, ikb.clone()).await
+						{
+							warn!(target: TARGET, "Failed to evict DiskANN index after compaction cancellation: {evict}");
+						}
+						return Err(e);
+					}
+					if let Err(e) = txn.commit().await {
+						if let Err(evict) =
+							self.index_stores.remove_diskann_index(tb, ikb.clone()).await
+						{
+							warn!(target: TARGET, "Failed to evict DiskANN index after compaction commit error: {evict}");
+						}
+						return Err(e);
+					}
+				}
+				Ok(false) => {
+					let _ = txn.cancel().await;
+					return Ok(());
+				}
+				Err(e) => {
+					let _ = txn.cancel().await;
+					if let Err(evict) =
+						self.index_stores.remove_diskann_index(tb, ikb.clone()).await
+					{
+						warn!(target: TARGET, "Failed to evict DiskANN index after compaction error: {evict}");
 					}
 					return Err(e);
 				}

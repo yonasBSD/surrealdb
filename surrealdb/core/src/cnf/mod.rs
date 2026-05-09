@@ -242,8 +242,10 @@ pub struct CommonConfig {
 	pub global_bucket_enforced: bool,
 	/// Specify the USER-AGENT string used by HTTP requests
 	pub surrealdb_user_agent: String,
-	/// The maximum size of the HNSW vector cache (default: 256 MiB)
+	/// The maximum total size of the HNSW ANN cache (default: 256 MiB)
 	pub hnsw_cache_size: u64,
+	/// The maximum total size of the DiskANN ANN cache (default: 256 MiB)
+	pub diskann_cache_size: u64,
 	/// Specifies the number of surrealism modules which can be cached across transactions
 	/// (default: 100)
 	pub surrealism_cache_size: usize,
@@ -314,6 +316,7 @@ impl Default for CommonConfig {
 			global_bucket_enforced: false,
 			surrealdb_user_agent: "SurrealDB".to_string(),
 			hnsw_cache_size: 256 * 1024 * 1024,
+			diskann_cache_size: 256 * 1024 * 1024,
 			surrealism_cache_size: 100,
 			surrealism_max_memory: None,
 			surrealism_max_execution_time: None,
@@ -365,6 +368,8 @@ impl Config for CommonConfig {
 			x.parse::<usize>().ok().map(|x| 2 << x.min(28))
 		})
 		.parse_key("string_similarity_limit", &mut self.string_similarity_limit)
+		.parse_key("hnsw_cache_size", &mut self.hnsw_cache_size)
+		.parse_key("diskann_cache_size", &mut self.diskann_cache_size)
 		.parse_key_with("file_allowlist", &mut self.file_allowlist, |x| {
 			// FIXME: We really shouldn't be doing random, faillable, IO when reading configuration
 			// values. But no way to fix it without restructuring the datastore entirely.

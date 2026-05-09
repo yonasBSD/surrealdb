@@ -12,7 +12,7 @@ use crate::sql::changefeed::ChangeFeed;
 use crate::sql::data::Assignment;
 use crate::sql::field::Selector;
 use crate::sql::filter::Filter;
-use crate::sql::index::{Distance, FullTextParams, HnswParams, VectorType};
+use crate::sql::index::{DiskAnnParams, Distance, FullTextParams, HnswParams, VectorType};
 use crate::sql::language::Language;
 use crate::sql::literal::ObjectEntry;
 use crate::sql::lookup::{LookupKind, LookupSubject};
@@ -1756,6 +1756,142 @@ fn parse_define_index() {
 			comment: Expr::Literal(Literal::None),
 			concurrently: false
 		})))
+	);
+
+	let res = syn::parse_with(
+		r#"DEFINE INDEX index ON TABLE table FIELDS a DISKANN DIMENSION 128"#.as_bytes(),
+		async |parser, stk| parser.parse_expr_inherit(stk).await,
+	)
+	.unwrap();
+	assert_eq!(
+		res,
+		Expr::Define(Box::new(DefineStatement::Index(DefineIndexStatement {
+			kind: DefineKind::Default,
+			name: Expr::Idiom(Idiom::field("index".to_string())),
+			what: Expr::Table("table".into()),
+			cols: vec![Expr::Idiom(Idiom(vec![Part::Field(Strand::new_static("a"))]))],
+			index: Index::DiskAnn(DiskAnnParams {
+				dimension: 128,
+				distance: Distance::Euclidean,
+				vector_type: VectorType::F32,
+				degree: 64,
+				l_build: 100,
+				alpha: 1.2.into(),
+				use_hashed_vector: false,
+			}),
+			comment: Expr::Literal(Literal::None),
+			concurrently: false
+		})))
+	);
+
+	let res = syn::parse_with(
+		r#"DEFINE INDEX index ON TABLE table FIELDS a DISKANN DIMENSION 128 DEGREE 32 L_BUILD 88 ALPHA 1.4 TYPE F32 DISTANCE COSINE HASHED_VECTOR"#.as_bytes(),
+		async |parser, stk| parser.parse_expr_inherit(stk).await,
+	)
+	.unwrap();
+	assert_eq!(
+		res,
+		Expr::Define(Box::new(DefineStatement::Index(DefineIndexStatement {
+			kind: DefineKind::Default,
+			name: Expr::Idiom(Idiom::field("index".to_string())),
+			what: Expr::Table("table".into()),
+			cols: vec![Expr::Idiom(Idiom(vec![Part::Field(Strand::new_static("a"))]))],
+			index: Index::DiskAnn(DiskAnnParams {
+				dimension: 128,
+				distance: Distance::Cosine,
+				vector_type: VectorType::F32,
+				degree: 32,
+				l_build: 88,
+				alpha: 1.4.into(),
+				use_hashed_vector: true,
+			}),
+			comment: Expr::Literal(Literal::None),
+			concurrently: false
+		})))
+	);
+
+	let res = syn::parse_with(
+		r#"DEFINE INDEX index ON TABLE table FIELDS a DISKANN DIMENSION 128 TYPE F16 DISTANCE COSINE_NORMALIZED"#.as_bytes(),
+		async |parser, stk| parser.parse_expr_inherit(stk).await,
+	)
+	.unwrap();
+	assert_eq!(
+		res,
+		Expr::Define(Box::new(DefineStatement::Index(DefineIndexStatement {
+			kind: DefineKind::Default,
+			name: Expr::Idiom(Idiom::field("index".to_string())),
+			what: Expr::Table("table".into()),
+			cols: vec![Expr::Idiom(Idiom(vec![Part::Field(Strand::new_static("a"))]))],
+			index: Index::DiskAnn(DiskAnnParams {
+				dimension: 128,
+				distance: Distance::CosineNormalized,
+				vector_type: VectorType::F16,
+				degree: 64,
+				l_build: 100,
+				alpha: 1.2.into(),
+				use_hashed_vector: false,
+			}),
+			comment: Expr::Literal(Literal::None),
+			concurrently: false
+		})))
+	);
+
+	let res = syn::parse_with(
+		r#"DEFINE INDEX index ON TABLE table FIELDS a DISKANN DIMENSION 128 TYPE U8 DISTANCE INNER_PRODUCT"#.as_bytes(),
+		async |parser, stk| parser.parse_expr_inherit(stk).await,
+	)
+	.unwrap();
+	assert_eq!(
+		res,
+		Expr::Define(Box::new(DefineStatement::Index(DefineIndexStatement {
+			kind: DefineKind::Default,
+			name: Expr::Idiom(Idiom::field("index".to_string())),
+			what: Expr::Table("table".into()),
+			cols: vec![Expr::Idiom(Idiom(vec![Part::Field(Strand::new_static("a"))]))],
+			index: Index::DiskAnn(DiskAnnParams {
+				dimension: 128,
+				distance: Distance::InnerProduct,
+				vector_type: VectorType::U8,
+				degree: 64,
+				l_build: 100,
+				alpha: 1.2.into(),
+				use_hashed_vector: false,
+			}),
+			comment: Expr::Literal(Literal::None),
+			concurrently: false
+		})))
+	);
+
+	assert!(
+		syn::parse_with(
+			r#"DEFINE INDEX index ON TABLE table FIELDS a DISKANN DIMENSION 128 TYPE I64"#
+				.as_bytes(),
+			async |parser, stk| parser.parse_expr_inherit(stk).await,
+		)
+		.is_err()
+	);
+	assert!(
+		syn::parse_with(
+			r#"DEFINE INDEX index ON TABLE table FIELDS a DISKANN DIMENSION 128 DISTANCE MANHATTAN"#
+				.as_bytes(),
+			async |parser, stk| parser.parse_expr_inherit(stk).await,
+		)
+		.is_err()
+	);
+	assert!(
+		syn::parse_with(
+			r#"DEFINE INDEX index ON TABLE table FIELDS a DISKANN DIMENSION 128 TYPE U8 DISTANCE COSINE_NORMALIZED"#
+				.as_bytes(),
+			async |parser, stk| parser.parse_expr_inherit(stk).await,
+		)
+		.is_err()
+	);
+	assert!(
+		syn::parse_with(
+			r#"DEFINE INDEX index ON TABLE table FIELDS a,b DISKANN DIMENSION 128"#.as_bytes(),
+			async |parser, stk| parser.parse_expr_inherit(stk).await,
+		)
+		.is_err()
 	);
 }
 

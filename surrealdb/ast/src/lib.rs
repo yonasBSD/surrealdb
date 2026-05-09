@@ -957,10 +957,13 @@ ast_type! {
 #[derive(Debug)]
 pub enum VectorType {
 	F64,
+	F16,
 	F32,
 	I64,
 	I32,
 	I16,
+	I8,
+	U8,
 }
 impl_vis_debug!(VectorType);
 
@@ -980,11 +983,32 @@ ast_type! {
 }
 
 ast_type! {
+	/// Parsed `DISKANN` index options from a `DEFINE INDEX` statement.
+	pub struct DiskAnnIndex{
+		/// Required vector dimension.
+		pub dimension: NodeId<Integer>,
+		/// Optional distance metric; defaults are applied by the SQL/catalog conversion layer.
+		pub distance: Option<Distance>,
+		/// Optional vector type; defaults are applied by the SQL/catalog conversion layer.
+		pub ty: Option<VectorType>,
+		/// Optional target graph degree.
+		pub degree: Option<NodeId<Integer>>,
+		/// Optional construction search list size.
+		pub l_build: Option<NodeId<Integer>>,
+		/// Optional DiskANN pruning alpha.
+		pub alpha: Option<NodeId<Spanned<f64>>>,
+		/// Whether the index uses hashed vector-document mapping keys.
+		pub use_hashed_vector: bool,
+	}
+}
+
+ast_type! {
 	pub enum Index{
 		Unique(Span),
 		Count(CountIndex),
 		FullText(FullTextIndex),
-		Hnsw(HnswIndex)
+		Hnsw(HnswIndex),
+		DiskAnn(DiskAnnIndex)
 	}
 }
 
@@ -1905,8 +1929,10 @@ impl_vis_type! {
 	pub enum Distance {
 		Chebyshev,
 		Cosine,
+		CosineNormalized,
 		Euclidean,
 		Hamming,
+		InnerProduct,
 		Jaccard,
 		Manhattan,
 		Minkowski(f64),

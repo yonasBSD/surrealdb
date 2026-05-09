@@ -5,13 +5,14 @@ use ahash::HashMap;
 use anyhow::Result;
 use reblessive::tree::Stk;
 
-use crate::catalog::Record;
 use crate::catalog::providers::TableProvider;
+use crate::catalog::{Record, TableId};
 use crate::dbs::Options;
 use crate::doc::CursorDoc;
 use crate::expr::{Cond, FlowResultExt as _};
 use crate::idx::IndexKeyBase;
 use crate::idx::trees::hnsw::VectorId;
+use crate::idx::trees::hnsw::cache::VectorCache;
 use crate::idx::trees::hnsw::docs::HnswDocs;
 use crate::idx::trees::hnsw::index::HnswContext;
 use crate::idx::trees::knn::Ids64;
@@ -32,18 +33,34 @@ pub(super) struct HnswTruthyDocumentFilter<'a> {
 	opt: &'a Options,
 	/// Key base for record lookups.
 	ikb: IndexKeyBase,
+	/// Stable table id used to scope HNSW doc-id cache entries.
+	table_id: TableId,
+	/// Shared HNSW cache used for compact document ID resolution.
+	vector_cache: VectorCache,
 	/// The filter condition to evaluate.
 	cond: Arc<Cond>,
+	/// Pending generation captured at lookup start, used to reject stale doc-id cache entries.
+	pending_generation: Option<u64>,
 	/// Cache of previously evaluated filter results.
 	cache: FilterCache,
 }
 
 impl<'a> HnswTruthyDocumentFilter<'a> {
-	pub(super) fn new(opt: &'a Options, ikb: IndexKeyBase, cond: Arc<Cond>) -> Self {
+	pub(super) fn new(
+		opt: &'a Options,
+		ikb: IndexKeyBase,
+		table_id: TableId,
+		vector_cache: VectorCache,
+		cond: Arc<Cond>,
+		pending_generation: Option<u64>,
+	) -> Self {
 		Self {
 			opt,
 			ikb,
+			table_id,
+			vector_cache,
 			cond,
+			pending_generation,
 			cache: Default::default(),
 		}
 	}
@@ -78,7 +95,15 @@ impl<'a> HnswTruthyDocumentFilter<'a> {
 				// Collect the RecordId
 				let rid = match e.key() {
 					VectorId::DocId(doc_id) => {
-						let Some(rid) = HnswDocs::get_thing(&self.ikb, &ctx.tx, *doc_id).await?
+						let Some(rid) = HnswDocs::get_thing_cached(
+							&self.ikb,
+							self.table_id,
+							&self.vector_cache,
+							&ctx.tx,
+							*doc_id,
+							self.pending_generation,
+						)
+						.await?
 						else {
 							e.insert(None);
 							// No record ID ? It is not truthy
@@ -87,10 +112,9 @@ impl<'a> HnswTruthyDocumentFilter<'a> {
 						rid
 					}
 					VectorId::RecordKey(key) => {
-						RecordId::new(self.ikb.table().clone(), key.as_ref().clone())
+						Arc::new(RecordId::new(self.ikb.table().clone(), key.as_ref().clone()))
 					}
 				};
-				let rid = Arc::new(rid);
 				// Is the record truthy?
 				let record =
 					Self::is_record_truthy(ctx, self.opt, stk, self.cond.clone(), rid.clone())

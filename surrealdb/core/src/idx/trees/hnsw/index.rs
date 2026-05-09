@@ -36,7 +36,6 @@ use crate::val::{Number, RecordId, RecordIdKey, Value};
 const HNSW_COMPACTION_MAX_PENDING_KEYS: usize = 1024;
 /// Maximum encoded pending key/value bytes captured by one compaction plan.
 const HNSW_COMPACTION_MAX_PENDING_BYTES: usize = 16 * 1024 * 1024;
-
 /// Exact pending key/value observed by an HNSW compaction read phase.
 struct CapturedPendingKey {
 	/// Encoded key to delete if the value still matches.
@@ -62,6 +61,7 @@ struct PendingOperation {
 /// coalesces all observed work by record identity so replay order does not
 /// determine the final graph state.
 pub(crate) struct HnswCompactionPlan {
+	/// Compaction generation observed while preparing the plan.
 	generation: Option<u64>,
 	captured_keys: Vec<CapturedPendingKey>,
 	pending: Vec<PendingOperation>,
@@ -167,18 +167,22 @@ impl PendingPlanBuilder {
 /// 2. **Applying**: Compaction prepares a bounded pending snapshot and applies it under a graph
 ///    write lock after the captured keys are conditionally deleted.
 ///
-/// Reads via [`knn_search`](Self::knn_search) first scan pending (not-yet-applied)
-/// updates, then search the committed graph under a read lock, merging both
-/// result sets into a single k-nearest neighbor response.
+/// Reads via [`knn_search`](Self::knn_search) scan pending updates
+/// conservatively, then search the committed graph under a read lock and merge
+/// both result sets into a single k-nearest neighbor response.
 pub(crate) struct HnswIndex {
 	/// Expected vector dimensionality.
 	dim: usize,
 	/// Distance metric used for similarity computation.
 	distance: Distance,
+	/// Stable table id used to scope process-local HNSW cache entries.
+	table_id: TableId,
 	/// Key base for generating index-related storage keys.
 	ikb: IndexKeyBase,
 	/// The type of vector stored in this index.
 	vector_type: VectorType,
+	/// Shared HNSW cache used for hot vector/doc mapping lookups.
+	vector_cache: VectorCache,
 	/// The HNSW graph, protected by a read-write lock for concurrent access.
 	hnsw: RwLock<HnswFlavor>,
 	/// Vector-to-document mappings.
@@ -225,8 +229,10 @@ impl HnswIndex {
 			dim: p.dimension as usize,
 			vector_type: p.vector_type,
 			distance: p.distance.clone(),
-			hnsw: RwLock::new(HnswFlavor::new(tb, ikb.clone(), p, vector_cache)?),
-			vec_docs: VecDocs::new(ikb.clone(), p.use_hashed_vector),
+			table_id: tb,
+			hnsw: RwLock::new(HnswFlavor::new(tb, ikb.clone(), p, vector_cache.clone())?),
+			vec_docs: VecDocs::new(ikb.clone(), tb, vector_cache.clone(), p.use_hashed_vector),
+			vector_cache,
 			ikb,
 		})
 	}
@@ -421,14 +427,20 @@ impl HnswIndex {
 		ctx: &FrozenContext,
 		plan: HnswCompactionPlan,
 	) -> Result<bool> {
-		if !plan.has_work() {
-			return Ok(false);
-		}
+		let HnswCompactionPlan {
+			generation,
+			captured_keys,
+			pending,
+			has_more: _,
+		} = plan;
 		let tx = ctx.tx();
-		if !bump_compaction_generation(&tx, &self.ikb.new_hg_key(), plan.generation).await? {
+		if captured_keys.is_empty() {
 			return Ok(false);
 		}
-		for captured in &plan.captured_keys {
+		if !bump_compaction_generation(&tx, &self.ikb.new_hg_key(), generation).await? {
+			return Ok(false);
+		}
+		for captured in &captured_keys {
 			match tx.delc(&captured.key, Some(&captured.value)).await {
 				Ok(()) => {}
 				Err(e) if is_transaction_condition_not_met(&e) => return Ok(false),
@@ -439,7 +451,7 @@ impl HnswIndex {
 		hnsw.check_state(ctx).await?;
 		let mut ctx = self.new_hnsw_context(ctx);
 		let mut docs = HnswDocs::new(&tx, self.ikb.clone()).await?;
-		for pending in plan.pending {
+		for pending in pending {
 			self.apply_pending_operation(&mut ctx, &mut docs, &mut hnsw, pending).await?;
 		}
 		docs.finish(&tx).await?;
@@ -481,7 +493,7 @@ impl HnswIndex {
 					self.vec_docs.remove(ctx, &vector, doc_id, hnsw).await?;
 				}
 				if pending.new_vectors.is_empty() {
-					docs.remove(&ctx.tx, doc_id).await?;
+					docs.remove(&ctx.tx, doc_id, self.table_id, &self.vector_cache).await?;
 				} else {
 					for vector in pending.new_vectors {
 						let vector = Vector::from(vector);
@@ -509,10 +521,9 @@ impl HnswIndex {
 
 	/// Performs a k-nearest neighbor search, combining pending and committed results.
 	///
-	/// First searches through pending (not-yet-applied) updates, then queries
-	/// the committed HNSW graph under a read lock. Results from both sources
-	/// are merged and the final k-nearest neighbors are returned with their
-	/// associated record IDs and distances.
+	/// HNSW pending updates remain on the hot write path, so lookup scans them
+	/// conservatively instead of relying on a shared pending-state key that can
+	/// create write contention under concurrent indexing.
 	pub(crate) async fn knn_search(
 		&self,
 		ctx: &FrozenContext,
@@ -522,9 +533,18 @@ impl HnswIndex {
 		ef: usize,
 		cond_filter: Option<(&Options, Arc<Cond>)>,
 	) -> Result<VecDeque<KnnIteratorResult>> {
+		let compaction_generation =
+			read_compaction_generation(&ctx.tx(), &self.ikb.new_hg_key()).await?;
 		// Build a filter if required
 		let mut filter = if let Some((opt, cond)) = cond_filter {
-			Some(HnswTruthyDocumentFilter::new(opt, self.ikb.clone(), cond))
+			Some(HnswTruthyDocumentFilter::new(
+				opt,
+				self.ikb.clone(),
+				self.table_id,
+				self.vector_cache.clone(),
+				cond,
+				compaction_generation,
+			))
 		} else {
 			None
 		};
@@ -553,30 +573,47 @@ impl HnswIndex {
 		} else {
 			None
 		};
-		// We can now build the final result
-		let mut res = VecDeque::with_capacity(result.len());
-		for (dist, id) in result {
+		let mut res_by_pos = vec![None; result.len()];
+		let mut doc_misses = Vec::new();
+		for (pos, (dist, id)) in result.into_iter().enumerate() {
 			let dist: f64 = dist.into();
 			// Do we have it from the cache?
 			if let Some(cache) = &cache
 				&& let Some(Some((rid, record))) = cache.get(&id)
 			{
-				res.push_back((rid.clone(), dist, Some(record.clone())));
+				res_by_pos[pos] = Some((rid.clone(), dist, Some(record.clone())));
 				continue;
 			}
 			// Otherwise we get it from the state
 			match id {
 				VectorId::DocId(doc_id) => {
-					if let Some(rid) = HnswDocs::get_thing(&ctx.ikb, &ctx.tx, doc_id).await? {
-						res.push_back((Arc::new(rid), dist, None));
-					}
+					doc_misses.push((pos, doc_id, dist));
 				}
 				VectorId::RecordKey(key) => {
 					let rid = RecordId::new(self.ikb.table().clone(), key.as_ref().clone());
-					res.push_back((Arc::new(rid), dist, None));
+					res_by_pos[pos] = Some((Arc::new(rid), dist, None));
 				}
 			}
 		}
+		if !doc_misses.is_empty() {
+			let doc_ids: Vec<_> = doc_misses.iter().map(|(_, doc_id, _)| *doc_id).collect();
+			let rids = HnswDocs::get_things_batch(
+				&ctx.ikb,
+				self.table_id,
+				&self.vector_cache,
+				&ctx.tx,
+				&doc_ids,
+				compaction_generation,
+			)
+			.await?;
+			for ((pos, _, dist), rid) in doc_misses.into_iter().zip(rids) {
+				if let Some(rid) = rid {
+					res_by_pos[pos] = Some((rid, dist, None));
+				}
+			}
+		}
+		let mut res = VecDeque::with_capacity(res_by_pos.len());
+		res.extend(res_by_pos.into_iter().flatten());
 		Ok(res)
 	}
 
@@ -599,13 +636,26 @@ impl HnswIndex {
 			let neighbours = hnsw
 				.knn_search_with_filter(ctx, search, stk, filter, pending_docs.as_ref())
 				.await?;
-			self.add_graph_results(&ctx.tx, &hnsw, neighbours, builder, |evicted_docs| {
-				filter.expires(&evicted_docs)
-			})
+			self.add_graph_results(
+				&ctx.tx,
+				&hnsw,
+				neighbours,
+				pending_docs.as_ref(),
+				builder,
+				|evicted_docs| filter.expires(&evicted_docs),
+			)
 			.await
 		} else {
 			let neighbours = hnsw.knn_search(ctx, search, pending_docs.as_ref()).await?;
-			self.add_graph_results(&ctx.tx, &hnsw, neighbours, builder, |_| {}).await
+			self.add_graph_results(
+				&ctx.tx,
+				&hnsw,
+				neighbours,
+				pending_docs.as_ref(),
+				builder,
+				|_| {},
+			)
+			.await
 		}
 	}
 
@@ -712,13 +762,17 @@ impl HnswIndex {
 		Ok(())
 	}
 
-	/// Converts graph search results (element IDs) into document-level results
-	/// and adds them to the KNN result builder.
+	/// Converts graph search results (element IDs) into document-level results and adds them to
+	/// the KNN result builder.
+	///
+	/// `pending_docs` suppresses compacted graph hits for documents with newer record-keyed pending
+	/// updates, so the exact pending scan remains the source of truth for those records.
 	async fn add_graph_results<F>(
 		&self,
 		tx: &Transaction,
 		hnsw: &HnswFlavor,
 		neighbors: Vec<(f64, ElementId)>,
+		pending_docs: Option<&RoaringTreemap>,
 		builder: &mut KnnResultBuilder,
 		mut evicted_docs_func: F,
 	) -> Result<()>
@@ -726,11 +780,33 @@ impl HnswIndex {
 		F: FnMut(Vec<VectorId>),
 	{
 		for (e_dist, e_id) in neighbors {
-			if builder.check_add(e_dist)
-				&& let Some(v) = hnsw.get_vector(tx, &e_id).await?
-				&& let Some(docs) = self.vec_docs.get_docs(tx, &v).await?
-			{
-				let evicted_docs = builder.add_graph_result(e_dist, docs);
+			if !builder.check_add(e_dist) {
+				continue;
+			}
+			let docs = if let Some(docs) = self.vec_docs.get_cached_doc_set(e_id).await {
+				Some(docs)
+			} else if let Some(v) = hnsw.get_vector(tx, &e_id).await? {
+				self.vec_docs.get_docs_by_element(tx, e_id, &v).await?
+			} else {
+				None
+			};
+			if let Some(docs) = docs {
+				let evicted_docs = if let Some(pending_docs) = pending_docs {
+					let mut evicted_docs = Vec::with_capacity(1);
+					for doc_id in docs.iter() {
+						if pending_docs.contains(doc_id) {
+							continue;
+						}
+						if let Some(evicted_id) =
+							builder.add_vector_id_result(e_dist, VectorId::DocId(doc_id))
+						{
+							evicted_docs.push(evicted_id);
+						}
+					}
+					evicted_docs
+				} else {
+					builder.add_graph_result(e_dist, docs)
+				};
 				evicted_docs_func(evicted_docs);
 			}
 		}

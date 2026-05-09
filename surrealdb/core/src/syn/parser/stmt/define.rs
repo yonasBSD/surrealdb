@@ -5,7 +5,7 @@ use crate::sql::access::AccessDuration;
 use crate::sql::access_type::JwtAccessVerify;
 use crate::sql::base::Base;
 use crate::sql::filter::Filter;
-use crate::sql::index::{Distance, HnswParams, VectorType};
+use crate::sql::index::{DiskAnnParams, Distance, HnswParams, VectorType};
 use crate::sql::kind::KindLiteral;
 use crate::sql::statements::define::config::api::{ApiConfig, Middleware};
 use crate::sql::statements::define::config::defaults::DefaultConfig;
@@ -33,6 +33,14 @@ use crate::syn::token::{Token, TokenKind, t};
 use crate::types::PublicDuration;
 #[cfg(feature = "surrealism")]
 use crate::types::PublicFile;
+
+/// Returns whether an identifier token matches a keyword-like option name.
+///
+/// DiskANN options such as `DEGREE`, `L_BUILD`, and `ALPHA` are parsed as identifiers in this
+/// parser, so matching them case-insensitively keeps the syntax aligned with regular keywords.
+fn is_identifier_token(parser: &Parser<'_>, token: Token, ident: &str) -> bool {
+	token.kind == TokenKind::Identifier && parser.span_str(token.span).eq_ignore_ascii_case(ident)
+}
 
 impl Parser<'_> {
 	pub(crate) async fn parse_define_stmt(
@@ -1182,6 +1190,119 @@ impl Parser<'_> {
 						use_hashed_vector,
 					});
 				}
+				token
+					if {
+						let span = self.peek().span;
+						is_identifier_token(
+							self,
+							Token {
+								kind: token,
+								span,
+							},
+							"DISKANN",
+						)
+					} =>
+				{
+					self.pop_peek();
+					expected!(self, t!("DIMENSION"));
+					let dimension = self.next_token_value()?;
+					let mut distance = Distance::Euclidean;
+					let mut vector_type = VectorType::F32;
+					let mut degree = 64;
+					let mut l_build = 100;
+					let mut alpha = 1.2.into();
+					let mut use_hashed_vector = false;
+					loop {
+						let peek = self.peek();
+						match peek.kind {
+							t!("DISTANCE") => {
+								self.pop_peek();
+								distance = self.parse_distance()?;
+							}
+							t!("TYPE") => {
+								self.pop_peek();
+								vector_type = self.parse_vector_type()?;
+							}
+							kind if is_identifier_token(
+								self,
+								Token {
+									kind,
+									span: peek.span,
+								},
+								"DEGREE",
+							) =>
+							{
+								self.pop_peek();
+								degree = self.next_token_value()?;
+							}
+							kind if is_identifier_token(
+								self,
+								Token {
+									kind,
+									span: peek.span,
+								},
+								"L_BUILD",
+							) =>
+							{
+								self.pop_peek();
+								l_build = self.next_token_value()?;
+							}
+							kind if is_identifier_token(
+								self,
+								Token {
+									kind,
+									span: peek.span,
+								},
+								"ALPHA",
+							) =>
+							{
+								self.pop_peek();
+								alpha = self.next_token_value()?;
+							}
+							t!("HASHED_VECTOR") => {
+								self.pop_peek();
+								use_hashed_vector = true;
+							}
+							_ => {
+								break;
+							}
+						}
+					}
+					if !matches!(
+						distance,
+						Distance::Euclidean
+							| Distance::Cosine | Distance::InnerProduct
+							| Distance::CosineNormalized
+					) {
+						bail!("Invalid DISTANCE for DISKANN index", @self.recent_span() => "DISKANN supports EUCLIDEAN, COSINE, INNER_PRODUCT, and COSINE_NORMALIZED")
+					}
+					if !matches!(
+						vector_type,
+						VectorType::F32 | VectorType::F16 | VectorType::I8 | VectorType::U8
+					) {
+						bail!("Invalid TYPE for DISKANN index", @self.recent_span() => "DISKANN supports TYPE F32, F16, I8, and U8")
+					}
+					if matches!(distance, Distance::CosineNormalized)
+						&& matches!(vector_type, VectorType::I8 | VectorType::U8)
+					{
+						bail!("Invalid TYPE for DISKANN COSINE_NORMALIZED index", @self.recent_span() => "DISKANN COSINE_NORMALIZED supports TYPE F32 and F16 only")
+					}
+					if degree == 0 {
+						bail!("Invalid value for DISKANN parameter `DEGREE`", @self.recent_span() => "`DEGREE` must be greater than 0")
+					}
+					if l_build == 0 {
+						bail!("Invalid value for DISKANN parameter `L_BUILD`", @self.recent_span() => "`L_BUILD` must be greater than 0")
+					}
+					res.index = Index::DiskAnn(DiskAnnParams {
+						dimension,
+						distance,
+						vector_type,
+						degree,
+						l_build,
+						alpha,
+						use_hashed_vector,
+					});
+				}
 				t!("CONCURRENTLY") => {
 					self.pop_peek();
 					res.concurrently = true;
@@ -1199,7 +1320,7 @@ impl Parser<'_> {
 					bail!("Cannot create a count index with fields", @field_span);
 				}
 			}
-			(field_span, Index::FullText(_) | Index::Hnsw(_)) => {
+			(field_span, Index::FullText(_) | Index::Hnsw(_) | Index::DiskAnn(_)) => {
 				if res.cols.len() != 1 {
 					if let Some(field_span) = field_span {
 						bail!("Expected one column, found {}", res.cols.len(), @field_span);

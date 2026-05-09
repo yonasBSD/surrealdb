@@ -537,9 +537,11 @@ impl Parser<'_> {
 				let dist = match k {
 					DistanceKind::Chebyshev => Distance::Chebyshev,
 					DistanceKind::Cosine => Distance::Cosine,
+					DistanceKind::CosineNormalized => Distance::CosineNormalized,
 					DistanceKind::Euclidean => Distance::Euclidean,
 					DistanceKind::Manhattan => Distance::Manhattan,
 					DistanceKind::Hamming => Distance::Hamming,
+					DistanceKind::InnerProduct => Distance::InnerProduct,
 					DistanceKind::Jaccard => Distance::Jaccard,
 
 					DistanceKind::Minkowski => {
@@ -559,10 +561,13 @@ impl Parser<'_> {
 		match next.kind {
 			TokenKind::VectorType(x) => Ok(match x {
 				VectorTypeKind::F64 => VectorType::F64,
+				VectorTypeKind::F16 => VectorType::F16,
 				VectorTypeKind::F32 => VectorType::F32,
 				VectorTypeKind::I64 => VectorType::I64,
 				VectorTypeKind::I32 => VectorType::I32,
 				VectorTypeKind::I16 => VectorType::I16,
+				VectorTypeKind::I8 => VectorType::I8,
+				VectorTypeKind::U8 => VectorType::U8,
 			}),
 			_ => unexpected!(self, next, "a vector type"),
 		}

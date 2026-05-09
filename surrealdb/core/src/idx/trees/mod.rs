@@ -1,3 +1,4 @@
+pub(crate) mod diskann;
 pub mod dynamicset;
 mod graph;
 pub mod hnsw;

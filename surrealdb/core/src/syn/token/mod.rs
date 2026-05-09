@@ -232,8 +232,10 @@ pub enum Delim {
 pub enum DistanceKind {
 	Chebyshev,
 	Cosine,
+	CosineNormalized,
 	Euclidean,
 	Hamming,
+	InnerProduct,
 	Jaccard,
 	Manhattan,
 	Minkowski,
@@ -245,8 +247,10 @@ impl DistanceKind {
 		match self {
 			DistanceKind::Chebyshev => "CHEBYSHEV",
 			DistanceKind::Cosine => "COSINE",
+			DistanceKind::CosineNormalized => "COSINE_NORMALIZED",
 			DistanceKind::Euclidean => "EUCLIDEAN",
 			DistanceKind::Hamming => "HAMMING",
+			DistanceKind::InnerProduct => "INNER_PRODUCT",
 			DistanceKind::Jaccard => "JACCARD",
 			DistanceKind::Manhattan => "MANHATTAN",
 			DistanceKind::Minkowski => "MINKOWSKI",
@@ -258,20 +262,26 @@ impl DistanceKind {
 #[derive(Clone, Copy, Eq, PartialEq, Hash, Debug)]
 pub enum VectorTypeKind {
 	F64,
+	F16,
 	F32,
 	I64,
 	I32,
 	I16,
+	I8,
+	U8,
 }
 
 impl VectorTypeKind {
 	pub fn as_str(&self) -> &'static str {
 		match self {
 			Self::F64 => "F64",
+			Self::F16 => "F16",
 			Self::F32 => "F32",
 			Self::I64 => "I64",
 			Self::I32 => "I32",
 			Self::I16 => "I16",
+			Self::I8 => "I8",
+			Self::U8 => "U8",
 		}
 	}
 }

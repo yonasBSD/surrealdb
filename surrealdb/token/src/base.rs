@@ -217,6 +217,8 @@ pub enum BaseTokenKind {
 	KwAll,
 	#[regex(r"(?i)ALTER")]
 	KwAlter,
+	#[regex(r"(?i)ALPHA")]
+	KwAlpha,
 	#[regex(r"(?i)ALWAYS")]
 	KwAlways,
 	#[regex(r"(?i)ANALYZE")]
@@ -301,6 +303,8 @@ pub enum BaseTokenKind {
 	#[regex(r"(?i)DATABASE")]
 	#[regex(r"(?i)DB")]
 	KwDatabase,
+	#[regex(r"(?i)DEGREE")]
+	KwDegree,
 	#[regex(r"(?i)DEFAULT")]
 	KwDefault,
 	#[regex(r"(?i)DEFINE")]
@@ -316,6 +320,8 @@ pub enum BaseTokenKind {
 	KwDiff,
 	#[regex(r"(?i)DIMENSION")]
 	KwDimension,
+	#[regex(r"(?i)DISKANN")]
+	KwDiskann,
 	#[regex(r"(?i)DISTANCE")]
 	#[regex(r"(?i)DIST")]
 	KwDistance,
@@ -430,6 +436,8 @@ pub enum BaseTokenKind {
 	KwKeepPrunedConnections,
 	#[regex(r"(?i)KILL")]
 	KwKill,
+	#[regex(r"(?i)L_BUILD")]
+	KwLBuild,
 	#[regex(r"(?i)LET")]
 	KwLet,
 	#[regex(r"(?i)LIMIT")]
@@ -790,12 +798,16 @@ pub enum BaseTokenKind {
 	KwChebyshev,
 	#[regex(r"(?i)COSINE")]
 	KwCosine,
+	#[regex(r"(?i)COSINE_NORMALIZED")]
+	KwCosineNormalized,
 	#[regex(r"(?i)EUCLIDEAN")]
 	KwEuclidean,
 	#[regex(r"(?i)JACCARD")]
 	KwJaccard,
 	#[regex(r"(?i)HAMMING")]
 	KwHamming,
+	#[regex(r"(?i)INNER_PRODUCT")]
+	KwInnerProduct,
 	#[regex(r"(?i)MANHATTAN")]
 	KwManhattan,
 	#[regex(r"(?i)MINKOWSKI")]
@@ -806,6 +818,8 @@ pub enum BaseTokenKind {
 	// VectorTypes
 	#[regex(r"(?i)F64")]
 	KwF64,
+	#[regex(r"(?i)F16")]
+	KwF16,
 	#[regex(r"(?i)F32")]
 	KwF32,
 	#[regex(r"(?i)I64")]
@@ -814,6 +828,10 @@ pub enum BaseTokenKind {
 	KwI32,
 	#[regex(r"(?i)I16")]
 	KwI16,
+	#[regex(r"(?i)I8")]
+	KwI8,
+	#[regex(r"(?i)U8")]
+	KwU8,
 
 	// HTTP methods
 	#[regex(r"(?i)GET")]
@@ -892,6 +910,7 @@ impl BaseTokenKind {
 			BaseTokenKind::KwAlgorithm => "keyword `ALGORITHM`",
 			BaseTokenKind::KwAll => "keyword `ALL`",
 			BaseTokenKind::KwAlter => "keyword `ALTER`",
+			BaseTokenKind::KwAlpha => "keyword `ALPHA`",
 			BaseTokenKind::KwAlways => "keyword `ALWAYS`",
 			BaseTokenKind::KwAnalyze => "keyword `ANALYZE`",
 			BaseTokenKind::KwAnalyzer => "keyword `ANALYZER`",
@@ -933,6 +952,7 @@ impl BaseTokenKind {
 			BaseTokenKind::KwCount => "keyword `COUNT`",
 			BaseTokenKind::KwCreate => "keyword `CREATE`",
 			BaseTokenKind::KwDatabase => "keyword `DATABASE`",
+			BaseTokenKind::KwDegree => "keyword `DEGREE`",
 			BaseTokenKind::KwDefault => "keyword `DEFAULT`",
 			BaseTokenKind::KwDefine => "keyword `DEFINE`",
 			BaseTokenKind::KwDelete => "keyword `DELETE`",
@@ -940,6 +960,7 @@ impl BaseTokenKind {
 			BaseTokenKind::KwDescending => "keyword `DESCENDING`",
 			BaseTokenKind::KwDiff => "keyword `DIFF`",
 			BaseTokenKind::KwDimension => "keyword `DIMENSION`",
+			BaseTokenKind::KwDiskann => "keyword `DISKANN`",
 			BaseTokenKind::KwDistance => "keyword `DISTANCE`",
 			BaseTokenKind::KwDocIdsCache => "keyword `DOCIDSCACHE`",
 			BaseTokenKind::KwDocIdsOrder => "keyword `DOCIDSORDER`",
@@ -995,6 +1016,7 @@ impl BaseTokenKind {
 			BaseTokenKind::KwKey => "keyword `KEY`",
 			BaseTokenKind::KwKeepPrunedConnections => "keyword `KEEPPRUNEDCONNECTIONS`",
 			BaseTokenKind::KwKill => "keyword `KILL`",
+			BaseTokenKind::KwLBuild => "keyword `LBUILD`",
 			BaseTokenKind::KwLet => "keyword `LET`",
 			BaseTokenKind::KwLimit => "keyword `LIMIT`",
 			BaseTokenKind::KwLive => "keyword `LIVE`",
@@ -1169,17 +1191,22 @@ impl BaseTokenKind {
 			BaseTokenKind::KwRs512 => "keyword `RS512`",
 			BaseTokenKind::KwChebyshev => "keyword `CHEBYSHEV`",
 			BaseTokenKind::KwCosine => "keyword `COSINE`",
+			BaseTokenKind::KwCosineNormalized => "keyword `COSINE_NORMALIZED`",
 			BaseTokenKind::KwEuclidean => "keyword `EUCLIDEAN`",
 			BaseTokenKind::KwJaccard => "keyword `JACCARD`",
 			BaseTokenKind::KwHamming => "keyword `HAMMING`",
+			BaseTokenKind::KwInnerProduct => "keyword `INNER_PRODUCT`",
 			BaseTokenKind::KwManhattan => "keyword `MANHATTAN`",
 			BaseTokenKind::KwMinkowski => "keyword `MINKOWSKI`",
 			BaseTokenKind::KwPearson => "keyword `PEARSON`",
 			BaseTokenKind::KwF64 => "keyword `F64`",
+			BaseTokenKind::KwF16 => "keyword `F16`",
 			BaseTokenKind::KwF32 => "keyword `F32`",
 			BaseTokenKind::KwI64 => "keyword `I64`",
 			BaseTokenKind::KwI32 => "keyword `I32`",
 			BaseTokenKind::KwI16 => "keyword `I16`",
+			BaseTokenKind::KwI8 => "keyword `I8`",
+			BaseTokenKind::KwU8 => "keyword `U8`",
 			BaseTokenKind::KwGet => "keyword `GET`",
 			BaseTokenKind::KwPost => "keyword `POST`",
 			BaseTokenKind::KwPut => "keyword `PUT`",
@@ -1212,6 +1239,7 @@ impl BaseTokenKind {
 				| Self::KwAlgorithm
 				| Self::KwAll
 				| Self::KwAlter
+				| Self::KwAlpha
 				| Self::KwAlways
 				| Self::KwAnalyze
 				| Self::KwAnalyzer
@@ -1250,6 +1278,7 @@ impl BaseTokenKind {
 				| Self::KwCount
 				| Self::KwCreate
 				| Self::KwDatabase
+				| Self::KwDegree
 				| Self::KwDefault
 				| Self::KwDefine
 				| Self::KwDelete
@@ -1257,6 +1286,7 @@ impl BaseTokenKind {
 				| Self::KwDescending
 				| Self::KwDiff
 				| Self::KwDimension
+				| Self::KwDiskann
 				| Self::KwDistance
 				| Self::KwDocIdsCache
 				| Self::KwDocIdsOrder
@@ -1310,6 +1340,7 @@ impl BaseTokenKind {
 				| Self::KwKey
 				| Self::KwKeepPrunedConnections
 				| Self::KwKill
+				| Self::KwLBuild
 				| Self::KwLet
 				| Self::KwLimit
 				| Self::KwLive
@@ -1474,17 +1505,21 @@ impl BaseTokenKind {
 				| Self::KwRs512
 				| Self::KwChebyshev
 				| Self::KwCosine
+				| Self::KwCosineNormalized
 				| Self::KwEuclidean
 				| Self::KwJaccard
 				| Self::KwHamming
+				| Self::KwInnerProduct
 				| Self::KwManhattan
 				| Self::KwMinkowski
 				| Self::KwPearson
 				| Self::KwF64
+				| Self::KwF16
 				| Self::KwF32
 				| Self::KwI64
 				| Self::KwI32
 				| Self::KwI16
+				| Self::KwI8 | Self::KwU8
 				| Self::KwGet
 				| Self::KwPost
 				| Self::KwPut

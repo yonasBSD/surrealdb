@@ -1203,9 +1203,17 @@ impl ParseSync for ast::Distance {
 				let _ = parser.next();
 				Ok(ast::Distance::Cosine)
 			}
+			T![COSINE_NORMALIZED] => {
+				let _ = parser.next();
+				Ok(ast::Distance::CosineNormalized)
+			}
 			T![HAMMING] => {
 				let _ = parser.next();
 				Ok(ast::Distance::Hamming)
+			}
+			T![INNER_PRODUCT] => {
+				let _ = parser.next();
+				Ok(ast::Distance::InnerProduct)
 			}
 			T![JACCARD] => {
 				let _ = parser.next();
@@ -1236,6 +1244,10 @@ impl ParseSync for ast::VectorType {
 				let _ = parser.next();
 				Ok(ast::VectorType::F64)
 			}
+			T![F16] => {
+				let _ = parser.next();
+				Ok(ast::VectorType::F16)
+			}
 			T![F32] => {
 				let _ = parser.next();
 				Ok(ast::VectorType::F32)
@@ -1251,6 +1263,14 @@ impl ParseSync for ast::VectorType {
 			T![I16] => {
 				let _ = parser.next();
 				Ok(ast::VectorType::I16)
+			}
+			T![I8] => {
+				let _ = parser.next();
+				Ok(ast::VectorType::I8)
+			}
+			T![U8] => {
+				let _ = parser.next();
+				Ok(ast::VectorType::U8)
 			}
 			_ => Err(parser.unexpected("a vector type")),
 		}
@@ -1348,6 +1368,84 @@ impl ParseSync for ast::HnswIndex {
 			ef_construction: ef_construction.map(|x| x.0),
 			extend_candidates: extend_candidates.is_some(),
 			keep_pruned_connections: keep_pruned_connections.is_some(),
+			use_hashed_vector: use_hashed_vector.is_some(),
+			span,
+		})
+	}
+}
+
+// Parses the optional DiskANN clauses in any order after the required `DIMENSION` clause.
+impl ParseSync for ast::DiskAnnIndex {
+	fn parse_sync(parser: &mut Parser) -> ParseResult<Self> {
+		let start = parser.expect(T![DISKANN])?;
+
+		let _ = parser.expect(T![DIMENSION])?;
+		let dimension = parser.parse_sync()?;
+
+		let mut distance = None;
+		let mut ty = None;
+		let mut degree = None;
+		let mut l_build = None;
+		let mut alpha = None;
+		let mut use_hashed_vector = None;
+		loop {
+			let Some(peek) = parser.peek()? else {
+				break;
+			};
+			match peek.token {
+				T![DISTANCE] => {
+					let _ = parser.next();
+					parse_unordered_clause_sync(
+						parser,
+						&mut distance,
+						peek.span,
+						Parser::parse_sync,
+					)?;
+				}
+				T![TYPE] => {
+					let _ = parser.next();
+					parse_unordered_clause_sync(parser, &mut ty, peek.span, Parser::parse_sync)?;
+				}
+				T![DEGREE] => {
+					let _ = parser.next();
+					parse_unordered_clause_sync(
+						parser,
+						&mut degree,
+						peek.span,
+						Parser::parse_sync,
+					)?;
+				}
+				T![L_BUILD] => {
+					let _ = parser.next();
+					parse_unordered_clause_sync(
+						parser,
+						&mut l_build,
+						peek.span,
+						Parser::parse_sync,
+					)?;
+				}
+				T![ALPHA] => {
+					let _ = parser.next();
+					parse_unordered_clause_sync(parser, &mut alpha, peek.span, Parser::parse_sync)?;
+				}
+				T![HASHED_VECTOR] => {
+					let _ = parser.next();
+					parse_unordered_clause_sync(parser, &mut use_hashed_vector, peek.span, |_| {
+						Ok(())
+					})?;
+				}
+				_ => break,
+			}
+		}
+
+		let span = parser.span_since(start.span);
+		Ok(ast::DiskAnnIndex {
+			dimension,
+			distance: distance.map(|x| x.0),
+			ty: ty.map(|x| x.0),
+			degree: degree.map(|x| x.0),
+			l_build: l_build.map(|x| x.0),
+			alpha: alpha.map(|x| x.0),
 			use_hashed_vector: use_hashed_vector.is_some(),
 			span,
 		})
@@ -1498,6 +1596,16 @@ impl Parse for ast::DefineIndex {
 
 					let span = parser.span_since(peek.span);
 					index = Some((ast::Index::Hnsw(idx), span));
+				}
+				T![DISKANN] => {
+					if let Some((_, old_span)) = index {
+						return Err(index_type_redefined(parser, peek.span, old_span));
+					}
+
+					let idx = parser.parse_sync()?;
+
+					let span = parser.span_since(peek.span);
+					index = Some((ast::Index::DiskAnn(idx), span));
 				}
 				T![FULLTEXT] => {
 					if let Some((_, old_span)) = index {

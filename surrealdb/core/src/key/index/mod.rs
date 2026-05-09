@@ -14,7 +14,17 @@
 //! the correct boundaries when decoding.
 pub mod all;
 pub mod dc;
+pub mod dd;
+pub mod de;
+pub mod dg;
+pub mod dh;
+pub mod di;
 pub mod dl;
+pub mod dn;
+pub mod dp;
+pub mod dq;
+pub mod dr;
+pub mod ds;
 pub mod dv;
 pub mod hd;
 pub mod he;

@@ -982,7 +982,7 @@ impl<'a> IndexAnalyzer<'a> {
 		}
 	}
 
-	/// Try to match a KNN expression to an HNSW index.
+	/// Try to match a KNN expression to an ANN index.
 	fn try_match_knn(
 		&self,
 		left: &Expr,
@@ -990,7 +990,8 @@ impl<'a> IndexAnalyzer<'a> {
 		nn: &NearestNeighbor,
 		candidates: &mut Vec<IndexCandidate>,
 	) {
-		// Approximate always uses HNSW; K(k,d) uses HNSW when distance matches
+		// Approximate uses the ANN operator directly; K(k,d) uses an ANN index
+		// when the distance matches the index definition.
 		let (k, user_ef, required_distance) = match nn {
 			NearestNeighbor::Approximate(k, ef) => (*k, Some(*ef), None),
 			NearestNeighbor::K(k, d) => (*k, None, Some(d)),
@@ -1026,26 +1027,35 @@ impl<'a> IndexAnalyzer<'a> {
 			_ => return,
 		};
 
-		// Find HNSW indexes that match this idiom
+		// Find ANN indexes that match this idiom
 		for (idx, ix_def) in self.indexes.iter().enumerate() {
 			if ix_def.prepare_remove {
 				continue;
 			}
 
-			let Index::Hnsw(ref hnsw) = ix_def.index else {
-				continue;
+			let ef = match &ix_def.index {
+				Index::Hnsw(hnsw) => {
+					if let Some(d) = required_distance
+						&& *d != hnsw.distance
+					{
+						continue;
+					}
+					user_ef.unwrap_or_else(|| k.max(hnsw.ef_construction as u32))
+				}
+				Index::DiskAnn(diskann) => {
+					if let Some(d) = required_distance
+						&& *d != diskann.distance
+					{
+						continue;
+					}
+					user_ef.unwrap_or_else(|| k.max(diskann.l_build as u32))
+				}
+				_ => continue,
 			};
-
-			if let Some(d) = required_distance
-				&& *d != hnsw.distance
-			{
-				continue;
-			}
 
 			if let Some(first_col) = ix_def.cols.first()
 				&& idiom_matches(idiom, first_col)
 			{
-				let ef = user_ef.unwrap_or_else(|| k.max(hnsw.ef_construction as u32));
 				let index_ref = IndexRef::new(self.indexes.clone(), idx);
 				let candidate = IndexCandidate {
 					index_ref,

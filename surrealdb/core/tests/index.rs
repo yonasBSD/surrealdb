@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use flate2::read::GzDecoder;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng, random};
@@ -359,6 +359,49 @@ async fn collect_query(
 	Ok(results)
 }
 
+async fn collect_value_ids(dbs: &Datastore, session: &Session, sql: &str) -> Result<Vec<String>> {
+	let mut res = dbs.execute(sql, session, None).await?;
+	let res = res.remove(0).result?;
+	let Value::Array(res) = res else {
+		bail!("Expected array result: {}", res.to_sql_pretty());
+	};
+	Ok(res.into_iter().map(|v| v.to_sql()).collect())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[test_log::test]
+async fn diskann_pending_and_compacted_knn() -> Result<()> {
+	let (_, dbs) = new_ds("test", "test", false).await?;
+	let dbs = Arc::new(dbs);
+	let session = Session::owner().with_ns("test").with_db("test");
+	let sql = "
+		DEFINE INDEX diskann_pts ON pts FIELDS point DISKANN DIMENSION 2 DIST EUCLIDEAN TYPE F32 DEGREE 8 L_BUILD 20;
+		CREATE pts:1 SET point = [1f, 2f];
+		CREATE pts:2 SET point = [2f, 3f];
+		CREATE pts:3 SET point = [8f, 9f];
+	";
+	for response in dbs.execute(sql, &session, None).await? {
+		response.result?;
+	}
+
+	let query = "SELECT VALUE id FROM pts WHERE point <|2,20|> [1f, 2f];";
+	let pending = collect_value_ids(&dbs, &session, query).await?;
+	assert_eq!(pending.len(), 2);
+
+	Datastore::index_compaction(dbs.clone(), Duration::from_secs(1), CancellationToken::new())
+		.await?;
+	let compacted = collect_value_ids(&dbs, &session, query).await?;
+	assert_eq!(pending, compacted);
+
+	for response in dbs.execute("DELETE pts:1 RETURN NONE;", &session, None).await? {
+		response.result?;
+	}
+	let after_pending_delete = collect_value_ids(&dbs, &session, query).await?;
+	assert!(!after_pending_delete.iter().any(|id| id == "pts:1"), "{after_pending_delete:?}");
+
+	Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[test_log::test]
 async fn hnsw_concurrent_writes() -> Result<()> {
@@ -439,7 +482,7 @@ where
 	while !cancellation.is_cancelled() {
 		count += 1;
 		let sql = sql_func(prefix, count);
-		dbs.execute(&sql, &session, None).await?.remove(0).result?;
+		dbs.execute(&sql, &session, None).await?.remove(0).result.with_context(|| sql.clone())?;
 	}
 	Ok(())
 }

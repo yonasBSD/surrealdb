@@ -531,7 +531,7 @@ pub(super) mod tests {
 	) -> SharedVector {
 		let mut vec: Vec<Number> = Vec::with_capacity(dim);
 		for _ in 0..dim {
-			vec.push(r#gen.generate(rng));
+			vec.push(r#gen.generate_for(rng, t));
 		}
 		let vec = Vector::try_from_vector(t, &vec).unwrap();
 		if vec.is_null() {
@@ -546,10 +546,13 @@ pub(super) mod tests {
 		pub(super) fn is_null(&self) -> bool {
 			match self {
 				Self::F64(a) => !a.iter().any(|a| !a.is_zero()),
+				Self::F16(a) => !a.iter().any(|a| !a.is_zero()),
 				Self::F32(a) => !a.iter().any(|a| !a.is_zero()),
 				Self::I64(a) => !a.iter().any(|a| !a.is_zero()),
 				Self::I32(a) => !a.iter().any(|a| !a.is_zero()),
 				Self::I16(a) => !a.iter().any(|a| !a.is_zero()),
+				Self::I8(a) => !a.iter().any(|a| !a.is_zero()),
+				Self::U8(a) => !a.iter().any(|a| !a.is_zero()),
 			}
 		}
 	}
@@ -641,6 +644,28 @@ pub(super) mod tests {
 				RandomItemGenerator::Float(from, to) => {
 					Number::Float(rng.random_range(*from..=*to))
 				}
+			}
+		}
+
+		fn generate_for(&self, rng: &mut SmallRng, vector_type: VectorType) -> Number {
+			match vector_type {
+				VectorType::U8 => match self {
+					RandomItemGenerator::Int(from, to) => {
+						let from = (*from).max(0);
+						let to = (*to).max(from + 1).min(u8::MAX as i64 + 1);
+						Number::Int(rng.random_range(from..to))
+					}
+					RandomItemGenerator::Float(_, _) => Number::Int(rng.random_range(0..20)),
+				},
+				VectorType::I8 => match self {
+					RandomItemGenerator::Int(from, to) => {
+						let from = (*from).max(i8::MIN as i64);
+						let to = (*to).max(from + 1).min(i8::MAX as i64 + 1);
+						Number::Int(rng.random_range(from..to))
+					}
+					RandomItemGenerator::Float(_, _) => Number::Int(rng.random_range(-20..20)),
+				},
+				_ => self.generate(rng),
 			}
 		}
 	}

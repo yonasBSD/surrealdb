@@ -170,7 +170,11 @@ impl<'a> TreeBuilder<'a> {
 		} else {
 			let mut cond = cond.0.clone();
 			let _ = KnnConditionRewriter(&self.knn_expressions).visit_mut_expr(&mut cond);
-			Some(Cond(cond))
+			if matches!(cond, Expr::Literal(Literal::Bool(true))) {
+				None
+			} else {
+				Some(Cond(cond))
+			}
 		};
 		Ok(())
 	}
@@ -525,6 +529,7 @@ impl<'a> TreeBuilder<'a> {
 					..
 				} if *col == 0 => Self::eval_matches_operator(op, n),
 				Index::Hnsw(h) if *col == 0 => self.eval_hnsw_knn(e, op, n, h)?,
+				Index::DiskAnn(d) if *col == 0 => self.eval_diskann_knn(e, op, n, d)?,
 				_ => None,
 			};
 			if res.is_none()
@@ -580,6 +585,35 @@ impl<'a> TreeBuilder<'a> {
 			let vec: Arc<Vec<Number>> = Arc::new(v.as_ref().clone().coerce_to()?);
 			self.knn_expressions.insert(exp.clone());
 			return Ok(Some(IndexOperator::Ann(vec, k, ef)));
+		}
+
+		Ok(None)
+	}
+
+	/// Matches a KNN expression against a DiskANN index and records the query vector expression.
+	fn eval_diskann_knn(
+		&mut self,
+		exp: &Arc<Expr>,
+		op: &BinaryOperator,
+		n: &Node,
+		diskann: &catalog::DiskAnnParams,
+	) -> Result<Option<IndexOperator>> {
+		let BinaryOperator::NearestNeighbor(nn) = op else {
+			return Ok(None);
+		};
+
+		let (k, l) = match &**nn {
+			NearestNeighbor::Approximate(k, l) => (*k, *l),
+			NearestNeighbor::K(k, d) if *d == diskann.distance => {
+				(*k, (*k).max(diskann.l_build as u32))
+			}
+			_ => return Ok(None),
+		};
+
+		if let Node::Computed(v) = n {
+			let vec: Arc<Vec<Number>> = Arc::new(v.as_ref().clone().coerce_to()?);
+			self.knn_expressions.insert(exp.clone());
+			return Ok(Some(IndexOperator::Ann(vec, k, l)));
 		}
 
 		Ok(None)

@@ -20,7 +20,7 @@ use web_time::Instant;
 
 use crate::catalog::providers::TableProvider;
 use crate::catalog::{
-	DatabaseDefinition, DatabaseId, IndexDefinition, IndexId, NamespaceId, Record, TableId,
+	DatabaseDefinition, DatabaseId, Index, IndexDefinition, IndexId, NamespaceId, Record, TableId,
 };
 use crate::ctx::{Context, FrozenContext};
 use crate::dbs::Options;
@@ -589,6 +589,37 @@ impl Building {
 		Ok(ctx.freeze())
 	}
 
+	/// Creates a child context backed by a read transaction for preparing compaction plans.
+	async fn new_read_tx_ctx(&self) -> Result<FrozenContext> {
+		let tx = self
+			.tf
+			.transaction(TransactionType::Read, Optimistic, self.ctx.try_get_sequences()?.clone())
+			.await?
+			.into();
+		let mut ctx = Context::new_child(&self.ctx);
+		ctx.set_transaction(tx);
+		Ok(ctx.freeze())
+	}
+
+	/// Evicts the process-local HNSW wrapper after a failed index-builder compaction write.
+	async fn evict_cached_hnsw_index(&self) {
+		if let Err(err) =
+			self.ctx.get_index_stores().remove_hnsw_index(self.tb, self.ikb.clone()).await
+		{
+			warn!("Failed to evict HNSW index after index-builder compaction error: {err}");
+		}
+	}
+
+	#[cfg(not(target_family = "wasm"))]
+	/// Evicts the process-local DiskANN wrapper after a failed index-builder compaction write.
+	async fn evict_cached_diskann_index(&self) {
+		if let Err(err) =
+			self.ctx.get_index_stores().remove_diskann_index(self.tb, self.ikb.clone()).await
+		{
+			warn!("Failed to evict DiskANN index after index-builder compaction error: {err}");
+		}
+	}
+
 	async fn check_prepare_remove_with_tx(
 		&self,
 		last_prepare_remove_check: &mut Instant,
@@ -822,7 +853,152 @@ impl Building {
 			&mut last_prepare_remove_check,
 		)
 		.await?;
+		self.compact_hnsw_pendings(&mut last_prepare_remove_check).await?;
+		#[cfg(not(target_family = "wasm"))]
+		self.compact_diskann_pendings(&mut last_prepare_remove_check).await?;
 		Ok(())
+	}
+
+	/// Drains pending HNSW updates while a blocking `DEFINE INDEX` build is still running.
+	async fn compact_hnsw_pendings(&self, last_prepare_remove_check: &mut Instant) -> Result<()> {
+		let Index::Hnsw(p) = &self.ix.index else {
+			return Ok(());
+		};
+		loop {
+			if self.is_aborted().await {
+				return Ok(());
+			}
+			self.is_beyond_threshold(None)?;
+			self.check_prepare_remove(last_prepare_remove_check).await?;
+
+			let plan = {
+				let ctx = self.new_read_tx_ctx().await?;
+				let tx = ctx.tx();
+				let res = IndexOperation::prepare_hnsw_compaction(&ctx, &self.ikb).await;
+				let cancel = tx.cancel().await;
+				match res {
+					Ok(plan) => {
+						cancel?;
+						plan
+					}
+					Err(err) => {
+						let _ = cancel;
+						return Err(err);
+					}
+				}
+			};
+
+			if !plan.has_work() {
+				return Ok(());
+			}
+			let has_more = plan.has_more();
+
+			let ctx = self.new_write_tx_ctx().await?;
+			let tx = ctx.tx();
+			let res = IndexOperation::apply_hnsw_compaction(
+				&ctx,
+				ctx.get_index_stores(),
+				&self.ikb,
+				&self.ix,
+				p,
+				plan,
+			)
+			.await;
+			match res {
+				Ok(true) => {
+					if let Err(err) = tx.commit().await {
+						self.evict_cached_hnsw_index().await;
+						return Err(err);
+					}
+				}
+				Ok(false) => {
+					tx.cancel().await?;
+					return Ok(());
+				}
+				Err(err) => {
+					let _ = tx.cancel().await;
+					self.evict_cached_hnsw_index().await;
+					return Err(err);
+				}
+			}
+
+			if !has_more {
+				return Ok(());
+			}
+		}
+	}
+
+	#[cfg(not(target_family = "wasm"))]
+	/// Drains pending DiskANN updates while a blocking `DEFINE INDEX` build is still running.
+	async fn compact_diskann_pendings(
+		&self,
+		last_prepare_remove_check: &mut Instant,
+	) -> Result<()> {
+		let Index::DiskAnn(p) = &self.ix.index else {
+			return Ok(());
+		};
+		loop {
+			if self.is_aborted().await {
+				return Ok(());
+			}
+			self.is_beyond_threshold(None)?;
+			self.check_prepare_remove(last_prepare_remove_check).await?;
+
+			let plan = {
+				let ctx = self.new_read_tx_ctx().await?;
+				let tx = ctx.tx();
+				let res = IndexOperation::prepare_diskann_compaction(&ctx, &self.ikb).await;
+				let cancel = tx.cancel().await;
+				match res {
+					Ok(plan) => {
+						cancel?;
+						plan
+					}
+					Err(err) => {
+						let _ = cancel;
+						return Err(err);
+					}
+				}
+			};
+
+			if !plan.requires_apply() {
+				return Ok(());
+			}
+			let has_more = plan.has_more();
+
+			let ctx = self.new_write_tx_ctx().await?;
+			let tx = ctx.tx();
+			let res = IndexOperation::apply_diskann_compaction(
+				&ctx,
+				ctx.get_index_stores(),
+				&self.ikb,
+				&self.ix,
+				p,
+				plan,
+			)
+			.await;
+			match res {
+				Ok(true) => {
+					if let Err(err) = tx.commit().await {
+						self.evict_cached_diskann_index().await;
+						return Err(err);
+					}
+				}
+				Ok(false) => {
+					tx.cancel().await?;
+					return Ok(());
+				}
+				Err(err) => {
+					let _ = tx.cancel().await;
+					self.evict_cached_diskann_index().await;
+					return Err(err);
+				}
+			}
+
+			if !has_more {
+				return Ok(());
+			}
+		}
 	}
 
 	async fn index_appending_loop(

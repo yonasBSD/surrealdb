@@ -85,7 +85,17 @@ where
 	) -> Result<DoublePriorityQueue> {
 		let visited = HashSet::from_iter([ep_id]);
 		let candidates = DoublePriorityQueue::from(ep_dist, ep_id);
-		let w = candidates.clone();
+		let w = if pending_docs.is_some() {
+			let mut w = DoublePriorityQueue::default();
+			if let Some(ep_pt) = elements.get_vector(&ctx.tx, &ep_id).await?
+				&& !Self::are_all_docs_in_pending(ctx, ep_id, &ep_pt, pending_docs).await?
+			{
+				w.push(ep_dist, ep_id);
+			}
+			w
+		} else {
+			candidates.clone()
+		};
 		self.search(ctx, elements, pt, candidates, visited, w, ef, pending_docs).await
 	}
 
@@ -206,9 +216,11 @@ where
 					if let Some(e_pt) = elements.get_vector(&ctx.tx, &e_id).await? {
 						let e_dist = elements.distance(&e_pt, q);
 						if e_dist < fq_dist || w.len() < ef {
-							if !Self::are_all_docs_in_pending(ctx, &e_pt, pending_docs).await? {
-								candidates.push(e_dist, e_id);
+							if Self::are_all_docs_in_pending(ctx, e_id, &e_pt, pending_docs).await?
+							{
+								continue;
 							}
+							candidates.push(e_dist, e_id);
 							w.push(e_dist, e_id);
 							if w.len() > ef {
 								w.pop_last();
@@ -286,7 +298,7 @@ where
 		filter: &mut HnswTruthyDocumentFilter<'_>,
 		pending_docs: Option<&RoaringTreemap>,
 	) -> Result<bool> {
-		if let Some(docs) = ctx.vec_docs.get_docs(&ctx.tx, e_pt).await? {
+		if let Some(docs) = ctx.vec_docs.get_docs_by_element(&ctx.tx, e_id, e_pt).await? {
 			if let Some(pending_docs) = pending_docs
 				// Check all these docs are currently updated the pending
 				&& Self::check_all_docs_in_pending(&docs, pending_docs)
@@ -319,6 +331,7 @@ where
 
 	async fn are_all_docs_in_pending(
 		search_ctx: &HnswContext<'_>,
+		e_id: ElementId,
 		e_pt: &SharedVector,
 		pending_docs: Option<&RoaringTreemap>,
 	) -> Result<bool> {
@@ -328,7 +341,9 @@ where
 		if pending_docs.is_empty() {
 			return Ok(false);
 		}
-		if let Some(docs) = search_ctx.vec_docs.get_docs(&search_ctx.tx, e_pt).await? {
+		if let Some(docs) =
+			search_ctx.vec_docs.get_docs_by_element(&search_ctx.tx, e_id, e_pt).await?
+		{
 			for doc_id in docs.iter() {
 				if !pending_docs.contains(doc_id) {
 					return Ok(false);

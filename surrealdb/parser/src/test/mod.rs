@@ -17,6 +17,23 @@ enum ResultMode {
 	Fail,
 }
 
+fn assert_parses(source: &str) {
+	if let Err(e) = crate::Parser::enter_parse::<Query>(
+		source,
+		Config {
+			depth_limit: 1000,
+			generate_warnings: true,
+			feature_bearer_access: true,
+			feature_surrealism: true,
+			quirk_redefine: false,
+			quirk_block_first_no_semi: false,
+			quirk_delete_permission_field: false,
+		},
+	) {
+		panic!("failed to parse `{source}`:\n{}", e.render_char_buffer().write_to_string());
+	}
+}
+
 fn walk_dir<F: FnMut(&Path)>(path: &Path, f: &mut F) {
 	for r in std::fs::read_dir(path).unwrap() {
 		let r = r.unwrap();
@@ -29,6 +46,25 @@ fn walk_dir<F: FnMut(&Path)>(path: &Path, f: &mut F) {
 			walk_dir(&path, f);
 		}
 	}
+}
+
+#[test]
+fn ann_keywords_parse_as_identifiers() {
+	for source in [
+		"SELECT alpha FROM alpha;",
+		"SELECT degree FROM degree;",
+		"SELECT diskann FROM diskann;",
+		"SELECT l_build FROM l_build;",
+	] {
+		assert_parses(source);
+	}
+}
+
+#[test]
+fn ann_keywords_keep_diskann_index_syntax() {
+	assert_parses(
+		"DEFINE INDEX pts_embedding_diskann ON pts FIELDS embedding DISKANN DIMENSION 4 DEGREE 16 L_BUILD 64 ALPHA 1.2 TYPE F32 DIST EUCLIDEAN;",
+	);
 }
 
 /// Text tests, implements a small language-test like testing suite where we test the parser
