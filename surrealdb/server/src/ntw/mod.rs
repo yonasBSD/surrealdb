@@ -323,8 +323,8 @@ impl SurrealRouter {
 		let opt = opt.into();
 		let app_state = AppState {
 			client_ip: opt.client_ip,
-			datastore: ds.clone(),
-			metrics_observer: metrics.as_ref().map(|m| m.observer.clone()),
+			datastore: Arc::clone(&ds),
+			metrics_observer: metrics.as_ref().map(|m| Arc::clone(&m.observer)),
 		};
 
 		// Specify headers to be obfuscated from all requests/responses
@@ -401,7 +401,7 @@ impl SurrealRouter {
 		// Clone the community observer once up-front so the RPC state can
 		// adjust the LIVE-query gauge / notification counter without going
 		// through the fan-out (those are community-side only).
-		let prometheus_observer = metrics.as_ref().map(|m| m.observer.clone());
+		let prometheus_observer = metrics.as_ref().map(|m| Arc::clone(&m.observer));
 		// Source the HTTP tower layer's observer from the datastore so
 		// `NetworkBytesEvent`s reach whichever observer the embedder
 		// installed -- audit composers in particular contribute a
@@ -411,7 +411,7 @@ impl SurrealRouter {
 		// while WebSocket bytes (which already read
 		// `datastore.observer()`) continue to flow -- producing an
 		// asymmetric audit trail.
-		let events_observer = Some(ds.observer().clone());
+		let events_observer = Some(Arc::clone(ds.observer()));
 
 		let service = service
 			.layer(AddExtensionLayer::new(app_state))
@@ -470,10 +470,10 @@ impl SurrealRouter {
 		// (if metrics are enabled) is threaded through so the WebSocket I/O
 		// paths can increment per-protocol byte counters without grabbing any
 		// global state.
-		let rpc_state = Arc::new(RpcState::new_with_metrics(ds.clone(), prometheus_observer));
+		let rpc_state = Arc::new(RpcState::new_with_metrics(Arc::clone(&ds), prometheus_observer));
 
 		// Apply state
-		let axum_app = axum_app.with_state(rpc_state.clone());
+		let axum_app = axum_app.with_state(Arc::clone(&rpc_state));
 
 		Ok(Self {
 			router: axum_app,
@@ -550,7 +550,7 @@ impl SurrealRouter {
 	/// processing requests.
 	pub fn spawn_notifications(&self) -> JoinHandle<()> {
 		let notify = self.notifications.clone();
-		let state = self.rpc_state.clone();
+		let state = Arc::clone(&self.rpc_state);
 		let ct = self.canceller.clone();
 		tokio::spawn(async move { notifications(notify, state, ct).await })
 	}
@@ -605,8 +605,11 @@ pub async fn init_with_metrics<F: RouterFactory>(
 	let handle = Handle::new();
 
 	// Setup the graceful shutdown handler
-	let shutdown_handler =
-		graceful_shutdown(surreal.rpc_state().clone(), surreal.canceller().clone(), handle.clone());
+	let shutdown_handler = graceful_shutdown(
+		Arc::clone(surreal.rpc_state()),
+		surreal.canceller().clone(),
+		handle.clone(),
+	);
 
 	// Spawn the notification delivery task
 	surreal.spawn_notifications();

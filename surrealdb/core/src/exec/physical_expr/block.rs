@@ -56,7 +56,7 @@ fn create_planning_context(
 	local_params: &HashMap<Strand, Value>,
 ) -> FrozenContext {
 	if local_params.is_empty() {
-		return exec_ctx.ctx().clone();
+		return Arc::clone(exec_ctx.ctx());
 	}
 
 	// Create a child context that adds local params (shadowing global params)
@@ -83,10 +83,10 @@ fn get_legacy_context<'a>(
 	let frozen = if let Some(ctx) = cached_ctx.take() {
 		ctx
 	} else {
-		exec_ctx.ctx().clone()
+		Arc::clone(exec_ctx.ctx())
 	};
 
-	*cached_ctx = Some(frozen.clone());
+	*cached_ctx = Some(Arc::clone(&frozen));
 
 	Ok((options, frozen))
 }

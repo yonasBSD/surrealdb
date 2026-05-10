@@ -57,8 +57,8 @@ impl DefineAccessStatement {
 	}
 
 	pub fn from_definition(base: Base, def: &AccessDefinition) -> Self {
-		fn convert_algorithm(access: &catalog::Algorithm) -> Algorithm {
-			match access {
+		fn convert_algorithm(access: catalog::Algorithm) -> Algorithm {
+			match &access {
 				catalog::Algorithm::EdDSA => Algorithm::EdDSA,
 				catalog::Algorithm::Es256 => Algorithm::Es256,
 				catalog::Algorithm::Es384 => Algorithm::Es384,
@@ -79,7 +79,7 @@ impl DefineAccessStatement {
 			JwtAccess {
 				verify: match &access.verify {
 					catalog::JwtAccessVerify::Key(k) => JwtAccessVerify::Key(JwtAccessVerifyKey {
-						alg: convert_algorithm(&k.alg),
+						alg: convert_algorithm(k.alg),
 						key: Expr::Literal(Literal::String(k.key.as_str().into())),
 					}),
 					catalog::JwtAccessVerify::Jwks(j) => {
@@ -89,7 +89,7 @@ impl DefineAccessStatement {
 					}
 				},
 				issue: access.issue.as_ref().map(|x| JwtAccessIssue {
-					alg: convert_algorithm(&x.alg),
+					alg: convert_algorithm(x.alg),
 					key: Expr::Literal(Literal::String(x.key.as_str().into())),
 				}),
 			}
@@ -157,8 +157,8 @@ impl DefineAccessStatement {
 		opt: &Options,
 		doc: Option<&CursorDoc>,
 	) -> Result<AccessDefinition> {
-		fn convert_algorithm(access: &Algorithm) -> catalog::Algorithm {
-			match access {
+		fn convert_algorithm(access: Algorithm) -> catalog::Algorithm {
+			match &access {
 				Algorithm::EdDSA => catalog::Algorithm::EdDSA,
 				Algorithm::Es256 => catalog::Algorithm::Es256,
 				Algorithm::Es384 => catalog::Algorithm::Es384,
@@ -185,7 +185,7 @@ impl DefineAccessStatement {
 			let verify = match &access.verify {
 				JwtAccessVerify::Key(k) => {
 					catalog::JwtAccessVerify::Key(catalog::JwtAccessVerifyKey {
-						alg: convert_algorithm(&k.alg),
+						alg: convert_algorithm(k.alg),
 						key: stk
 							.run(|stk| k.key.compute(stk, ctx, opt, doc))
 							.await
@@ -205,7 +205,7 @@ impl DefineAccessStatement {
 			};
 
 			let issue = map_opt!(x as &access.issue => catalog::JwtAccessIssue {
-				alg: convert_algorithm(&x.alg),
+				alg: convert_algorithm(x.alg),
 				key: stk.run(|stk| x.key.compute(stk, ctx, opt, doc)).await.catch_return()?.cast_to()?,
 			});
 
@@ -348,7 +348,7 @@ impl DefineAccessStatement {
 		doc: Option<&CursorDoc>,
 	) -> Result<Value> {
 		// Allowed to run?
-		ctx.is_allowed(opt, Action::Edit, ResourceKind::Actor, &self.base)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Actor, self.base)?;
 		// Compute the definition
 		let definition = self.to_definition(stk, ctx, opt, doc).await?;
 		// Check the statement type

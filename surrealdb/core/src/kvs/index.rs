@@ -182,9 +182,9 @@ impl IndexBuilder {
 		sdr: Option<Sender<Result<()>>>,
 	) -> Result<IndexBuilding> {
 		let building = Arc::new(Building::new(ctx, self.tf.clone(), opt, tb, ix, ix_key)?);
-		let b = building.clone();
+		let b = Arc::clone(&building);
 		spawn(async move {
-			let guard = BuildingFinishGuard(b.clone());
+			let guard = BuildingFinishGuard(Arc::clone(&b));
 			let r = b.run().await;
 			if let Err(err) = &r {
 				b.set_status(BuildingStatus::Error(err.to_string())).await;
@@ -216,7 +216,7 @@ impl IndexBuilder {
 		} else {
 			(None, None)
 		};
-		match self.indexes.write().await.entry(key.clone()) {
+		match self.indexes.write().await.entry(Arc::clone(&key)) {
 			Entry::Occupied(mut e) => {
 				// If the building is currently running, we return an error
 				ensure!(
@@ -538,7 +538,8 @@ impl Building {
 			*batch_id
 		} else {
 			let batch_id = queue.new_batch();
-			pending_index_batches.insert(self.ix_key.clone(), (batch_id, self.clean_queue.clone()));
+			pending_index_batches
+				.insert(Arc::clone(&self.ix_key), (batch_id, Arc::clone(&self.clean_queue)));
 			batch_id
 		};
 
@@ -1168,7 +1169,7 @@ impl Building {
 					a.old_values
 				} else {
 					// Otherwise, proceed with normal indexing.
-					let doc = CursorDoc::new(Some(rid.clone()), None, val);
+					let doc = CursorDoc::new(Some(Arc::clone(&rid)), None, val);
 					stack
 						.enter(|stk| {
 							Document::build_opt_values(stk, ctx, &self.opt, &self.ix, &doc)

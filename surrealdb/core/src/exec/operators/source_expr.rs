@@ -77,7 +77,7 @@ impl ExecOperator for SourceExpr {
 	}
 
 	fn execute(&self, ctx: &ExecutionContext) -> FlowResult<ValueBatchStream> {
-		let expr = self.expr.clone();
+		let expr = Arc::clone(&self.expr);
 		let ctx = ctx.clone();
 
 		let stream = async_stream::try_stream! {

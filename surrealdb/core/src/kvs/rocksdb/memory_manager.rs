@@ -147,6 +147,7 @@ impl MemoryManager {
 	}
 
 	// Register the memory manager with the global allocator tracker
+	#[allow(clippy::clone_on_ref_ptr)] // Arc::clone would not coerce to `Arc<dyn MemoryReporter>`
 	pub(super) fn register_with_allocator_tracker(self: &Arc<Self>) {
 		// Downgrade the memory manager to a memory reporter
 		let reporter: Arc<dyn MemoryReporter> = self.clone();

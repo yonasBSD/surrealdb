@@ -506,7 +506,8 @@ mod tests {
 			resp
 		}
 
-		let layer = HttpMetricsLayer::new(Some(observer.clone() as Arc<dyn ExecutionObserver>));
+		let layer =
+			HttpMetricsLayer::new(Some(Arc::clone(&observer) as Arc<dyn ExecutionObserver>));
 		let app: Router = Router::new().route("/", get(handler)).layer(layer);
 		let res =
 			app.oneshot(Request::builder().uri("/").body(Body::empty()).unwrap()).await.unwrap();
@@ -540,7 +541,8 @@ mod tests {
 		// Regression guard for unauthenticated / auth-failed requests:
 		// the metrics tracker still emits, with `ctx == default()`.
 		let observer: Arc<CapturingObserver> = Arc::new(CapturingObserver::default());
-		let layer = HttpMetricsLayer::new(Some(observer.clone() as Arc<dyn ExecutionObserver>));
+		let layer =
+			HttpMetricsLayer::new(Some(Arc::clone(&observer) as Arc<dyn ExecutionObserver>));
 		let app: Router = Router::new().route("/", get(|| async { "ok" })).layer(layer);
 		let res =
 			app.oneshot(Request::builder().uri("/").body(Body::empty()).unwrap()).await.unwrap();
@@ -567,7 +569,8 @@ mod tests {
 		// observers can use the value as a metric attribute without
 		// per-request allocation.
 		let observer: Arc<CapturingObserver> = Arc::new(CapturingObserver::default());
-		let layer = HttpMetricsLayer::new(Some(observer.clone() as Arc<dyn ExecutionObserver>));
+		let layer =
+			HttpMetricsLayer::new(Some(Arc::clone(&observer) as Arc<dyn ExecutionObserver>));
 		let app: Router =
 			Router::new().route("/key/{tb}/{id}", get(|| async { "ok" })).layer(layer);
 		let app2 = app.clone();

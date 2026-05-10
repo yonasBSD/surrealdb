@@ -43,7 +43,7 @@ impl PhysicalExpr for JsFunctionExec {
 		use crate::fnc::script;
 
 		// Get the frozen context and options
-		let frozen_ctx = ctx.exec_ctx.ctx().clone();
+		let frozen_ctx = Arc::clone(ctx.exec_ctx.ctx());
 		let opt = ctx
 			.exec_ctx
 			.options()

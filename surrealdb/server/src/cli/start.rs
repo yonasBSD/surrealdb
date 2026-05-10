@@ -276,7 +276,7 @@ pub async fn init<
 	// Eagerly load surrealism modules in the background unless opted out
 	#[cfg(feature = "surrealism")]
 	if !datastore.is_lazy_surrealism() {
-		let ds = datastore.clone();
+		let ds = Arc::clone(&datastore);
 		tokio::spawn(async move {
 			ds.eager_load_surrealism_modules().await;
 		});
@@ -291,11 +291,11 @@ pub async fn init<
 		warn!("failed to register storage metrics: {err}");
 	}
 	// Start the node agent
-	let nodetasks = tasks::init(datastore.clone(), canceller.clone(), &config.engine);
+	let nodetasks = tasks::init(Arc::clone(&datastore), canceller.clone(), &config.engine);
 	// Build and run the HTTP server using the provided RouterFactory implementation
 	ntw::init_with_metrics::<C>(
 		&config,
-		datastore.clone(),
+		Arc::clone(&datastore),
 		recv,
 		canceller.clone(),
 		router_state,
@@ -338,6 +338,7 @@ pub async fn init<
 ///
 /// The returned [`MetricsState`] is `None` when metrics are disabled, which
 /// keeps the `/metrics` route from being mounted at all.
+#[allow(clippy::clone_on_ref_ptr)]
 fn build_observability<C: ObservabilityProvider>(
 	composer: &C,
 	runtime: &ObservabilityRuntime,

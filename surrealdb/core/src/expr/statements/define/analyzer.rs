@@ -86,7 +86,7 @@ impl DefineAnalyzerStatement {
 		doc: Option<&CursorDoc>,
 	) -> Result<Value> {
 		// Allowed to run?
-		ctx.is_allowed(opt, Action::Edit, ResourceKind::Analyzer, &Base::Db)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Analyzer, Base::Db)?;
 		// Compute the definition
 		let definition = self.to_definition(stk, ctx, opt, doc).await?;
 		// Fetch the transaction

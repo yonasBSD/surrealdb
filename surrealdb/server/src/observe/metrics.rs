@@ -475,13 +475,13 @@ impl MetricsObserver {
 		counters: Arc<dyn PipelineCounters>,
 	) -> anyhow::Result<()> {
 		let meter = runtime.meter(scope_and_prefix);
-		let records = counters.clone();
+		let records = Arc::clone(&counters);
 		let _records_gauge = meter
 			.u64_observable_gauge(format!("{scope_and_prefix}.records"))
 			.with_description(format!("Cumulative count of {kind} records successfully enqueued",))
 			.with_callback(move |obs| obs.observe(records.records_total(), &[]))
 			.build();
-		let dropped = counters.clone();
+		let dropped = Arc::clone(&counters);
 		let _dropped_gauge = meter
 			.u64_observable_gauge(format!("{scope_and_prefix}.dropped"))
 			.with_description(format!(
@@ -489,7 +489,7 @@ impl MetricsObserver {
 			))
 			.with_callback(move |obs| obs.observe(dropped.dropped_total(), &[]))
 			.build();
-		let depth = counters.clone();
+		let depth = Arc::clone(&counters);
 		let _depth_gauge = meter
 			.i64_observable_gauge(format!("{scope_and_prefix}.queue_depth"))
 			.with_description(format!(
@@ -497,7 +497,7 @@ impl MetricsObserver {
 			))
 			.with_callback(move |obs| obs.observe(depth.queue_depth(), &[]))
 			.build();
-		let appended = counters.clone();
+		let appended = Arc::clone(&counters);
 		let _appended_gauge = meter
 			.u64_observable_gauge(format!("{scope_and_prefix}.appended"))
 			.with_description(format!(

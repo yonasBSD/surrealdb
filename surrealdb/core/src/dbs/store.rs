@@ -330,7 +330,7 @@ impl MemoryOrderedLimit {
 				if cmp == Ordering::Less {
 					self.heap.push(Reverse(OrderedValue {
 						value,
-						orders: self.orders.clone(),
+						orders: Arc::clone(&self.orders),
 					}));
 					self.heap.pop();
 				}
@@ -339,7 +339,7 @@ impl MemoryOrderedLimit {
 			// Push the value onto the heap because it's not full.
 			self.heap.push(Reverse(OrderedValue {
 				value,
-				orders: self.orders.clone(),
+				orders: Arc::clone(&self.orders),
 			}));
 		}
 	}

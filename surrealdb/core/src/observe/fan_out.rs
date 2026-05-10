@@ -183,8 +183,8 @@ mod tests {
 			wants_sql: false,
 		});
 		let f = FanOutObserver::new([
-			a.clone() as Arc<dyn ExecutionObserver>,
-			b.clone() as Arc<dyn ExecutionObserver>,
+			Arc::clone(&a) as Arc<dyn ExecutionObserver>,
+			Arc::clone(&b) as Arc<dyn ExecutionObserver>,
 		]);
 		f.on_statement_complete(&mk_event());
 		assert_eq!(a.statements.load(Ordering::Relaxed), 1);

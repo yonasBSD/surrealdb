@@ -901,7 +901,7 @@ impl Iterator {
 		// With ORDER BY, only safe if iterator is a sorted index matching ORDER
 		if let Some(Iterable::Index(_doc_ctx, _, irf, _)) = self.entries.first()
 			&& let Some(qp) = ctx.get_query_planner()
-			&& qp.is_order(irf)
+			&& qp.is_order(*irf)
 		{
 			return true;
 		}
@@ -937,7 +937,7 @@ impl Iterator {
 		if self.entries.len() == 1
 			&& let Some(Iterable::Index(_doc_ctx, _, irf, _)) = self.entries.first()
 			&& let Some(qp) = ctx.get_query_planner()
-			&& qp.is_order(irf)
+			&& qp.is_order(*irf)
 		{
 			return true;
 		}

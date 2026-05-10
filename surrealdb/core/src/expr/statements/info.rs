@@ -47,7 +47,7 @@ impl InfoStatement {
 		match self {
 			InfoStatement::Root(structured, version) => {
 				// Allowed to run?
-				ctx.is_allowed(opt, Action::View, ResourceKind::Any, &Base::Root)?;
+				ctx.is_allowed(opt, Action::View, ResourceKind::Any, Base::Root)?;
 				// Get the transaction
 				let txn = ctx.tx();
 				// Convert the version to u64 if present
@@ -118,7 +118,7 @@ impl InfoStatement {
 			}
 			InfoStatement::Ns(structured, version) => {
 				// Allowed to run?
-				ctx.is_allowed(opt, Action::View, ResourceKind::Any, &Base::Ns)?;
+				ctx.is_allowed(opt, Action::View, ResourceKind::Any, Base::Ns)?;
 				// Get the NS
 				let ns = ctx.expect_ns_id(opt).await?;
 				// Get the transaction
@@ -171,7 +171,7 @@ impl InfoStatement {
 			}
 			InfoStatement::Db(structured, version) => {
 				// Allowed to run?
-				ctx.is_allowed(opt, Action::View, ResourceKind::Any, &Base::Db)?;
+				ctx.is_allowed(opt, Action::View, ResourceKind::Any, Base::Db)?;
 				// Get the NS and DB
 				let (ns, db) = ctx.expect_ns_db_ids(opt).await?;
 				// Get the transaction
@@ -297,7 +297,7 @@ impl InfoStatement {
 			}
 			InfoStatement::Tb(tb, structured, version) => {
 				// Allowed to run?
-				ctx.is_allowed(opt, Action::View, ResourceKind::Any, &Base::Db)?;
+				ctx.is_allowed(opt, Action::View, ResourceKind::Any, Base::Db)?;
 				// Get the NS and DB
 				let (ns, db) = ctx.expect_ns_db_ids(opt).await?;
 				// Compute table name
@@ -368,7 +368,7 @@ impl InfoStatement {
 				// Get the base type
 				let base = (*base).unwrap_or(opt.selected_base()?);
 				// Allowed to run?
-				ctx.is_allowed(opt, Action::View, ResourceKind::Actor, &base)?;
+				ctx.is_allowed(opt, Action::View, ResourceKind::Actor, base)?;
 				// Compute user name
 				let user = expr_to_ident(stk, ctx, opt, doc, user, "user name").await?;
 				// Get the transaction
@@ -417,7 +417,7 @@ impl InfoStatement {
 			}
 			InfoStatement::Index(index, table, _structured) => {
 				// Allowed to run?
-				ctx.is_allowed(opt, Action::View, ResourceKind::Actor, &Base::Db)?;
+				ctx.is_allowed(opt, Action::View, ResourceKind::Actor, Base::Db)?;
 				// Compute table & index names
 				let index = expr_to_ident(stk, ctx, opt, doc, index, "index name").await?;
 				let table =

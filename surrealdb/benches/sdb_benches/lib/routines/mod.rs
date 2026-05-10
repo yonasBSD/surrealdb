@@ -47,15 +47,15 @@ pub(super) fn bench_routine<R>(
 		let session = Session::owner().with_ns("test").with_db("test");
 		for _ in 0..iters {
 			// Setup
-			routine.setup(ds.clone(), session.clone(), num_ops);
+			routine.setup(Arc::clone(ds), session.clone(), num_ops);
 
 			// Run and time the routine
 			let now = web_time::Instant::now();
-			routine.run(ds.clone(), session.clone(), num_ops);
+			routine.run(Arc::clone(ds), session.clone(), num_ops);
 			total += now.elapsed();
 
 			// Cleanup the database
-			routine.cleanup(ds.clone(), session.clone(), num_ops);
+			routine.cleanup(Arc::clone(ds), session.clone(), num_ops);
 		}
 
 		total.div_f32(num_ops as f32)

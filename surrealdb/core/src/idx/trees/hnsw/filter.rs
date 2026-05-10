@@ -116,9 +116,14 @@ impl<'a> HnswTruthyDocumentFilter<'a> {
 					}
 				};
 				// Is the record truthy?
-				let record =
-					Self::is_record_truthy(ctx, self.opt, stk, self.cond.clone(), rid.clone())
-						.await?;
+				let record = Self::is_record_truthy(
+					ctx,
+					self.opt,
+					stk,
+					Arc::clone(&self.cond),
+					Arc::clone(&rid),
+				)
+				.await?;
 				let truthy = record.is_some();
 				// Store the result in the cache
 				let entry = record.map(|r| (rid, r));
@@ -143,7 +148,7 @@ impl<'a> HnswTruthyDocumentFilter<'a> {
 			return Ok(None);
 		}
 		let cursor_doc = CursorDoc {
-			rid: Some(rid.clone()),
+			rid: Some(Arc::clone(&rid)),
 			ir: None,
 			doc: val.into(),
 			fields_computed: false,

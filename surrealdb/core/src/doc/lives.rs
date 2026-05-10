@@ -83,7 +83,8 @@ impl Document {
 			// This ensures that we are using the auth data
 			// of the user who created the LIVE query.
 			let lqopt = opt.new_with_perms(true);
-			let (met, current, initial) = (met.clone(), current.clone(), initial.clone());
+			let (met, current, initial) =
+				(Arc::clone(&met), Arc::clone(&current), Arc::clone(&initial));
 			tasks.push(async move {
 				let mut stack = TreeStack::new();
 				stack
@@ -174,7 +175,7 @@ impl Document {
 		// to this LIVE query so the user can use these
 		// within field projections and WHERE clauses.
 		ctx.add_value("event", met);
-		ctx.add_value("value", current.clone());
+		ctx.add_value("value", Arc::clone(&current));
 		ctx.add_value("after", current);
 		ctx.add_value("before", initial);
 		// Add the variables to the context

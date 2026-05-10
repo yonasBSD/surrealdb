@@ -321,7 +321,7 @@ impl McpService {
 	pub fn init_session(&self, session: Session) -> Result<(), McpError> {
 		let subject = BoundSubject::from_session(&session);
 		let mcp_session =
-			McpSession::with_config(self.datastore.clone(), session, self.config.clone());
+			McpSession::with_config(Arc::clone(&self.datastore), session, Arc::clone(&self.config));
 		self.session
 			.set(mcp_session)
 			.map_err(|_| McpError::internal_error("Session already initialized", None))?;
@@ -866,7 +866,7 @@ mod http_service {
 		config.stateful_mode = true;
 		StreamableHttpService::new(
 			move || {
-				let svc = McpService::new(ds.clone(), None, None, Session::default());
+				let svc = McpService::new(Arc::clone(&ds), None, None, Session::default());
 				let svc = if let Some(rec) = metrics_recorder.clone() {
 					svc.with_metrics_recorder(rec).with_transport_label("http")
 				} else {

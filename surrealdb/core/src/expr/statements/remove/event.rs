@@ -41,7 +41,7 @@ impl RemoveEventStatement {
 		doc: Option<&CursorDoc>,
 	) -> Result<Value> {
 		// Allowed to run?
-		ctx.is_allowed(opt, Action::Edit, ResourceKind::Event, &Base::Db)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Event, Base::Db)?;
 		// Get the NS and DB
 		let (ns_name, db_name) = opt.ns_db()?;
 		// Compute the table name

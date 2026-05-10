@@ -23,7 +23,7 @@ impl RemoveConfigStatement {
 			opt,
 			Action::Edit,
 			ResourceKind::Config(self.kind.clone()),
-			&base.clone().into(),
+			base.clone().into(),
 		)?;
 		let cg = match &self.kind {
 			ConfigKind::GraphQL => "graphql",

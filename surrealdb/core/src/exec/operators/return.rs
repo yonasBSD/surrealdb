@@ -64,7 +64,7 @@ impl ExecOperator for ReturnPlan {
 	}
 
 	fn execute(&self, ctx: &ExecutionContext) -> FlowResult<ValueBatchStream> {
-		let inner = self.inner.clone();
+		let inner = Arc::clone(&self.inner);
 		let ctx = ctx.clone();
 
 		// Check if inner plan is scalar (like `RETURN 1 + 2`) vs query (like `RETURN SELECT

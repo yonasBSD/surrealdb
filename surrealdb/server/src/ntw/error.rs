@@ -103,6 +103,8 @@ pub(super) struct ErrorMessage {
 	information: Option<String>,
 }
 
+/// Serde invokes `serialize_with` helpers with `&T` regardless of `Copy`.
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn serialize_status_code<S>(code: &StatusCode, s: S) -> Result<S::Ok, S::Error>
 where
 	S: Serializer,

@@ -222,7 +222,7 @@ impl ExecOperator for SortTopK {
 					let keyed = KeyedValue {
 						keys,
 						value,
-						order_by: order_by.clone(),
+						order_by: Arc::clone(&order_by),
 						seq,
 					};
 					seq += 1;
@@ -445,7 +445,7 @@ impl ExecOperator for SortTopKByKey {
 							if cmp == Ordering::Less {
 								heap.push(Reverse(TopKByKeyEntry {
 									value,
-									sort_keys: sort_keys.clone(),
+									sort_keys: Arc::clone(&sort_keys),
 									seq,
 								}));
 								seq += 1;
@@ -458,7 +458,7 @@ impl ExecOperator for SortTopKByKey {
 						// Heap not full yet — always push.
 						heap.push(Reverse(TopKByKeyEntry {
 							value,
-							sort_keys: sort_keys.clone(),
+							sort_keys: Arc::clone(&sort_keys),
 							seq,
 						}));
 						seq += 1;

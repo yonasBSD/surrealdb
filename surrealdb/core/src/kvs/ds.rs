@@ -346,8 +346,8 @@ impl TransactionFactory {
 		Ok(Transaction::new(
 			local,
 			sequences,
-			self.async_event_trigger.clone(),
-			self.observer.clone(),
+			Arc::clone(&self.async_event_trigger),
+			Arc::clone(&self.observer),
 			Transactor {
 				inner,
 			},
@@ -888,7 +888,7 @@ impl Datastore {
 			dynamic_configuration: DynamicConfiguration::default(),
 			slow_log: self.slow_log,
 			transaction_timeout: self.transaction_timeout,
-			capabilities: self.capabilities.clone(),
+			capabilities: Arc::clone(&self.capabilities),
 			notification_channel: self.notification_channel,
 			index_stores: IndexStores::new(
 				self.config.hnsw_cache_size,
@@ -1006,7 +1006,7 @@ impl Datastore {
 	// Used for testing live queries
 	#[cfg(test)]
 	pub(crate) fn get_cache(&self) -> Arc<DatastoreCache> {
-		self.cache.clone()
+		Arc::clone(&self.cache)
 	}
 
 	// Initialise the cluster and run bootstrap utilities
@@ -1109,7 +1109,7 @@ impl Datastore {
 			let opt = Options::new(&CommonConfig::default())
 				.with_auth(Arc::new(Auth::for_root(Role::Owner)));
 			let mut ctx = self.setup_ctx()?;
-			ctx.set_transaction(txn.clone());
+			ctx.set_transaction(Arc::clone(&txn));
 			let ctx = ctx.freeze();
 			let mut stack = TreeStack::new();
 			let res = stack.enter(|stk| stm.compute(stk, &ctx, &opt, None)).finish().await;
@@ -1211,7 +1211,7 @@ impl Datastore {
 				return;
 			}
 		};
-		ctx.set_transaction(txn.clone());
+		ctx.set_transaction(Arc::clone(&txn));
 		let ctx = ctx.freeze();
 
 		let nss = match txn.all_ns(None).await {
@@ -1288,8 +1288,8 @@ impl Datastore {
 
 		let mut join_set = tokio::task::JoinSet::new();
 		for lookup in lookups {
-			let ctx = ctx.clone();
-			let load_sem = load_sem.clone();
+			let ctx = Arc::clone(&ctx);
+			let load_sem = Arc::clone(&load_sem);
 			join_set.spawn(async move {
 				let _permit = load_sem
 					.acquire_owned()
@@ -1964,7 +1964,8 @@ impl Datastore {
 			// Process compaction for each index
 			count_iteration += 1;
 			count_error +=
-				Self::index_compaction_loop(dbs.clone(), &lh, items, canceller.clone()).await?;
+				Self::index_compaction_loop(Arc::clone(&dbs), &lh, items, canceller.clone())
+					.await?;
 			// Delete the processed queue entries in a separate write
 			// transaction. This avoids conflicts with concurrent user
 			// transactions that may enqueue new compaction requests.
@@ -2085,7 +2086,7 @@ impl Datastore {
 				Self::await_index_compaction_handles(&mut handles, &canceller).await;
 				return Err(e);
 			}
-			let dbs = dbs.clone();
+			let dbs = Arc::clone(&dbs);
 			let canceller = canceller.clone();
 			let task_ikb = ikb.clone();
 			let jh = spawn(async move { dbs.process_index_compaction(&task_ikb, canceller).await });
@@ -2231,7 +2232,7 @@ impl Datastore {
 					{
 						Some(ix) if !ix.prepare_remove && matches!(&ix.index, Index::Hnsw(_)) => {
 							let mut ctx = self.setup_ctx()?;
-							ctx.set_transaction(txn.clone());
+							ctx.set_transaction(Arc::clone(&txn));
 							let ctx = ctx.freeze();
 							let plan = IndexOperation::prepare_hnsw_compaction(&ctx, ikb).await?;
 							Ok(Some((tb.table_id, plan)))
@@ -2261,7 +2262,7 @@ impl Datastore {
 					Some(ix) if !ix.prepare_remove => match &ix.index {
 						Index::Hnsw(p) => {
 							let mut ctx = self.setup_ctx()?;
-							ctx.set_transaction(txn.clone());
+							ctx.set_transaction(Arc::clone(&txn));
 							let ctx = ctx.freeze();
 							IndexOperation::apply_hnsw_compaction(
 								&ctx,
@@ -2388,7 +2389,7 @@ impl Datastore {
 							if !ix.prepare_remove && matches!(&ix.index, Index::DiskAnn(_)) =>
 						{
 							let mut ctx = self.setup_ctx()?;
-							ctx.set_transaction(txn.clone());
+							ctx.set_transaction(Arc::clone(&txn));
 							let ctx = ctx.freeze();
 							let plan =
 								IndexOperation::prepare_diskann_compaction(&ctx, ikb).await?;
@@ -2419,7 +2420,7 @@ impl Datastore {
 					Some(ix) if !ix.prepare_remove => match &ix.index {
 						Index::DiskAnn(p) => {
 							let mut ctx = self.setup_ctx()?;
-							ctx.set_transaction(txn.clone());
+							ctx.set_transaction(Arc::clone(&txn));
 							let ctx = ctx.freeze();
 							IndexOperation::apply_diskann_compaction(
 								&ctx,
@@ -2881,7 +2882,7 @@ impl Datastore {
 		// transaction so the emitted [`crate::observe::TransactionEvent`]
 		// carries the active session's namespace, database, user, etc.
 		if let Some(identity) = ctx.tenant_identity() {
-			tx.set_tenant_identity(identity.clone());
+			tx.set_tenant_identity(Arc::clone(identity));
 		}
 
 		// Set the transaction in the context
@@ -3110,7 +3111,7 @@ impl Datastore {
 			))))
 			.enclose();
 		// Store the transaction
-		ctx.set_transaction(txn.clone());
+		ctx.set_transaction(Arc::clone(&txn));
 
 		// Start an execution context
 		ctx.attach_session(sess)?;
@@ -3209,7 +3210,10 @@ impl Datastore {
 	}
 
 	pub fn setup_options(&self, sess: &Session) -> Options {
-		Options::new(&self.config).with_ns(sess.ns()).with_db(sess.db()).with_auth(sess.au.clone())
+		Options::new(&self.config)
+			.with_ns(sess.ns())
+			.with_db(sess.db())
+			.with_auth(Arc::clone(&sess.au))
 	}
 
 	pub fn setup_ctx(&self) -> Result<Context> {
@@ -3219,20 +3223,20 @@ impl Datastore {
 			self.dynamic_configuration.clone(),
 			self.dynamic_configuration.get_query_timeout(),
 			self.slow_log.clone(),
-			self.capabilities.clone(),
+			Arc::clone(&self.capabilities),
 			self.index_stores.clone(),
 			self.index_builder.clone(),
 			self.sequences.clone(),
-			self.cache.clone(),
-			self.function_registry.clone(),
+			Arc::clone(&self.cache),
+			Arc::clone(&self.function_registry),
 			#[cfg(feature = "http")]
-			self.http_client.clone(),
+			Arc::clone(&self.http_client),
 			#[cfg(storage)]
 			self.temporary_directory.clone(),
 			self.buckets.clone(),
-			self.config.clone(),
+			Arc::clone(&self.config),
 			#[cfg(feature = "surrealism")]
-			self.surrealism_cache.clone(),
+			Arc::clone(&self.surrealism_cache),
 		)?;
 		// Setup the notification channel
 		ctx.add_notifications(self.notification_channel.as_ref());
@@ -3432,12 +3436,12 @@ impl Datastore {
 	}
 
 	pub fn config(&self) -> Arc<CommonConfig> {
-		self.config.clone()
+		Arc::clone(&self.config)
 	}
 
 	#[cfg(feature = "http")]
 	pub fn http_client(&self) -> Arc<HttpClient> {
-		self.http_client.clone()
+		Arc::clone(&self.http_client)
 	}
 }
 
@@ -3768,7 +3772,7 @@ mod test {
 		// Start a new transaction
 		let txn = dbs.transaction(TransactionType::Read, Optimistic).await?.enclose();
 		// Store the transaction
-		ctx.set_transaction(txn.clone());
+		ctx.set_transaction(Arc::clone(&txn));
 		// Freeze the context
 		let ctx = ctx.freeze();
 		// Compute the value

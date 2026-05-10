@@ -1047,6 +1047,7 @@ pub struct HttpRequestEvent {
 
 #[cfg(test)]
 mod tests {
+	use std::sync::Arc;
 	use std::thread;
 
 	use super::*;
@@ -1127,7 +1128,7 @@ mod tests {
 		let m = std::sync::Arc::new(TransactionMetrics::new());
 		let mut handles = Vec::new();
 		for _ in 0..8 {
-			let m = m.clone();
+			let m = Arc::clone(&m);
 			handles.push(thread::spawn(move || {
 				for _ in 0..1_000 {
 					m.record_get(1, 1, 1);

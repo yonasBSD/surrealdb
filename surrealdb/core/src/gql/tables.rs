@@ -703,8 +703,8 @@ fn make_table_list_field(
 
 	Field::new(tb_name_str.clone(), TypeRef::named_nn_list_nn(&tb_name_str), move |ctx| {
 		let tb_name = tb_name.clone();
-		let fds = fds.clone();
-		let kvs = kvs.clone();
+		let fds = Arc::clone(&fds);
+		let kvs = Arc::clone(&kvs);
 		FieldFuture::new(async move {
 			let sess = ctx.data::<Arc<Session>>()?;
 			let args = ctx.args.as_index_map();
@@ -756,7 +756,7 @@ fn make_table_get_field(tb: &TableDefinition, kvs: Arc<Datastore>) -> Field {
 
 	Field::new(format!("_get_{}", tb.name), TypeRef::named(&tb_name_str), move |ctx| {
 		let tb_name = tb_name.clone();
-		let kvs = kvs.clone();
+		let kvs = Arc::clone(&kvs);
 		FieldFuture::new(async move {
 			let sess = ctx.data::<Arc<Session>>()?;
 			let args = ctx.args.as_index_map();
@@ -814,7 +814,7 @@ fn make_table_get_field(tb: &TableDefinition, kvs: Arc<Datastore>) -> Field {
 /// indicate the concrete table type.
 fn make_generic_get_field(kvs: Arc<Datastore>) -> Field {
 	Field::new("_get", TypeRef::named("record"), move |ctx| {
-		let kvs = kvs.clone();
+		let kvs = Arc::clone(&kvs);
 		FieldFuture::new(async move {
 			let sess = ctx.data::<Arc<Session>>()?;
 			let args = ctx.args.as_index_map();
@@ -1118,11 +1118,11 @@ pub async fn process_tbs(
 	for tb in tbs.iter() {
 		trace!("Adding table: {}", tb.name);
 		let fds = ctx.tx.all_tb_fields(ctx.ns, ctx.db, &tb.name, None).await?;
-		table_fields.insert(tb.name.clone(), fds.clone());
+		table_fields.insert(tb.name.clone(), Arc::clone(&fds));
 
 		// Add query root fields for this table
-		query = query.field(make_table_list_field(tb, fds.clone(), ctx.datastore.clone()));
-		query = query.field(make_table_get_field(tb, ctx.datastore.clone()));
+		query = query.field(make_table_list_field(tb, Arc::clone(&fds), Arc::clone(ctx.datastore)));
+		query = query.field(make_table_get_field(tb, Arc::clone(ctx.datastore)));
 
 		// Build and register the table's type system
 		let tt = build_table_type(
@@ -1140,7 +1140,7 @@ pub async fn process_tbs(
 	}
 
 	// Add generic _get query field for fetching any record by full ID
-	query = query.field(make_generic_get_field(ctx.datastore.clone()));
+	query = query.field(make_generic_get_field(Arc::clone(ctx.datastore)));
 
 	Ok(query)
 }

@@ -148,7 +148,7 @@ impl Executor {
 	fn install_statement_counters(&mut self) -> Arc<StatementCounters> {
 		let counters = StatementCounters::new();
 		if let Some(ctx) = Arc::get_mut(&mut self.ctx) {
-			ctx.set_statement_counters(Some(counters.clone()));
+			ctx.set_statement_counters(Some(Arc::clone(&counters)));
 		} else {
 			debug_assert!(
 				false,
@@ -170,7 +170,7 @@ impl Executor {
 
 	fn execute_option_statement(&mut self, stmt: &OptionStatement) -> Result<()> {
 		// Allowed to run?
-		self.ctx.is_allowed(&self.opt, Action::Edit, ResourceKind::Option, &Base::Db)?;
+		self.ctx.is_allowed(&self.opt, Action::Edit, ResourceKind::Option, Base::Db)?;
 
 		if stmt.name.eq_ignore_ascii_case("IMPORT") {
 			self.opt.set_import(stmt.what);
@@ -370,7 +370,7 @@ impl Executor {
 	/// executor batch, so we extract once and reuse.
 	fn get_session_info(&mut self) -> Option<Arc<crate::exec::context::SessionInfo>> {
 		if let Some(ref cached) = self.cached_session {
-			return Some(cached.clone());
+			return Some(Arc::clone(cached));
 		}
 		let session = self.extract_session_info();
 		self.cached_session.clone_from(&session);
@@ -495,7 +495,7 @@ impl Executor {
 			options: Some(self.opt.clone()),
 			datastore: None,
 			cancellation,
-			auth: self.opt.auth.clone(),
+			auth: Arc::clone(&self.opt.auth),
 			session: self.get_session_info(),
 			current_value: None,
 			skip_fetch_perms: false,
@@ -794,13 +794,13 @@ impl Executor {
 			// Process all other normal statements
 			TopLevelExpr::Expr(e) => {
 				// Try the new streaming execution path first
-				match try_plan_expr!(&e, &self.ctx, txn.clone()) {
+				match try_plan_expr!(&e, &self.ctx, Arc::clone(&txn)) {
 					Ok(plan) => {
 						// Set the transaction on the context
-						ctx_mut!().set_transaction(txn.clone());
+						ctx_mut!().set_transaction(Arc::clone(&txn));
 
 						// Build execution context and execute the plan
-						let exec_result = self.execute_operator_plan(plan, txn.clone()).await;
+						let exec_result = self.execute_operator_plan(plan, Arc::clone(&txn)).await;
 
 						self.check_slow_log(start, &e);
 
@@ -895,7 +895,7 @@ impl Executor {
 			Some(timeout) => {
 				match tokio::time::timeout(
 					timeout,
-					self.execute_plan_in_transaction(txn.clone(), start, plan),
+					self.execute_plan_in_transaction(Arc::clone(&txn), start, plan),
 				)
 				.await
 				{
@@ -906,7 +906,7 @@ impl Executor {
 					}
 				}
 			}
-			None => self.execute_plan_in_transaction(txn.clone(), start, plan).await,
+			None => self.execute_plan_in_transaction(Arc::clone(&txn), start, plan).await,
 		};
 
 		match exec_result {
@@ -1021,7 +1021,7 @@ impl Executor {
 				let start_results = self.results.len();
 				match tokio::time::timeout(
 					timeout,
-					self.execute_begin_statement_inner(kvs, txn.clone(), stream),
+					self.execute_begin_statement_inner(kvs, Arc::clone(&txn), stream),
 				)
 				.await
 				{
@@ -1414,64 +1414,65 @@ impl Executor {
 					// surface affected-row counts independently of the
 					// post-RETURN value shape.
 					let counters = self.install_statement_counters();
-					let r: Result<Value> =
-						match self.execute_plan_in_transaction(txn.clone(), &before, plan).await {
-							Ok(x) => Ok(x),
-							Err(ControlFlow::Return(value)) => {
-								skip_remaining = true;
-								Ok(value)
+					let r: Result<Value> = match self
+						.execute_plan_in_transaction(Arc::clone(&txn), &before, plan)
+						.await
+					{
+						Ok(x) => Ok(x),
+						Err(ControlFlow::Return(value)) => {
+							skip_remaining = true;
+							Ok(value)
+						}
+						Err(ControlFlow::Break) | Err(ControlFlow::Continue) => {
+							Err(anyhow!(Error::InvalidControlFlow))
+						}
+						Err(ControlFlow::Err(e)) => {
+							for res in &mut self.results[start_results..] {
+								res.query_type = QueryType::Other;
+								res.result = Err(TypesError::query(
+									"The query was not executed due to a failed transaction"
+										.to_string(),
+									Some(QueryError::NotExecuted),
+								));
 							}
-							Err(ControlFlow::Break) | Err(ControlFlow::Continue) => {
-								Err(anyhow!(Error::InvalidControlFlow))
-							}
-							Err(ControlFlow::Err(e)) => {
-								for res in &mut self.results[start_results..] {
-									res.query_type = QueryType::Other;
-									res.result = Err(TypesError::query(
-										"The query was not executed due to a failed transaction"
-											.to_string(),
-										Some(QueryError::NotExecuted),
-									));
-								}
 
-								// Convert the anyhow error before pushing so we can both
-								// classify it for the metric attribute and store it on the
-								// result row in a single move.
-								let typed_err = types_error_from_anyhow(e);
-								let error_class = Some(
-									crate::observe::error_class::classify_types_error(&typed_err),
-								);
+							// Convert the anyhow error before pushing so we can both
+							// classify it for the metric attribute and store it on the
+							// result row in a single move.
+							let typed_err = types_error_from_anyhow(e);
+							let error_class =
+								Some(crate::observe::error_class::classify_types_error(&typed_err));
 
-								// statement return an error. Consume all the other statement until
-								// we hit a cancel or commit.
-								self.results.push(QueryResult {
-									time: before.elapsed(),
-									result: Err(typed_err),
-									query_type,
-								});
+							// statement return an error. Consume all the other statement until
+							// we hit a cancel or commit.
+							self.results.push(QueryResult {
+								time: before.elapsed(),
+								result: Err(typed_err),
+								query_type,
+							});
 
-								self.emit_statement_event_cached(
-									kvs,
-									statement_type,
-									statement_read_only,
-									sql_text,
-									&before,
-									Outcome::Error,
-									0,
-									error_class,
-								);
+							self.emit_statement_event_cached(
+								kvs,
+								statement_type,
+								statement_read_only,
+								sql_text,
+								&before,
+								Outcome::Error,
+								0,
+								error_class,
+							);
 
-								let _ = txn.cancel().await;
+							let _ = txn.cancel().await;
 
-								while let Some(stmt) = stream.next().await {
-									yield_now!();
-									let stmt = stmt?;
-									match stmt {
-										TopLevelExpr::Commit => {
-											// Aborted txn: COMMIT must error (same intent as
-											// `txn.commit()` failure above — descriptive
-											// `Cannot COMMIT:` prefix) (#7207).
-											self.results.push(QueryResult {
+							while let Some(stmt) = stream.next().await {
+								yield_now!();
+								let stmt = stmt?;
+								match stmt {
+									TopLevelExpr::Commit => {
+										// Aborted txn: COMMIT must error (same intent as
+										// `txn.commit()` failure above — descriptive
+										// `Cannot COMMIT:` prefix) (#7207).
+										self.results.push(QueryResult {
 												time: Duration::ZERO,
 												result: Err(TypesError::query(
 													"Cannot COMMIT: the transaction was aborted due to a prior error"
@@ -1480,13 +1481,13 @@ impl Executor {
 												)),
 												query_type: QueryType::Other,
 											});
-											return Ok(());
-										}
-										TopLevelExpr::Cancel => {
-											return Ok(());
-										}
-										_ => {
-											self.results.push(QueryResult {
+										return Ok(());
+									}
+									TopLevelExpr::Cancel => {
+										return Ok(());
+									}
+									_ => {
+										self.results.push(QueryResult {
 												time: Duration::ZERO,
 												result: Err(TypesError::query(
 													"The query was not executed due to a cancelled transaction"
@@ -1495,15 +1496,15 @@ impl Executor {
 												)),
 												query_type: QueryType::Other,
 											});
-										}
 									}
 								}
-
-								// ran out of statements before the transaction ended.
-								// Just break as we have nothing else we can do.
-								return Ok(());
 							}
-						};
+
+							// ran out of statements before the transaction ended.
+							// Just break as we have nothing else we can do.
+							return Ok(());
+						}
+					};
 
 					// Count rows from the internal Value before it's
 					// consumed by the conversion to PublicValue. Non-DML
@@ -1601,7 +1602,7 @@ impl Executor {
 					)
 				);
 			let counters = executor.install_statement_counters();
-			let result = executor.execute_plan_in_transaction(tx.clone(), &start, expr).await;
+			let result = executor.execute_plan_in_transaction(Arc::clone(&tx), &start, expr).await;
 
 			let time = start.elapsed();
 			let query_result = match result {
@@ -2281,6 +2282,7 @@ mod tests {
 			events
 		}
 
+		#[allow(clippy::clone_on_ref_ptr)]
 		async fn run_capturing(sql: &str) -> (Vec<(StatementType, u64)>, Arc<CapturingObserver>) {
 			let observer = Arc::new(CapturingObserver::default());
 			let obs: Arc<dyn ExecutionObserver> = observer.clone();

@@ -107,7 +107,7 @@ impl ExecOperator for Timeout {
 		};
 
 		// Evaluate the timeout expression to get the duration
-		let timeout_expr = timeout_expr.clone();
+		let timeout_expr = Arc::clone(timeout_expr);
 		let ctx = ctx.clone();
 
 		let timeout_stream = async_stream::try_stream! {

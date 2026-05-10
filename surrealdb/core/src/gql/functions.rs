@@ -45,7 +45,7 @@ pub async fn process_fns(
 
 		// Clone values that will be moved into the resolver closure
 		let sess1 = session.clone();
-		let kvs1 = datastore.clone();
+		let kvs1 = Arc::clone(datastore);
 		let fnd1 = fnd.clone();
 
 		let mut field = Field::new(
@@ -58,7 +58,7 @@ pub async fn process_fns(
 			)?,
 			move |ctx| {
 				let sess1 = sess1.clone();
-				let kvs1 = kvs1.clone();
+				let kvs1 = Arc::clone(&kvs1);
 				let fnd1 = fnd1.clone();
 				FieldFuture::new(async move {
 					let gql_args = ctx.args.as_index_map();

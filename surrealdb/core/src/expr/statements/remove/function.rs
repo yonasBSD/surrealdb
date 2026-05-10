@@ -19,7 +19,7 @@ impl RemoveFunctionStatement {
 	/// Process this type returning a computed simple Value
 	pub(crate) async fn compute(&self, ctx: &FrozenContext, opt: &Options) -> Result<Value> {
 		// Allowed to run?
-		ctx.is_allowed(opt, Action::Edit, ResourceKind::Function, &Base::Db)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Function, Base::Db)?;
 		// Get the transaction
 		let txn = ctx.tx();
 		// Get the definition

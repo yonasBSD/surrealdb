@@ -50,7 +50,7 @@ impl std::fmt::Display for ClientIp {
 }
 
 impl ClientIp {
-	fn is_header(&self) -> bool {
+	fn is_header(self) -> bool {
 		match self {
 			ClientIp::None => false,
 			ClientIp::Socket => false,

@@ -596,7 +596,7 @@ async fn handle_session_initial<M, S, E>(
 	session_state.replay.push(Command::Attach {
 		session_id,
 	});
-	sessions.insert(session_id, Ok(session_state.clone()));
+	sessions.insert(session_id, Ok(Arc::clone(&session_state)));
 
 	if let Err(error) = replay_session::<M, S, E>(session_id, &session_state, sink).await {
 		sessions.insert(session_id, Err(SessionError::Remote(error.to_string())));
@@ -624,7 +624,7 @@ async fn handle_session_clone<M, S, E>(
 				};
 			}
 			let session_state = Arc::new(session_state);
-			sessions.insert(new, Ok(session_state.clone()));
+			sessions.insert(new, Ok(Arc::clone(&session_state)));
 
 			if let Err(error) = replay_session::<M, S, E>(new, &session_state, sink).await {
 				sessions.insert(new, Err(SessionError::Remote(error.to_string())));
@@ -735,7 +735,7 @@ impl Surreal<Client> {
 		address: impl IntoEndpoint<P, Client = Client>,
 	) -> Connect<Client, ()> {
 		Connect {
-			surreal: self.inner.clone().into(),
+			surreal: Arc::clone(&self.inner).into(),
 			address: address.into_endpoint(),
 			capacity: 0,
 			response_type: PhantomData,

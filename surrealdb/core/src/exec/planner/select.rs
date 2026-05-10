@@ -1293,7 +1293,7 @@ impl<'ctx> Planner<'ctx> {
 				}
 			};
 			let versioned: Arc<dyn ExecOperator> = match &version {
-				Some(v) => Arc::new(VersionScope::new(timed, v.clone())),
+				Some(v) => Arc::new(VersionScope::new(timed, Arc::clone(v))),
 				None => timed,
 			};
 			return if only {
@@ -1343,7 +1343,7 @@ impl<'ctx> Planner<'ctx> {
 					}
 				};
 				let versioned: Arc<dyn ExecOperator> = match &version {
-					Some(v) => Arc::new(VersionScope::new(timed, v.clone())),
+					Some(v) => Arc::new(VersionScope::new(timed, Arc::clone(v))),
 					None => timed,
 				};
 				return if only {
@@ -1413,7 +1413,7 @@ impl<'ctx> Planner<'ctx> {
 				}
 			};
 			let versioned: Arc<dyn ExecOperator> = match &version {
-				Some(v) => Arc::new(VersionScope::new(timed, v.clone())),
+				Some(v) => Arc::new(VersionScope::new(timed, Arc::clone(v))),
 				None => timed,
 			};
 			return if only {
@@ -1473,7 +1473,7 @@ impl<'ctx> Planner<'ctx> {
 
 		// Propagate txn and version to the inner planner
 		let pp = if let Some(ref txn) = self.txn {
-			Planner::with_txn(&planning_ctx, txn.clone(), self.ns.clone(), self.db.clone())
+			Planner::with_txn(&planning_ctx, Arc::clone(txn), self.ns.clone(), self.db.clone())
 		} else {
 			Planner::new(&planning_ctx)
 		}

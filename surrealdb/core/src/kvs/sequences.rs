@@ -267,13 +267,13 @@ impl Sequences {
 		if let Some(s) = sequence {
 			return s.lock().await.next(self, ctx, &seq, batch).await;
 		}
-		let s = match self.sequences.write().await.entry(seq.clone()) {
-			Entry::Occupied(e) => e.get().clone(),
+		let s = match self.sequences.write().await.entry(Arc::clone(&seq)) {
+			Entry::Occupied(e) => Arc::clone(e.get()),
 			Entry::Vacant(e) => {
 				let s = Arc::new(Mutex::new(
 					Sequence::load(ctx, self, &seq, start, batch, timeout).await?,
 				));
-				e.insert(s).clone()
+				Arc::clone(e.insert(s))
 			}
 		};
 		s.lock().await.next(self, ctx, &seq, batch).await

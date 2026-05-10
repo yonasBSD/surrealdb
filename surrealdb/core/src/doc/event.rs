@@ -246,7 +246,7 @@ impl AsyncEventRecord {
 			perms: opt.perms,
 			auth_enabled: ctx.auth_enabled(),
 			values: ctx.collect_values(HashMap::new()),
-			auth_with_limit: opt.auth.clone(),
+			auth_with_limit: Arc::clone(&opt.auth),
 			event_definition: event_definition.clone(),
 			// session: ctx.value("session").map(|v| Arc::new(v.clone())),
 		})
@@ -285,10 +285,10 @@ impl AsyncEventRecord {
 		let opt = parent_opts.clone();
 		let opt = opt
 			.with_perms(self.perms)
-			.with_auth(self.auth_with_limit.clone())
+			.with_auth(Arc::clone(&self.auth_with_limit))
 			.with_async_event_depth(self.event_depth)
-			.with_ns(Some(self.ns.clone()))
-			.with_db(Some(self.db.clone()));
+			.with_ns(Some(Arc::clone(&self.ns)))
+			.with_db(Some(Arc::clone(&self.db)));
 		Ok(opt)
 	}
 
@@ -297,7 +297,7 @@ impl AsyncEventRecord {
 		CursorDoc {
 			rid: self.rid.clone(),
 			ir: None,
-			doc: self.cursor_record.clone().into(),
+			doc: Arc::clone(&self.cursor_record).into(),
 			fields_computed: self.fields_computed,
 		}
 	}

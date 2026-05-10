@@ -319,7 +319,7 @@ impl From<char> for CharacterClass {
 impl CharacterClass {
 	/// Te be valid a character is either alphanumeric, punctuation or
 	/// whitespace
-	fn is_valid(&self) -> bool {
+	fn is_valid(self) -> bool {
 		matches!(self, Self::Alphabetic(_) | Self::Numeric | Self::Punctuation | Self::Whitespace)
 	}
 }

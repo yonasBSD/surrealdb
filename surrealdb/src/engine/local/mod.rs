@@ -404,7 +404,7 @@ impl Surreal<Db> {
 	/// static client
 	pub fn connect<P>(&self, address: impl IntoEndpoint<P, Client = Db>) -> Connect<Db, ()> {
 		Connect {
-			surreal: self.inner.clone().into(),
+			surreal: Arc::clone(&self.inner).into(),
 			address: address.into_endpoint(),
 			capacity: 0,
 			response_type: PhantomData,
@@ -918,7 +918,7 @@ async fn router(
 			let query_result = QueryResultBuilder::started_now();
 			let (tx, rx) = crate::channel::bounded(1);
 
-			let kvs = kvs.clone();
+			let kvs = Arc::clone(kvs);
 			let session = state.session.read().await.clone();
 			tokio::spawn(async move {
 				let export = async {
@@ -947,7 +947,7 @@ async fn router(
 			let query_result = QueryResultBuilder::started_now();
 			let (tx, rx) = crate::channel::bounded(1);
 
-			let kvs = kvs.clone();
+			let kvs = Arc::clone(kvs);
 			let session = state.session.read().await.clone();
 			tokio::spawn(async move {
 				let export = async {

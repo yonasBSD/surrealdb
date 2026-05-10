@@ -116,7 +116,7 @@ async fn execute_root_info(
 	structured: bool,
 	version: Option<&dyn PhysicalExpr>,
 ) -> crate::expr::FlowResult<Value> {
-	ctx.is_allowed(Action::View, ResourceKind::Any, &crate::expr::Base::Root)?;
+	ctx.is_allowed(Action::View, ResourceKind::Any, crate::expr::Base::Root)?;
 
 	let version = match version {
 		Some(v) => {

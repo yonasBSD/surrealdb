@@ -49,7 +49,7 @@ impl DefineDatabaseStatement {
 		doc: Option<&CursorDoc>,
 	) -> Result<Value> {
 		// Allowed to run?
-		ctx.is_allowed(opt, Action::Edit, ResourceKind::Database, &Base::Ns)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Database, Base::Ns)?;
 
 		// Get the NS
 		let ns = opt.ns()?;

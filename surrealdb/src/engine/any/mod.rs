@@ -152,6 +152,7 @@
 //! external server via WebSockets, embedding the database using RocksDB or
 //! using a distributed TiKV cluster.
 
+use std::sync::Arc;
 #[cfg(not(target_family = "wasm"))]
 mod native;
 #[cfg(target_family = "wasm")]
@@ -281,7 +282,7 @@ impl Surreal<Any> {
 	/// ```
 	pub fn connect(&self, address: impl IntoEndpoint) -> Connect<Any, ()> {
 		Connect {
-			surreal: self.inner.clone().into(),
+			surreal: Arc::clone(&self.inner).into(),
 			address: address.into_endpoint(),
 			capacity: 0,
 			response_type: PhantomData,

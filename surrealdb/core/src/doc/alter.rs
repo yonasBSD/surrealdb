@@ -249,15 +249,15 @@ impl Document {
 							let mut ctx = Context::new_child(ctx);
 							// Add insertable value
 							if let Workable::Insert(value) = &self.extras {
-								ctx.add_value("input", value.clone());
+								ctx.add_value("input", Arc::clone(value));
 							}
 							if let Workable::Relate(_, _, Some(value)) = &self.extras {
-								ctx.add_value("input", value.clone());
+								ctx.add_value("input", Arc::clone(value));
 							}
 							// Freeze the context
 							ctx.freeze()
 						} else {
-							ctx.clone()
+							Arc::clone(ctx)
 						};
 
 						let mut assignments = Vec::with_capacity(data.len());
@@ -316,12 +316,12 @@ pub(super) enum ComputedData {
 impl ComputedData {
 	pub(super) fn value(&self) -> Arc<Value> {
 		match self {
-			ComputedData::Patch(v) => v.clone(),
-			ComputedData::Merge(v) => v.clone(),
-			ComputedData::Replace(v) => v.clone(),
-			ComputedData::Content(v) => v.clone(),
+			ComputedData::Patch(v) => Arc::clone(v),
+			ComputedData::Merge(v) => Arc::clone(v),
+			ComputedData::Replace(v) => Arc::clone(v),
+			ComputedData::Content(v) => Arc::clone(v),
 			ComputedData::Unset(_) => Arc::new(Value::None),
-			ComputedData::Set(_, v) => v.clone(),
+			ComputedData::Set(_, v) => Arc::clone(v),
 		}
 	}
 

@@ -113,7 +113,7 @@ impl<'ctx> Planner<'ctx> {
 						name
 					),
 				})?;
-				IndexContext::Knn(knn_ctx.clone())
+				IndexContext::Knn(Arc::clone(knn_ctx))
 			}
 		};
 

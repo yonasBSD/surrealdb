@@ -90,8 +90,8 @@ impl ExecOperator for IndexInfoPlan {
 	}
 
 	fn execute(&self, ctx: &ExecutionContext) -> FlowResult<ValueBatchStream> {
-		let index = self.index.clone();
-		let table = self.table.clone();
+		let index = Arc::clone(&self.index);
+		let table = Arc::clone(&self.table);
 		let ctx = ctx.clone();
 
 		Ok(Box::pin(stream::once(async move {
@@ -120,7 +120,7 @@ async fn execute_index_info(
 		.ok_or_else(|| anyhow::anyhow!("Options not available in execution context"))?;
 
 	// Allowed to run?
-	ctx.is_allowed(Action::View, ResourceKind::Actor, &crate::expr::Base::Db)?;
+	ctx.is_allowed(Action::View, ResourceKind::Actor, crate::expr::Base::Db)?;
 
 	// Evaluate the index and table name expressions
 	let eval_ctx = EvalContext::from_exec_ctx(ctx);

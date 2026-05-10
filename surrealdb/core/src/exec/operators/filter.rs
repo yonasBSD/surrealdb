@@ -98,7 +98,7 @@ impl ExecOperator for Filter {
 		let ctx = ctx.clone();
 
 		let filtered = input_stream.filter_map(move |batch_result| {
-			let predicate = predicate.clone();
+			let predicate = Arc::clone(&predicate);
 
 			let exec_ctx = ctx.clone();
 

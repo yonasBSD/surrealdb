@@ -40,7 +40,7 @@ impl RemoveFieldStatement {
 		doc: Option<&CursorDoc>,
 	) -> Result<Value> {
 		// Allowed to run?
-		ctx.is_allowed(opt, Action::Edit, ResourceKind::Field, &Base::Db)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Field, Base::Db)?;
 		// Compute the table name
 		let table_name = TableName::new(
 			expr_to_ident(stk, ctx, opt, doc, &self.table_name, "table name").await?,

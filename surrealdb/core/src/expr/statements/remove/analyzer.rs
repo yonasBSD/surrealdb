@@ -35,7 +35,7 @@ impl RemoveAnalyzerStatement {
 	) -> Result<Value> {
 		let (ns, db) = ctx.expect_ns_db_ids(opt).await?;
 		// Allowed to run?
-		ctx.is_allowed(opt, Action::Edit, ResourceKind::Analyzer, &Base::Db)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Analyzer, Base::Db)?;
 		// Compute the name
 		let name = expr_to_ident(stk, ctx, opt, doc, &self.name, "analyzer name").await?;
 		// Get the transaction

@@ -288,9 +288,9 @@ impl Document {
 			r#gen,
 			retry,
 			extras,
-			current: CursorDoc::new(id.clone(), ir.clone(), val.clone()),
-			initial: CursorDoc::new(id.clone(), ir.clone(), val.clone()),
-			current_reduced: CursorDoc::new(id.clone(), ir.clone(), val.clone()),
+			current: CursorDoc::new(id.clone(), ir.clone(), Arc::clone(&val)),
+			initial: CursorDoc::new(id.clone(), ir.clone(), Arc::clone(&val)),
+			current_reduced: CursorDoc::new(id.clone(), ir.clone(), Arc::clone(&val)),
 			initial_reduced: CursorDoc::new(id, ir, val),
 			record_strategy: rs,
 			input_data: None,
@@ -371,7 +371,7 @@ impl Document {
 	/// Update the document for a retry to update after an insert failed.
 	pub fn modify_for_update_retry(&mut self, id: RecordId, record: Arc<Record>) {
 		let retry = Arc::new(id);
-		self.id = Some(retry.clone());
+		self.id = Some(Arc::clone(&retry));
 		self.r#gen = None;
 		self.retry = true;
 		self.record_strategy = RecordStrategy::KeysAndValues;
@@ -519,7 +519,7 @@ impl Document {
 	/// Retrieve the record id for this document
 	pub(crate) fn id(&self) -> Result<Arc<RecordId>> {
 		match &self.id {
-			Some(id) => Ok(id.clone()),
+			Some(id) => Ok(Arc::clone(id)),
 			_ => fail!("Expected a document id to be present"),
 		}
 	}
@@ -537,6 +537,7 @@ impl Document {
 		feature = "trace-doc-ops",
 		instrument(level = "trace", name = "Document::db", skip_all)
 	)]
+	#[allow(clippy::clone_on_ref_ptr)] // `Arc<dyn Any + …>` cache entry needs CoerceUnsized clone
 	pub(super) async fn db(
 		&self,
 		ctx: &FrozenContext,
@@ -605,7 +606,7 @@ impl Document {
 					Some(val) => val.try_into_fts(),
 					None => {
 						let val = ctx.tx().all_tb_views(ns, db, &tb.name, None).await?;
-						cache.insert(key, cache::ds::Entry::Fts(val.clone()));
+						cache.insert(key, cache::ds::Entry::Fts(Arc::clone(&val)));
 						Ok(val)
 					}
 				}
@@ -644,7 +645,7 @@ impl Document {
 					Some(val) => val.try_into_evs(),
 					None => {
 						let val = ctx.tx().all_tb_events(ns, db, &tb.name, None).await?;
-						cache.insert(key, cache::ds::Entry::Evs(val.clone()));
+						cache.insert(key, cache::ds::Entry::Evs(Arc::clone(&val)));
 						Ok(val)
 					}
 				}
@@ -697,7 +698,7 @@ impl Document {
 					Some(val) => val.try_into_ixs(),
 					None => {
 						let val = ctx.tx().all_tb_indexes(ns, db, &tb.name, None).await?;
-						cache.insert(key, cache::ds::Entry::Ixs(val.clone()));
+						cache.insert(key, cache::ds::Entry::Ixs(Arc::clone(&val)));
 						Ok(val)
 					}
 				}
@@ -738,7 +739,7 @@ impl Document {
 					Some(val) => val.try_into_lvs(),
 					None => {
 						let val = ctx.tx().all_tb_lives(ns, db, &tb.name, None).await?;
-						cache.insert(key, cache::ds::Entry::Lvs(val.clone()));
+						cache.insert(key, cache::ds::Entry::Lvs(Arc::clone(&val)));
 						Ok(val)
 					}
 				}

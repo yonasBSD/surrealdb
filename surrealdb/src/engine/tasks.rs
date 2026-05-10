@@ -57,11 +57,11 @@ impl Tasks {
 // net::init functions. It needs to be before net::init because the net::init
 // function blocks until the web server stops.
 pub fn init(dbs: Arc<Datastore>, canceller: CancellationToken, opts: &EngineOptions) -> Tasks {
-	let task1 = spawn_task_node_membership_refresh(dbs.clone(), canceller.clone(), opts);
-	let task2 = spawn_task_node_membership_check(dbs.clone(), canceller.clone(), opts);
-	let task3 = spawn_task_node_membership_cleanup(dbs.clone(), canceller.clone(), opts);
-	let task4 = spawn_task_changefeed_cleanup(dbs.clone(), canceller.clone(), opts);
-	let task5 = spawn_task_index_compaction(dbs.clone(), canceller.clone(), opts);
+	let task1 = spawn_task_node_membership_refresh(Arc::clone(&dbs), canceller.clone(), opts);
+	let task2 = spawn_task_node_membership_check(Arc::clone(&dbs), canceller.clone(), opts);
+	let task3 = spawn_task_node_membership_cleanup(Arc::clone(&dbs), canceller.clone(), opts);
+	let task4 = spawn_task_changefeed_cleanup(Arc::clone(&dbs), canceller.clone(), opts);
+	let task5 = spawn_task_index_compaction(Arc::clone(&dbs), canceller.clone(), opts);
 	let task6 = spawn_task_event_processing(dbs, canceller, opts);
 	Tasks(vec![task1, task2, task3, task4, task5, task6])
 }
@@ -237,7 +237,7 @@ fn spawn_task_index_compaction(
 				// Receive a notification on the channel
 				Some(_) = ticker.next() => {
 					if let Err(e) =
-						Datastore::index_compaction(dbs.clone(), interval, canceller.clone()).await
+						Datastore::index_compaction(Arc::clone(&dbs), interval, canceller.clone()).await
 					{
 						if canceller.is_cancelled() {
 							break;
@@ -256,7 +256,7 @@ fn spawn_task_event_processing(
 	canceller: CancellationToken,
 	opts: &EngineOptions,
 ) -> Task {
-	let trigger = dbs.async_event_trigger().clone();
+	let trigger = Arc::clone(dbs.async_event_trigger());
 	// Get the delay interval from the config
 	let interval = opts.event_processing_interval;
 	// Spawn a future
@@ -389,7 +389,7 @@ mod test {
 		let can = CancellationToken::new();
 		let opt = EngineOptions::default();
 		let dbs = Arc::new(Datastore::new("memory").await.unwrap());
-		let tasks = tasks::init(dbs.clone(), can.clone(), &opt);
+		let tasks = tasks::init(Arc::clone(&dbs), can.clone(), &opt);
 		can.cancel();
 		tasks.resolve().await.unwrap();
 	}
@@ -400,7 +400,7 @@ mod test {
 		let can = CancellationToken::new();
 		let opt = EngineOptions::default();
 		let dbs = Arc::new(Datastore::new("memory").await.unwrap());
-		let tasks = tasks::init(dbs.clone(), can.clone(), &opt);
+		let tasks = tasks::init(Arc::clone(&dbs), can.clone(), &opt);
 		can.cancel();
 		tokio::time::timeout(Duration::from_secs(10), tasks.resolve())
 			.await

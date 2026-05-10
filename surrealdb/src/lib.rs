@@ -335,7 +335,7 @@ where
 		let session_id = Uuid::new_v4();
 		self.inner.clone_session(self.session_id, session_id);
 		Self {
-			inner: self.inner.clone(),
+			inner: Arc::clone(&self.inner),
 			session_id,
 			engine: self.engine,
 		}

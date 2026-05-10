@@ -379,6 +379,11 @@ assigning_clones = "warn"
 # https://rust-lang.github.io/rust-clippy/master/#bool_assert_comparison
 bool_assert_comparison = "allow"
 
+# Checks for `.clone()` on ref-counted pointers (`Rc`, `Arc`, or `Weak`) where `Rc::clone` /
+# `Arc::clone` would make pointer duplication obvious.
+# https://rust-lang.github.io/rust-clippy/master/#clone_on_ref_ptr
+clone_on_ref_ptr = "warn"
+
 # Checks for the usage of `as _` conversion using inferred type.
 # https://rust-lang.github.io/rust-clippy/master/#cloned_instead_of_copied
 cloned_instead_of_copied = "warn"
@@ -458,6 +463,10 @@ redundant_clone = "warn"
 # Using a single `.insert()` call and checking its return value is more efficient as it avoids double lookup.
 # https://rust-lang.github.io/rust-clippy/master/#set_contains_or_insert
 set_contains_or_insert = "warn"
+
+# Checks for functions that pass by value but are trivially copyable.
+# https://rust-lang.github.io/rust-clippy/master/#trivially_copy_pass_by_ref
+trivially_copy_pass_by_ref = "warn"
 
 # Checks for unnecessary calls to `to_owned()`, `to_string()` and other similar conversion methods
 # that result in unnecessary allocations when a reference would suffice.

@@ -54,7 +54,7 @@ impl MajorVersion {
 		Self(2)
 	}
 	/// Check if we are running the latest version
-	pub fn is_latest(&self) -> bool {
+	pub fn is_latest(self) -> bool {
 		self.0 == Self::LATEST
 	}
 }

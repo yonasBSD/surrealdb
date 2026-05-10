@@ -150,7 +150,7 @@ async fn execute_block_with_context(
 			return Err(ControlFlow::Err(anyhow::anyhow!(Error::QueryCancelled)));
 		}
 
-		let frozen_ctx = current_ctx.ctx().clone();
+		let frozen_ctx = Arc::clone(current_ctx.ctx());
 
 		// Try to plan the expression with current context
 		match try_plan_expr!(expr, &frozen_ctx, current_ctx.txn()) {
@@ -205,7 +205,7 @@ fn legacy_context_for_fallback(
 	let options = exec_ctx.options().ok_or_else(|| {
 		Error::Internal("Options not available for legacy compute fallback".into())
 	})?;
-	Ok((options, exec_ctx.ctx().clone()))
+	Ok((options, Arc::clone(exec_ctx.ctx())))
 }
 
 impl ToSql for SequencePlan {

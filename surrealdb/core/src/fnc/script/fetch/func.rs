@@ -30,7 +30,7 @@ pub async fn fetch<'js>(
 
 	// Check if the url is allowed to be fetched.
 	let query_ctx = if let Some(query_ctx) = ctx.userdata::<QueryContext<'js>>() {
-		query_ctx.context.clone()
+		Arc::clone(query_ctx.context)
 	} else {
 		panic!(
 			"Trying to fetch a URL but no QueryContext is present. QueryContext is required for checking if the URL is allowed to be fetched."

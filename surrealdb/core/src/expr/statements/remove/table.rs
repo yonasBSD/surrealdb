@@ -41,7 +41,7 @@ impl RemoveTableStatement {
 		doc: Option<&CursorDoc>,
 	) -> Result<Value> {
 		// Allowed to run?
-		ctx.is_allowed(opt, Action::Edit, ResourceKind::Table, &Base::Db)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Table, Base::Db)?;
 		// Compute the name
 		let name =
 			TableName::new(expr_to_ident(stk, ctx, opt, doc, &self.name, "table name").await?);

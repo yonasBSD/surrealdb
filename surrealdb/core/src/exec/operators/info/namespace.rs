@@ -108,7 +108,7 @@ async fn execute_namespace_info(
 	structured: bool,
 	version: Option<&dyn PhysicalExpr>,
 ) -> crate::expr::FlowResult<Value> {
-	ctx.is_allowed(Action::View, ResourceKind::Any, &crate::expr::Base::Ns)?;
+	ctx.is_allowed(Action::View, ResourceKind::Any, crate::expr::Base::Ns)?;
 
 	let ns_ctx = ctx.namespace()?;
 	let ns = ns_ctx.ns.namespace_id;

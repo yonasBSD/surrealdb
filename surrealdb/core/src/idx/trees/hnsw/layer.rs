@@ -56,7 +56,7 @@ where
 		self.m_max
 	}
 
-	pub(super) fn get_edges(&self, e_id: &ElementId) -> Option<&S> {
+	pub(super) fn get_edges(&self, e_id: ElementId) -> Option<&S> {
 		self.graph.get_edges(e_id)
 	}
 
@@ -207,7 +207,7 @@ where
 			if cq_dist > fq_dist {
 				break;
 			}
-			if let Some(neighbourhood) = self.graph.get_edges(&doc) {
+			if let Some(neighbourhood) = self.graph.get_edges(doc) {
 				for &e_id in neighbourhood.iter() {
 					// Did we already visit it?
 					if !visited.insert(e_id) {
@@ -253,7 +253,7 @@ where
 			if dist > f_dist {
 				break;
 			}
-			if let Some(neighbourhood) = self.graph.get_edges(&doc) {
+			if let Some(neighbourhood) = self.graph.get_edges(doc) {
 				for &e_id in neighbourhood.iter() {
 					// Did we already visit it?
 					if !visited.insert(e_id) {
@@ -375,7 +375,7 @@ where
 		let neighbors = self.graph.add_node_and_bidirectional_edges(q_id, neighbors);
 
 		for e_id in &neighbors {
-			if let Some(e_conn) = self.graph.get_edges(e_id) {
+			if let Some(e_conn) = self.graph.get_edges(*e_id) {
 				if e_conn.len() > self.m_max
 					&& let Some(e_pt) = elements.get_vector(&ctx.tx, e_id).await?
 				{
@@ -429,7 +429,7 @@ where
 		e_id: ElementId,
 		efc: usize,
 	) -> Result<bool> {
-		if let Some(f_ids) = self.graph.remove_node_and_bidirectional_edges(&e_id) {
+		if let Some(f_ids) = self.graph.remove_node_and_bidirectional_edges(e_id) {
 			let mut changed_nodes = Vec::with_capacity(f_ids.len());
 			for &q_id in f_ids.iter() {
 				if let Some(q_pt) = elements.get_vector(&ctx.tx, &q_id).await? {
@@ -483,7 +483,7 @@ where
 		nodes: &[ElementId],
 	) -> Result<()> {
 		for &node_id in nodes {
-			if let Some(val) = self.graph.node_to_val(&node_id) {
+			if let Some(val) = self.graph.node_to_val(node_id) {
 				let key = self.ikb.new_hn_key(self.level, node_id);
 				tx.set(&key, &val).await?;
 			}
@@ -562,7 +562,7 @@ where
 			// are rewritten with the same data (their state was overlaid onto
 			// the graph in the streaming step above).
 			for &node_id in &self.graph.node_ids() {
-				if let Some(node_val) = self.graph.node_to_val(&node_id) {
+				if let Some(node_val) = self.graph.node_to_val(node_id) {
 					let key = self.ikb.new_hn_key(self.level, node_id);
 					tx.set(&key, &node_val).await?;
 				}

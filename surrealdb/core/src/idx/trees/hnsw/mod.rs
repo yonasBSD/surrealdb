@@ -1542,10 +1542,10 @@ mod tests {
 		info!("Check recall");
 		let mut futures = Vec::with_capacity(tests_ef_recall.len());
 		for &(efs, expected_recall) in tests_ef_recall {
-			let queries = queries.clone();
-			let collection = collection.clone();
-			let h = h.clone();
-			let ds = ds.clone();
+			let queries = Arc::clone(&queries);
+			let collection = Arc::clone(&collection);
+			let h = Arc::clone(&h);
+			let ds = Arc::clone(&ds);
 			let f = tokio::spawn(async move {
 				let mut stack = reblessive::tree::TreeStack::new();
 				stack

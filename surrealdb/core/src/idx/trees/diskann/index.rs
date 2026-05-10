@@ -750,7 +750,7 @@ impl DiskAnnIndex {
 		}
 		let mut graph = self.graph.write().await;
 		let mut docs = DiskAnnDocs::new(&tx, self.ikb.clone()).await?;
-		let provider_context = graph.index.provider().context(tx.clone());
+		let provider_context = graph.index.provider().context(Arc::clone(&tx));
 		let diskann_ctx = self.new_diskann_context(ctx, provider_context);
 		for pending in pending {
 			self.apply_pending_operation(&diskann_ctx, &mut docs, &mut graph, pending).await?;

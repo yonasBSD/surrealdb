@@ -62,7 +62,7 @@ pub enum ContextLevel {
 }
 
 impl ContextLevel {
-	pub fn short_name(&self) -> &'static str {
+	pub fn short_name(self) -> &'static str {
 		match self {
 			Self::Root => "Rt",
 			Self::Namespace => "Ns",
@@ -516,7 +516,7 @@ impl ExecutionContext {
 				options: r.options.clone(),
 				datastore: r.datastore.clone(),
 				cancellation: r.cancellation.clone(),
-				auth: r.auth.clone(),
+				auth: Arc::clone(&r.auth),
 				session: r.session.clone(),
 				current_value: r.current_value.clone(),
 				skip_fetch_perms: r.skip_fetch_perms,
@@ -528,13 +528,13 @@ impl ExecutionContext {
 					options: n.root.options.clone(),
 					datastore: n.root.datastore.clone(),
 					cancellation: n.root.cancellation.clone(),
-					auth: n.root.auth.clone(),
+					auth: Arc::clone(&n.root.auth),
 					session: n.root.session.clone(),
 					current_value: n.root.current_value.clone(),
 					skip_fetch_perms: n.root.skip_fetch_perms,
 					version_stamp: n.root.version_stamp,
 				},
-				ns: n.ns.clone(),
+				ns: Arc::clone(&n.ns),
 			}),
 			Self::Database(d) => Self::Database(DatabaseContext {
 				ns_ctx: NamespaceContext {
@@ -543,18 +543,18 @@ impl ExecutionContext {
 						options: d.ns_ctx.root.options.clone(),
 						datastore: d.ns_ctx.root.datastore.clone(),
 						cancellation: d.ns_ctx.root.cancellation.clone(),
-						auth: d.ns_ctx.root.auth.clone(),
+						auth: Arc::clone(&d.ns_ctx.root.auth),
 						session: d.ns_ctx.root.session.clone(),
 						current_value: d.ns_ctx.root.current_value.clone(),
 						skip_fetch_perms: d.ns_ctx.root.skip_fetch_perms,
 						version_stamp: d.ns_ctx.root.version_stamp,
 					},
-					ns: d.ns_ctx.ns.clone(),
+					ns: Arc::clone(&d.ns_ctx.ns),
 				},
-				db: d.db.clone(),
-				field_state_cache: d.field_state_cache.clone(),
-				table_def_cache: d.table_def_cache.clone(),
-				index_def_cache: d.index_def_cache.clone(),
+				db: Arc::clone(&d.db),
+				field_state_cache: Arc::clone(&d.field_state_cache),
+				table_def_cache: Arc::clone(&d.table_def_cache),
+				index_def_cache: Arc::clone(&d.index_def_cache),
 			}),
 		}
 	}
@@ -656,7 +656,7 @@ impl ExecutionContext {
 		// Also update the legacy Options if present, so fallback compute
 		// sees the limited auth.
 		if let Some(ref opts) = root.options {
-			root.options = Some(opts.clone().with_auth(root.auth.clone()));
+			root.options = Some(opts.clone().with_auth(Arc::clone(&root.auth)));
 		}
 		new
 	}
@@ -732,7 +732,7 @@ impl ExecutionContext {
 	}
 
 	/// Check if the current auth is allowed to perform an action on a given resource
-	pub fn is_allowed(&self, action: Action, res: ResourceKind, base: &Base) -> anyhow::Result<()> {
+	pub fn is_allowed(&self, action: Action, res: ResourceKind, base: Base) -> anyhow::Result<()> {
 		if let Some(options) = self.options() {
 			self.ctx().is_allowed(options, action, res, base)
 		} else {

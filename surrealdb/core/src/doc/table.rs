@@ -373,7 +373,7 @@ impl Document {
 		record.data = data;
 		let record = Arc::new(record);
 
-		tx.set_record(db.namespace_id, db.database_id, view_table_name, &key, record.clone())
+		tx.set_record(db.namespace_id, db.database_id, view_table_name, &key, Arc::clone(&record))
 			.await?;
 
 		let id = Arc::new(RecordId {
@@ -750,7 +750,7 @@ impl Document {
 		record.data = data;
 		let record = Arc::new(record);
 
-		tx.set_record(db.namespace_id, db.database_id, view_table_name, &key, record.clone())
+		tx.set_record(db.namespace_id, db.database_id, view_table_name, &key, Arc::clone(&record))
 			.await?;
 
 		let id = RecordId {
@@ -1160,7 +1160,7 @@ impl Document {
 		record.data = data;
 		let record = Arc::new(record);
 
-		tx.set_record(db.namespace_id, db.database_id, view_table_name, &key, record.clone())
+		tx.set_record(db.namespace_id, db.database_id, view_table_name, &key, Arc::clone(&record))
 			.await?;
 
 		let id = RecordId {
@@ -1226,10 +1226,10 @@ impl Document {
 			retry: false,
 			extras: Workable::Normal,
 			current: current
-				.map(|x| CursorDoc::new(Some(id.clone()), None, x))
+				.map(|x| CursorDoc::new(Some(Arc::clone(&id)), None, x))
 				.unwrap_or_else(|| CursorDoc::new(None, None, Value::None)),
 			initial: initial
-				.map(|x| CursorDoc::new(Some(id.clone()), None, x))
+				.map(|x| CursorDoc::new(Some(Arc::clone(&id)), None, x))
 				.unwrap_or_else(|| CursorDoc::new(None, None, Value::None)),
 			// unused
 			current_reduced: CursorDoc::new(None, None, Value::None),

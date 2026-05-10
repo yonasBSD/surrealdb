@@ -112,7 +112,7 @@ impl BucketsManager {
 		// Attempt to obtain an existing bucket connection
 		let key = BucketConnectionKey::new(ns, db, bu);
 		match self.0.connections.entry(key) {
-			Entry::Occupied(e) => Ok(e.get().clone()),
+			Entry::Occupied(e) => Ok(Arc::clone(e.get())),
 			Entry::Vacant(e) => {
 				// Obtain the bucket definition
 				let bd = tx.expect_db_bucket(ns, db, bu).await?;
@@ -123,7 +123,7 @@ impl BucketsManager {
 					self.connect_global(ns, db, bu).await?
 				};
 				// Persist the bucket connection
-				e.insert(store.clone());
+				e.insert(Arc::clone(&store));
 				Ok(store)
 			}
 		}

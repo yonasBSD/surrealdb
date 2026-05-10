@@ -36,7 +36,7 @@ impl DefineFunctionStatement {
 		doc: Option<&CursorDoc>,
 	) -> Result<Value> {
 		// Allowed to run?
-		ctx.is_allowed(opt, Action::Edit, ResourceKind::Function, &Base::Db)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Function, Base::Db)?;
 		// Fetch the transaction
 		let txn = ctx.tx();
 		// Check if the definition exists

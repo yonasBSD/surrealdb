@@ -173,7 +173,7 @@ pub enum Operator {
 }
 
 impl Operator {
-	fn as_str(&self) -> &'static str {
+	fn as_str(self) -> &'static str {
 		match self {
 			Operator::Not => "!",
 			Operator::Add => "+",
@@ -243,7 +243,7 @@ pub enum DistanceKind {
 }
 
 impl DistanceKind {
-	pub fn as_str(&self) -> &'static str {
+	pub fn as_str(self) -> &'static str {
 		match self {
 			DistanceKind::Chebyshev => "CHEBYSHEV",
 			DistanceKind::Cosine => "COSINE",
@@ -272,7 +272,7 @@ pub enum VectorTypeKind {
 }
 
 impl VectorTypeKind {
-	pub fn as_str(&self) -> &'static str {
+	pub fn as_str(self) -> &'static str {
 		match self {
 			Self::F64 => "F64",
 			Self::F16 => "F16",
@@ -287,7 +287,7 @@ impl VectorTypeKind {
 }
 
 impl Algorithm {
-	pub fn as_str(&self) -> &'static str {
+	pub fn as_str(self) -> &'static str {
 		match self {
 			Self::EdDSA => "EDDSA",
 			Self::Es256 => "ES256",
@@ -335,7 +335,7 @@ pub enum StringKind {
 }
 
 impl StringKind {
-	pub fn as_str(&self) -> &'static str {
+	pub fn as_str(self) -> &'static str {
 		match self {
 			StringKind::Plain | StringKind::PlainDouble => "a strand",
 			StringKind::RecordId | StringKind::RecordIdDouble => "a record-id strand",
@@ -409,7 +409,7 @@ pub enum TokenKind {
 
 impl fmt::Display for TokenKind {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.write_str(self.as_str())
+		f.write_str((*self).as_str())
 	}
 }
 
@@ -439,8 +439,8 @@ impl TokenKind {
 		}
 	}
 
-	pub fn as_str(&self) -> &'static str {
-		match *self {
+	pub fn as_str(self) -> &'static str {
+		match self {
 			TokenKind::Keyword(x) => x.as_str(),
 			TokenKind::Operator(x) => x.as_str(),
 			TokenKind::Algorithm(x) => Self::algorithm_as_str(x),

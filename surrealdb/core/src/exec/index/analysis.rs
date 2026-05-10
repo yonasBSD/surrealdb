@@ -201,7 +201,7 @@ impl<'a> IndexAnalyzer<'a> {
 			}
 
 			if let Some((idx, ncols)) = best {
-				let index_ref = IndexRef::new(self.indexes.clone(), idx);
+				let index_ref = IndexRef::new(Arc::clone(&self.indexes), idx);
 				let paths: Vec<AccessPath> = if ncols == 1 {
 					// Single-column index: equality scans
 					values
@@ -282,7 +282,7 @@ impl<'a> IndexAnalyzer<'a> {
 				if let Some(first_col) = ix_def.cols.first()
 					&& idiom_matches_containment(idiom, first_col)
 				{
-					let index_ref = IndexRef::new(self.indexes.clone(), idx);
+					let index_ref = IndexRef::new(Arc::clone(&self.indexes), idx);
 					let paths: Vec<AccessPath> = values
 						.iter()
 						.map(|v| AccessPath::BTreeScan {
@@ -552,7 +552,7 @@ impl<'a> IndexAnalyzer<'a> {
 					range: range_condition,
 				};
 
-				let index_ref = IndexRef::new(self.indexes.clone(), idx);
+				let index_ref = IndexRef::new(Arc::clone(&self.indexes), idx);
 				let candidate = IndexCandidate {
 					index_ref,
 					access,
@@ -786,7 +786,7 @@ impl<'a> IndexAnalyzer<'a> {
 					access
 				};
 
-				let index_ref = IndexRef::new(self.indexes.clone(), idx);
+				let index_ref = IndexRef::new(Arc::clone(&self.indexes), idx);
 				let candidate = IndexCandidate {
 					index_ref,
 					access,
@@ -923,7 +923,7 @@ impl<'a> IndexAnalyzer<'a> {
 			if let Some(first_col) = ix_def.cols.first()
 				&& idiom_matches_containment(idiom, first_col)
 			{
-				let index_ref = IndexRef::new(self.indexes.clone(), idx);
+				let index_ref = IndexRef::new(Arc::clone(&self.indexes), idx);
 				candidates.push(IndexCandidate {
 					index_ref,
 					access: BTreeAccess::Equality(value.clone()),
@@ -967,7 +967,7 @@ impl<'a> IndexAnalyzer<'a> {
 			if let Some(first_col) = ix_def.cols.first()
 				&& idiom_matches(idiom, first_col)
 			{
-				let index_ref = IndexRef::new(self.indexes.clone(), idx);
+				let index_ref = IndexRef::new(Arc::clone(&self.indexes), idx);
 				let candidate = IndexCandidate {
 					index_ref,
 					access: BTreeAccess::FullText {
@@ -1056,7 +1056,7 @@ impl<'a> IndexAnalyzer<'a> {
 			if let Some(first_col) = ix_def.cols.first()
 				&& idiom_matches(idiom, first_col)
 			{
-				let index_ref = IndexRef::new(self.indexes.clone(), idx);
+				let index_ref = IndexRef::new(Arc::clone(&self.indexes), idx);
 				let candidate = IndexCandidate {
 					index_ref,
 					access: BTreeAccess::Knn {
@@ -1179,7 +1179,7 @@ impl<'a> IndexAnalyzer<'a> {
 			if let Some(first_col) = ix_def.cols.first()
 				&& idiom_matches(idiom, first_col)
 			{
-				let index_ref = IndexRef::new(self.indexes.clone(), idx);
+				let index_ref = IndexRef::new(Arc::clone(&self.indexes), idx);
 
 				// Mark existing candidate as covering order, or add new one
 				let existing = candidates.iter_mut().find(|c| c.index_ref == index_ref);

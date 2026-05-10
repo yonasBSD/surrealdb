@@ -65,7 +65,7 @@ impl GarbageCollector {
 			mutex: Mutex::new(()),
 		});
 		// Clone the shutdown notifier
-		let signal = notify.clone();
+		let signal = Arc::clone(&notify);
 		// Spawn the background garbage collector thread
 		let handle = thread::Builder::new()
 			.name("rocksdb-garbage-collector".to_string())

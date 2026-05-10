@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use reblessive;
 
@@ -115,7 +117,7 @@ pub(crate) async fn create_refresh_token_record(
 	// Create a new context with a writeable transaction
 	let mut ctx = kvs.setup_ctx()?;
 	let tx = kvs.transaction(Write, Optimistic).await?.enclose();
-	ctx.set_transaction(tx.clone());
+	ctx.set_transaction(Arc::clone(&tx));
 	let ctx = ctx.freeze();
 	// Create a bearer grant to act as the refresh token
 	let grant = run!(
@@ -153,7 +155,7 @@ pub async fn revoke_refresh_token_record(
 	// Create a new context with a writeable transaction
 	let mut ctx = kvs.setup_ctx()?;
 	let tx = kvs.transaction(Write, Optimistic).await?.enclose();
-	ctx.set_transaction(tx.clone());
+	ctx.set_transaction(Arc::clone(&tx));
 	let ctx = ctx.freeze();
 	// Create a bearer grant to act as the refresh token
 	let mut stack = reblessive::tree::TreeStack::new();

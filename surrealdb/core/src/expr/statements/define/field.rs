@@ -153,7 +153,7 @@ impl DefineFieldStatement {
 		let definition = self.to_definition(stk, ctx, opt, doc).await?;
 
 		// Allowed to run?
-		ctx.is_allowed(opt, Action::Edit, ResourceKind::Field, &Base::Db)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Field, Base::Db)?;
 
 		// Get the NS and DB
 		let (ns_name, db_name) = opt.ns_db()?;
@@ -273,7 +273,7 @@ impl DefineFieldStatement {
 		txn.put_tb(ns_name, db_name, &tb).await?;
 
 		// Process possible recursive defitions
-		self.process_recursive_definitions(ns, db, txn.clone(), &definition).await?;
+		self.process_recursive_definitions(ns, db, Arc::clone(&txn), &definition).await?;
 
 		// Clear the cache
 		if let Some(cache) = ctx.get_cache() {

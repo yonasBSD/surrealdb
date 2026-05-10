@@ -260,7 +260,7 @@ impl DiskAnnCache {
 		self.0.element_indexes.insert(index, element_id);
 		self.0.cache.insert(
 			DiskAnnCacheKey::Element(Self::element_key(index, element_id)),
-			DiskAnnCacheValue::Element(element.clone()),
+			DiskAnnCacheValue::Element(Arc::clone(&element)),
 		);
 		element
 	}
@@ -295,7 +295,7 @@ impl DiskAnnCache {
 		self.0.node_indexes.insert(index, element_id);
 		self.0.cache.insert(
 			DiskAnnCacheKey::Node(Self::element_key(index, element_id)),
-			DiskAnnCacheValue::Node(node.clone()),
+			DiskAnnCacheValue::Node(Arc::clone(&node)),
 		);
 		node
 	}
@@ -358,7 +358,7 @@ impl DiskAnnCache {
 			DiskAnnCacheKey::DocId(Self::doc_id_key(index, doc_id)),
 			DiskAnnCacheValue::DocId(CachedDocId {
 				generation,
-				id: id.clone(),
+				id: Arc::clone(&id),
 			}),
 		);
 		id

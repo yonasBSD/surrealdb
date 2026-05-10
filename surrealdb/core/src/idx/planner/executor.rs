@@ -208,7 +208,7 @@ impl InnerQueryExecutor {
 											stk,
 											ctx,
 											opt,
-											hi.clone(),
+											Arc::clone(hi),
 											a,
 											*k,
 											*ef,
@@ -247,7 +247,7 @@ impl InnerQueryExecutor {
 									stk,
 									ctx,
 									opt,
-									hi.clone(),
+									Arc::clone(&hi),
 									a,
 									*k,
 									*ef,
@@ -274,7 +274,7 @@ impl InnerQueryExecutor {
 											stk,
 											ctx,
 											opt,
-											di.clone(),
+											Arc::clone(di),
 											a,
 											*k,
 											*ef,
@@ -312,7 +312,7 @@ impl InnerQueryExecutor {
 									stk,
 									ctx,
 									opt,
-									di.clone(),
+									Arc::clone(&di),
 									a,
 									*k,
 									*ef,
@@ -390,7 +390,7 @@ impl QueryExecutor {
 		let mut result = KnnBruteForceResult::with_capacity(self.0.knn_bruteforce_len);
 		for (exp, entry) in self.0.exp_entries.iter() {
 			if let PerExpressionEntry::KnnBruteForce((p, _, _, _)) = entry {
-				result.insert(exp.clone(), p.build().await);
+				result.insert(Arc::clone(exp), p.build().await);
 			}
 		}
 		result

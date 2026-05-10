@@ -1,5 +1,6 @@
 #![recursion_limit = "256"]
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::clone_on_ref_ptr)] // Concrete observer `Arc` clones coerce to `Arc<dyn ExecutionObserver>`
 
 mod helpers;
 use std::sync::{Arc, Mutex};

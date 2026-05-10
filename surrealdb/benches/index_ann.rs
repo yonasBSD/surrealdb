@@ -339,7 +339,7 @@ async fn insert_objects_db(
 /// Runs one background index-compaction pass and asserts that it performed work.
 async fn compact_index_db(ds: &BenchDb) {
 	let (iterations, errors) = Datastore::index_compaction(
-		ds.ds.clone(),
+		Arc::clone(&ds.ds),
 		Duration::from_secs(1),
 		CancellationToken::new(),
 	)

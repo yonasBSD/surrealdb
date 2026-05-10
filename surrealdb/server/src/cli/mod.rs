@@ -215,7 +215,7 @@ pub enum LogFileRotation {
 }
 
 impl LogFileRotation {
-	pub fn as_str(&self) -> &'static str {
+	pub fn as_str(self) -> &'static str {
 		match self {
 			LogFileRotation::Daily => "daily",
 			LogFileRotation::Hourly => "hourly",

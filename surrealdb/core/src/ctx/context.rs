@@ -172,7 +172,7 @@ impl Context {
 			query_planner: None,
 			query_executor: None,
 			iteration_stage: None,
-			capabilities: parent.capabilities.clone(),
+			capabilities: Arc::clone(&parent.capabilities),
 			index_stores: IndexStores::new(
 				parent.config.hnsw_cache_size,
 				parent.config.diskann_cache_size,
@@ -187,15 +187,15 @@ impl Context {
 			buckets: None,
 			#[cfg(feature = "surrealism")]
 			surrealism_cache: None,
-			function_registry: parent.function_registry.clone(),
+			function_registry: Arc::clone(&parent.function_registry),
 			new_planner_strategy: NewPlannerStrategy::default(),
 			redact_volatile_explain_attrs: false,
 			statement_counters: None,
 			matches_context: None,
 			knn_context: None,
-			config: parent.config.clone(),
+			config: Arc::clone(&parent.config),
 			#[cfg(feature = "http")]
-			http_client: parent.http_client.clone(),
+			http_client: Arc::clone(&parent.http_client),
 			tenant_identity: None,
 			node_id: parent.node_id,
 			auth_enabled: parent.auth_enabled,
@@ -209,9 +209,9 @@ impl Context {
 	pub(crate) fn new_child(parent: &FrozenContext) -> Self {
 		Self::new_child_with_capabilities(
 			parent,
-			parent.capabilities.clone(),
+			Arc::clone(&parent.capabilities),
 			#[cfg(feature = "http")]
-			parent.http_client.clone(),
+			Arc::clone(&parent.http_client),
 		)
 	}
 
@@ -241,17 +241,17 @@ impl Context {
 			temporary_directory: parent.temporary_directory.clone(),
 			transaction: parent.transaction.clone(),
 			isolated: false,
-			parent: Some(parent.clone()),
+			parent: Some(Arc::clone(parent)),
 			buckets: parent.buckets.clone(),
 			#[cfg(feature = "surrealism")]
 			surrealism_cache: parent.surrealism_cache.clone(),
-			function_registry: parent.function_registry.clone(),
+			function_registry: Arc::clone(&parent.function_registry),
 			new_planner_strategy: parent.new_planner_strategy.clone(),
 			redact_volatile_explain_attrs: parent.redact_volatile_explain_attrs,
 			statement_counters: parent.statement_counters.clone(),
 			matches_context: parent.matches_context.clone(),
 			knn_context: parent.knn_context.clone(),
-			config: parent.config.clone(),
+			config: Arc::clone(&parent.config),
 			#[cfg(feature = "http")]
 			http_client,
 			tenant_identity: parent.tenant_identity.clone(),
@@ -276,7 +276,7 @@ impl Context {
 			query_planner: parent.query_planner.clone(),
 			query_executor: parent.query_executor.clone(),
 			iteration_stage: parent.iteration_stage.clone(),
-			capabilities: parent.capabilities.clone(),
+			capabilities: Arc::clone(&parent.capabilities),
 			index_stores: parent.index_stores.clone(),
 			cache: parent.cache.clone(),
 			index_builder: parent.index_builder.clone(),
@@ -285,19 +285,19 @@ impl Context {
 			temporary_directory: parent.temporary_directory.clone(),
 			transaction: parent.transaction.clone(),
 			isolated: true,
-			parent: Some(parent.clone()),
+			parent: Some(Arc::clone(parent)),
 			buckets: parent.buckets.clone(),
 			#[cfg(feature = "surrealism")]
 			surrealism_cache: parent.surrealism_cache.clone(),
-			function_registry: parent.function_registry.clone(),
+			function_registry: Arc::clone(&parent.function_registry),
 			new_planner_strategy: parent.new_planner_strategy.clone(),
 			redact_volatile_explain_attrs: parent.redact_volatile_explain_attrs,
 			statement_counters: parent.statement_counters.clone(),
 			matches_context: parent.matches_context.clone(),
 			knn_context: parent.knn_context.clone(),
-			config: parent.config.clone(),
+			config: Arc::clone(&parent.config),
 			#[cfg(feature = "http")]
-			http_client: parent.http_client.clone(),
+			http_client: Arc::clone(&parent.http_client),
 			tenant_identity: parent.tenant_identity.clone(),
 			node_id: parent.node_id,
 			auth_enabled: parent.auth_enabled,
@@ -327,7 +327,7 @@ impl Context {
 			query_planner: from.query_planner.clone(),
 			query_executor: from.query_executor.clone(),
 			iteration_stage: from.iteration_stage.clone(),
-			capabilities: from.capabilities.clone(),
+			capabilities: Arc::clone(&from.capabilities),
 			index_stores: from.index_stores.clone(),
 			cache: from.cache.clone(),
 			index_builder: from.index_builder.clone(),
@@ -340,15 +340,15 @@ impl Context {
 			buckets: from.buckets.clone(),
 			#[cfg(feature = "surrealism")]
 			surrealism_cache: from.surrealism_cache.clone(),
-			function_registry: from.function_registry.clone(),
+			function_registry: Arc::clone(&from.function_registry),
 			new_planner_strategy: from.new_planner_strategy.clone(),
 			redact_volatile_explain_attrs: from.redact_volatile_explain_attrs,
 			statement_counters: from.statement_counters.clone(),
 			matches_context: from.matches_context.clone(),
 			knn_context: from.knn_context.clone(),
-			config: from.config.clone(),
+			config: Arc::clone(&from.config),
 			#[cfg(feature = "http")]
-			http_client: from.http_client.clone(),
+			http_client: Arc::clone(&from.http_client),
 			tenant_identity: from.tenant_identity.clone(),
 			node_id: from.node_id,
 			auth_enabled: from.auth_enabled,
@@ -371,7 +371,7 @@ impl Context {
 			query_planner: from.query_planner.clone(),
 			query_executor: from.query_executor.clone(),
 			iteration_stage: from.iteration_stage.clone(),
-			capabilities: from.capabilities.clone(),
+			capabilities: Arc::clone(&from.capabilities),
 			index_stores: from.index_stores.clone(),
 			cache: from.cache.clone(),
 			index_builder: from.index_builder.clone(),
@@ -384,15 +384,15 @@ impl Context {
 			buckets: from.buckets.clone(),
 			#[cfg(feature = "surrealism")]
 			surrealism_cache: from.surrealism_cache.clone(),
-			function_registry: from.function_registry.clone(),
+			function_registry: Arc::clone(&from.function_registry),
 			new_planner_strategy: from.new_planner_strategy.clone(),
 			redact_volatile_explain_attrs: from.redact_volatile_explain_attrs,
 			statement_counters: from.statement_counters.clone(),
 			matches_context: from.matches_context.clone(),
 			knn_context: from.knn_context.clone(),
-			config: from.config.clone(),
+			config: Arc::clone(&from.config),
 			#[cfg(feature = "http")]
-			http_client: from.http_client.clone(),
+			http_client: Arc::clone(&from.http_client),
 			tenant_identity: from.tenant_identity.clone(),
 			node_id: from.node_id,
 			auth_enabled: from.auth_enabled,
@@ -567,7 +567,7 @@ impl Context {
 		opt: &Options,
 		action: Action,
 		res: ResourceKind,
-		base: &Base,
+		base: Base,
 	) -> Result<()> {
 		let res = match base {
 			Base::Root => res.on_root(),
@@ -702,7 +702,7 @@ impl Context {
 	/// Add cancellation to the context. The value that is returned will cancel
 	/// the context and it's children once called.
 	pub(crate) fn add_cancel(&mut self) -> Canceller {
-		let cancelled = self.cancelled.clone();
+		let cancelled = Arc::clone(&self.cancelled);
 		Canceller::new(cancelled)
 	}
 
@@ -975,7 +975,7 @@ impl Context {
 			map
 		};
 		self.values.iter().for_each(|(k, v)| {
-			map.insert(k.clone(), v.clone());
+			map.insert(k.clone(), Arc::clone(v));
 		});
 		map
 	}
@@ -986,7 +986,7 @@ impl Context {
 		crate::ctx::cancellation::Cancellation::new(
 			self.deadline.map(|(deadline, _)| deadline),
 			std::iter::successors(Some(self), |ctx| ctx.parent.as_ref().map(|c| c.as_ref()))
-				.map(|ctx| ctx.cancelled.clone())
+				.map(|ctx| Arc::clone(&ctx.cancelled))
 				.collect(),
 		)
 	}
@@ -1052,7 +1052,7 @@ impl Context {
 
 	/// Get the capabilities for this context
 	pub(crate) fn get_capabilities(&self) -> Arc<Capabilities> {
-		self.capabilities.clone()
+		Arc::clone(&self.capabilities)
 	}
 
 	/// Get the function registry for this context
@@ -1207,7 +1207,7 @@ impl Context {
 
 	#[cfg(feature = "surrealism")]
 	pub(crate) fn get_surrealism_cache(&self) -> Option<Arc<SurrealismCache>> {
-		self.surrealism_cache.as_ref().map(|sc| sc.clone())
+		self.surrealism_cache.as_ref().map(Arc::clone)
 	}
 
 	#[cfg(feature = "surrealism")]
@@ -1230,7 +1230,8 @@ impl Context {
 			self.config.surrealism_max_execution_time.map(Duration::from_millis);
 		let max_kv_entries = self.config.surrealism_max_kv_entries;
 		let max_kv_value_bytes = self.config.surrealism_max_kv_value_bytes;
-		let config = self.config.clone();
+		#[cfg(feature = "http")]
+		let config = Arc::clone(&self.config);
 
 		cache
 			.get_or_insert_with(&lookup, async || {
@@ -1318,7 +1319,7 @@ impl Context {
 
 	#[cfg(feature = "http")]
 	pub(crate) fn http_client(&self) -> Arc<HttpClient> {
-		self.http_client.clone()
+		Arc::clone(&self.http_client)
 	}
 
 	#[cfg(feature = "surrealism")]
@@ -1362,16 +1363,16 @@ mod tests {
 			ctx.auth_enabled = false;
 
 			let empty = Options::new(&config);
-			ctx.is_allowed(&empty, Action::View, ResourceKind::Any, &Base::Ns).unwrap_err();
-			ctx.is_allowed(&empty, Action::View, ResourceKind::Any, &Base::Db).unwrap_err();
+			ctx.is_allowed(&empty, Action::View, ResourceKind::Any, Base::Ns).unwrap_err();
+			ctx.is_allowed(&empty, Action::View, ResourceKind::Any, Base::Db).unwrap_err();
 			let db_only = Options::new(&config).with_db(Some("db".into()));
-			ctx.is_allowed(&db_only, Action::View, ResourceKind::Any, &Base::Db).unwrap_err();
+			ctx.is_allowed(&db_only, Action::View, ResourceKind::Any, Base::Db).unwrap_err();
 
-			ctx.is_allowed(&empty, Action::View, ResourceKind::Any, &Base::Root).unwrap();
+			ctx.is_allowed(&empty, Action::View, ResourceKind::Any, Base::Root).unwrap();
 			let ns = Options::new(&config).with_ns(Some("ns".into()));
-			ctx.is_allowed(&ns, Action::View, ResourceKind::Any, &Base::Ns).unwrap();
+			ctx.is_allowed(&ns, Action::View, ResourceKind::Any, Base::Ns).unwrap();
 			let ns_db = Options::new(&config).with_ns(Some("ns".into())).with_db(Some("db".into()));
-			ctx.is_allowed(&ns_db, Action::View, ResourceKind::Any, &Base::Db).unwrap();
+			ctx.is_allowed(&ns_db, Action::View, ResourceKind::Any, Base::Db).unwrap();
 		}
 
 		// Auth enabled: root owner still needs NS/DB set for NS/Db bases.
@@ -1380,16 +1381,16 @@ mod tests {
 			ctx.auth_enabled = true;
 
 			let opts = Options::new(&config).with_auth(Auth::for_root(Role::Owner).into());
-			ctx.is_allowed(&opts, Action::View, ResourceKind::Any, &Base::Ns).unwrap_err();
-			ctx.is_allowed(&opts, Action::View, ResourceKind::Any, &Base::Db).unwrap_err();
+			ctx.is_allowed(&opts, Action::View, ResourceKind::Any, Base::Ns).unwrap_err();
+			ctx.is_allowed(&opts, Action::View, ResourceKind::Any, Base::Db).unwrap_err();
 			let db_only = opts.clone().with_db(Some("db".into()));
-			ctx.is_allowed(&db_only, Action::View, ResourceKind::Any, &Base::Db).unwrap_err();
+			ctx.is_allowed(&db_only, Action::View, ResourceKind::Any, Base::Db).unwrap_err();
 
-			ctx.is_allowed(&opts, Action::View, ResourceKind::Any, &Base::Root).unwrap();
+			ctx.is_allowed(&opts, Action::View, ResourceKind::Any, Base::Root).unwrap();
 			let ns = opts.with_ns(Some("ns".into()));
-			ctx.is_allowed(&ns, Action::View, ResourceKind::Any, &Base::Ns).unwrap();
+			ctx.is_allowed(&ns, Action::View, ResourceKind::Any, Base::Ns).unwrap();
 			let ns_db = ns.with_db(Some("db".into()));
-			ctx.is_allowed(&ns_db, Action::View, ResourceKind::Any, &Base::Db).unwrap();
+			ctx.is_allowed(&ns_db, Action::View, ResourceKind::Any, Base::Db).unwrap();
 		}
 	}
 

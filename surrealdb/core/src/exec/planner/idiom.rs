@@ -251,7 +251,7 @@ impl<'ctx> Planner<'ctx> {
 				let registry = self.function_registry();
 				match registry.get_method(name.as_str()) {
 					Some(descriptor) => Ok(Arc::new(MethodPart {
-						descriptor: descriptor.clone(),
+						descriptor: Arc::clone(descriptor),
 						args: phys_args,
 					})),
 					None => Ok(Arc::new(ClosureFieldCallPart {
@@ -475,7 +475,7 @@ fn insert_auto_flattens(parts: Vec<Arc<dyn PhysicalExpr>>) -> Vec<Arc<dyn Physic
 
 	let mut result = Vec::with_capacity(parts.len() * 2);
 	for i in 0..parts.len() {
-		result.push(parts[i].clone());
+		result.push(Arc::clone(&parts[i]));
 		if parts[i].name() == "Lookup"
 			&& let Some(next) = parts.get(i + 1)
 			&& (next.name() == "Lookup" || next.name() == "Where")

@@ -125,7 +125,7 @@ async fn execute_database_info(
 	version: Option<&dyn PhysicalExpr>,
 ) -> crate::expr::FlowResult<Value> {
 	// Allowed to run?
-	ctx.is_allowed(Action::View, ResourceKind::Any, &crate::expr::Base::Db)?;
+	ctx.is_allowed(Action::View, ResourceKind::Any, crate::expr::Base::Db)?;
 
 	// Get database context
 	let db_ctx = ctx.database()?;

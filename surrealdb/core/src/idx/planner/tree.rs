@@ -262,7 +262,7 @@ impl<'a> TreeBuilder<'a> {
 				self.check_leaf_node_with_index(io.as_ref());
 				let re = ResolvedExpression {
 					group,
-					exp: exp.clone(),
+					exp: Arc::clone(&exp),
 					io,
 					left,
 					right,
@@ -349,17 +349,17 @@ impl<'a> TreeBuilder<'a> {
 		let n = {
 			let irs = self.resolve_indexes(self.table, &i, &schema);
 			if !irs.is_empty() {
-				Node::IndexedField(i.clone(), irs)
+				Node::IndexedField(Arc::clone(&i), irs)
 			} else if let Some(ro) =
 				self.resolve_record_field(&tx, schema.fields.as_ref(), &i).await?
 			{
 				// Try to detect an indexed record field
-				Node::RecordField(i.clone(), ro)
+				Node::RecordField(Arc::clone(&i), ro)
 			} else {
-				Node::NonIndexedField(i.clone())
+				Node::NonIndexedField(Arc::clone(&i))
 			}
 		};
-		self.resolved_idioms.insert(i.clone(), n.clone());
+		self.resolved_idioms.insert(Arc::clone(&i), n.clone());
 		Ok(n)
 	}
 
@@ -435,13 +435,13 @@ impl<'a> TreeBuilder<'a> {
 				for table in tables {
 					let schema = self.lazy_load_schema_resolver(tx, table).await?;
 					let remote_irs = self.resolve_indexes(table, &remote_field, &schema);
-					remotes.push((remote_field.clone(), remote_irs));
+					remotes.push((Arc::clone(&remote_field), remote_irs));
 				}
 				let ro = RecordOptions {
 					locals,
 					remotes: Arc::new(remotes),
 				};
-				self.idioms_record_options.insert(idiom.clone(), ro.clone());
+				self.idioms_record_options.insert(Arc::clone(idiom), ro.clone());
 				return Ok(Some(ro));
 			}
 		}
@@ -499,7 +499,7 @@ impl<'a> TreeBuilder<'a> {
 			if let Some((index_reference, _)) = self.lookup_join_index_ref(local_irs) {
 				let io = IndexOption::new(
 					index_reference,
-					Some(id.clone()),
+					Some(Arc::clone(id)),
 					p,
 					IndexOperator::Join(remote_ios),
 				);
@@ -535,8 +535,8 @@ impl<'a> TreeBuilder<'a> {
 			if res.is_none()
 				&& let Some(op) = op
 			{
-				let io = IndexOption::new(index_reference.clone(), Some(id.clone()), p, op);
-				self.index_map.options.push((e.clone(), io.clone()));
+				let io = IndexOption::new(index_reference.clone(), Some(Arc::clone(id)), p, op);
+				self.index_map.options.push((Arc::clone(e), io.clone()));
 				res = Some(io);
 			}
 		}
@@ -583,7 +583,7 @@ impl<'a> TreeBuilder<'a> {
 
 		if let Node::Computed(v) = n {
 			let vec: Arc<Vec<Number>> = Arc::new(v.as_ref().clone().coerce_to()?);
-			self.knn_expressions.insert(exp.clone());
+			self.knn_expressions.insert(Arc::clone(exp));
 			return Ok(Some(IndexOperator::Ann(vec, k, ef)));
 		}
 
@@ -612,7 +612,7 @@ impl<'a> TreeBuilder<'a> {
 
 		if let Node::Computed(v) = n {
 			let vec: Arc<Vec<Number>> = Arc::new(v.as_ref().clone().coerce_to()?);
-			self.knn_expressions.insert(exp.clone());
+			self.knn_expressions.insert(Arc::clone(exp));
 			return Ok(Some(IndexOperator::Ann(vec, k, l)));
 		}
 
@@ -641,9 +641,11 @@ impl<'a> TreeBuilder<'a> {
 
 		if let Node::Computed(v) = val {
 			let vec: Arc<Vec<Number>> = Arc::new(v.as_ref().clone().coerce_to()?);
-			self.knn_expressions.insert(exp.clone());
-			self.knn_brute_force_expressions
-				.insert(exp.clone(), KnnBruteForceExpression::new(*k, id.clone(), vec, d.clone()));
+			self.knn_expressions.insert(Arc::clone(exp));
+			self.knn_brute_force_expressions.insert(
+				Arc::clone(exp),
+				KnnBruteForceExpression::new(*k, id.clone(), vec, d.clone()),
+			);
 		}
 		Ok(())
 	}
@@ -843,7 +845,7 @@ impl SchemaCache {
 	}
 
 	fn new_reference(&self, idx: usize) -> IndexReference {
-		IndexReference::new(self.indexes.clone(), idx)
+		IndexReference::new(Arc::clone(&self.indexes), idx)
 	}
 }
 
@@ -869,7 +871,7 @@ pub(super) enum Node {
 impl Node {
 	pub(super) fn is_computed(&self) -> Option<Arc<Value>> {
 		if let Self::Computed(v) = self {
-			Some(v.clone())
+			Some(Arc::clone(v))
 		} else {
 			None
 		}
@@ -907,7 +909,7 @@ pub(super) enum IdiomPosition {
 
 impl IdiomPosition {
 	// Reverses the operator for non-commutative operators
-	fn transform(&self, op: &BinaryOperator) -> BinaryOperator {
+	fn transform(self, op: &BinaryOperator) -> BinaryOperator {
 		match self {
 			IdiomPosition::Left => op.clone(),
 			IdiomPosition::Right => match op {

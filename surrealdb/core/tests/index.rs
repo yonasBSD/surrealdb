@@ -32,7 +32,7 @@ async fn concurrent_tasks(
 	let mut tasks = Vec::with_capacity(task_count);
 
 	for i in 0..task_count {
-		let dbs = dbs.clone();
+		let dbs = Arc::clone(&dbs);
 		let session = session.clone();
 		let sql = sql_func(i);
 		tasks.push(tokio::spawn(async move {
@@ -138,7 +138,7 @@ async fn batch_ingestion(
 		sql_distribution.len(),
 		"SQL distribution map should have same length as distribution"
 	);
-	concurrent_tasks(dbs.clone(), ses, batch.len(), |i| batch[i]).await
+	concurrent_tasks(Arc::clone(&dbs), ses, batch.len(), |i| batch[i]).await
 }
 
 /// Spawns a background task that continuously runs index compaction on the given datastore
@@ -155,7 +155,7 @@ async fn start_compaction_loop(
 		let mut compaction_count = 0;
 		while !abort_compaction.is_cancelled() {
 			let res = Datastore::index_compaction(
-				dbs.clone(),
+				Arc::clone(&dbs),
 				Duration::from_secs(1),
 				abort_compaction.clone(),
 			)
@@ -220,14 +220,14 @@ async fn multi_index_concurrent_test(
 
 	// Start the index compaction
 	let abort_compaction = CancellationToken::new();
-	let compaction_loop = start_compaction_loop(dbs.clone(), abort_compaction.clone()).await;
+	let compaction_loop = start_compaction_loop(Arc::clone(&dbs), abort_compaction.clone()).await;
 
 	let ses = Session::owner().with_ns("test").with_db("test");
 	// Define analyzer and indexes.
 	dbs.execute(sql, &ses, None).await?;
 
 	// Ingest records.
-	batch_ingestion(dbs.clone(), &ses, batch_count, sql_distribution).await?;
+	batch_ingestion(Arc::clone(&dbs), &ses, batch_count, sql_distribution).await?;
 
 	info!("Waiting for index to be built");
 	timeout(Duration::from_secs(600), async {
@@ -388,7 +388,7 @@ async fn diskann_pending_and_compacted_knn() -> Result<()> {
 	let pending = collect_value_ids(&dbs, &session, query).await?;
 	assert_eq!(pending.len(), 2);
 
-	Datastore::index_compaction(dbs.clone(), Duration::from_secs(1), CancellationToken::new())
+	Datastore::index_compaction(Arc::clone(&dbs), Duration::from_secs(1), CancellationToken::new())
 		.await?;
 	let compacted = collect_value_ids(&dbs, &session, query).await?;
 	assert_eq!(pending, compacted);
@@ -421,7 +421,7 @@ async fn hnsw_concurrent_writes() -> Result<()> {
 	let chunks: Vec<_> = vectors.chunks(vectors.len() / 4).map(|s| s.to_vec()).collect();
 	let mut tasks = Vec::with_capacity(chunks.len());
 	for chunk in chunks {
-		let dbs = dbs.clone();
+		let dbs = Arc::clone(&dbs);
 		let session = session.clone();
 		tasks.push(tokio::spawn(async move {
 			for (r, v) in chunk {
@@ -447,7 +447,7 @@ async fn hnsw_concurrent_writes() -> Result<()> {
 	let results1 = collect_query(&dbs, &session, &vectors).await?;
 
 	// Clean the HNSW compaction queue
-	Datastore::index_compaction(dbs.clone(), Duration::from_secs(1), CancellationToken::new())
+	Datastore::index_compaction(Arc::clone(&dbs), Duration::from_secs(1), CancellationToken::new())
 		.await?;
 
 	// Collect the results once the pending queue is cleaned
@@ -506,7 +506,7 @@ async fn multi_index_concurrent_test_index_compaction() -> Result<()> {
 	// Step 2: Start a background index compaction loop that continuously triggers compaction
 	// on the datastore. A cancellation token is used to gracefully stop it later.
 	let cancellation = CancellationToken::new();
-	let compaction_loop = start_compaction_loop(dbs.clone(), cancellation.clone()).await;
+	let compaction_loop = start_compaction_loop(Arc::clone(&dbs), cancellation.clone()).await;
 
 	// Step 3: For each session (namespace/database pair), define multiple indexes of different
 	// types on two tables (`user` and `scope`):
@@ -555,10 +555,10 @@ async fn multi_index_concurrent_test_index_compaction() -> Result<()> {
 		// Spawn 3 tasks writing `user` records with unique emails (exercises UNIQUE, COUNT,
 		// and HNSW indexes).
 		for prefix in ['a', 'b', 'c'] {
-			let vectors = vectors.clone();
+			let vectors = Arc::clone(&vectors);
 			tasks.push(tokio::spawn(write_loop_until_cancellation(
 				prefix,
-				dbs.clone(),
+				Arc::clone(&dbs),
 				session.clone(),
 				cancellation.clone(),
 				move |p, c| {
@@ -575,7 +575,7 @@ async fn multi_index_concurrent_test_index_compaction() -> Result<()> {
 		for prefix in ['a', 'b', 'c'] {
 			tasks.push(tokio::spawn(write_loop_until_cancellation(
 				prefix,
-				dbs.clone(),
+				Arc::clone(&dbs),
 				session.clone(),
 				cancellation.clone(),
 				|p, c| {

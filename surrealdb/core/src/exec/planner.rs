@@ -227,7 +227,7 @@ impl<'ctx> Planner<'ctx> {
 		// so that a cache-miss in get_surrealism_runtime can access the
 		// bucket store without panicking.
 		let mut plan_ctx = Context::new_child(self.ctx);
-		plan_ctx.set_transaction(txn.clone());
+		plan_ctx.set_transaction(Arc::clone(txn));
 		let frozen = plan_ctx.freeze();
 		let sig = executable
 			.signature(&frozen, &db_def.namespace_id, &db_def.database_id, sub)
@@ -271,10 +271,10 @@ impl<'ctx> Planner<'ctx> {
 		// planner's transaction so signature resolution can access stores.
 		let ctx = if let Some(txn) = &self.txn {
 			let mut plan_ctx = Context::new_child(self.ctx);
-			plan_ctx.set_transaction(txn.clone());
+			plan_ctx.set_transaction(Arc::clone(txn));
 			plan_ctx.freeze()
 		} else {
-			self.ctx.clone()
+			Arc::clone(self.ctx)
 		};
 		let sig =
 			executable.signature(&ctx, sub).await.map_err(|e| Error::Internal(e.to_string()))?;

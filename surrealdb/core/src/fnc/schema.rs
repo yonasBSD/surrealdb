@@ -14,7 +14,7 @@ pub mod table {
 	) -> Result<Value> {
 		if let Some(opt) = opt {
 			opt.valid_for_db()?;
-			ctx.is_allowed(opt, Action::View, ResourceKind::Table, &Base::Db)?;
+			ctx.is_allowed(opt, Action::View, ResourceKind::Table, Base::Db)?;
 			let (ns, db) = ctx.expect_ns_db_ids(opt).await?;
 			let txn = ctx.tx();
 			let tb: TableName = arg.into();

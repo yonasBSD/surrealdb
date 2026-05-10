@@ -104,7 +104,7 @@ impl ExecOperator for TableInfoPlan {
 	}
 
 	fn execute(&self, ctx: &ExecutionContext) -> FlowResult<ValueBatchStream> {
-		let table = self.table.clone();
+		let table = Arc::clone(&self.table);
 		let structured = self.structured;
 		let version = self.version.clone();
 		let ctx = ctx.clone();
@@ -129,7 +129,7 @@ async fn execute_table_info(
 	version: Option<&dyn PhysicalExpr>,
 ) -> crate::expr::FlowResult<Value> {
 	// Allowed to run?
-	ctx.is_allowed(Action::View, ResourceKind::Any, &crate::expr::Base::Db)?;
+	ctx.is_allowed(Action::View, ResourceKind::Any, crate::expr::Base::Db)?;
 
 	// Get database context
 	let db_ctx = ctx.database()?;

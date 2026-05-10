@@ -206,8 +206,9 @@ impl Builder {
 		let async_event_trigger = Arc::new(Notify::new());
 		let observer = self.observer;
 		let config = Arc::new(self.config.load::<CommonConfig>());
-		let tf = TransactionFactory::new(async_event_trigger.clone(), builder, config.clone())
-			.with_observer(observer.clone());
+		let tf =
+			TransactionFactory::new(Arc::clone(&async_event_trigger), builder, Arc::clone(&config))
+				.with_observer(Arc::clone(&observer));
 		let id = self.id.unwrap_or_else(Uuid::new_v4);
 		let capabilities = Arc::new(self.capabilities);
 		let dynamic_configuration = DynamicConfiguration::default();

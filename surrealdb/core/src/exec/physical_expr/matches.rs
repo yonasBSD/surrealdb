@@ -229,8 +229,8 @@ impl ToSql for MatchesOp {
 impl Clone for MatchesOp {
 	fn clone(&self) -> Self {
 		Self {
-			left: self.left.clone(),
-			right: self.right.clone(),
+			left: Arc::clone(&self.left),
+			right: Arc::clone(&self.right),
 			operator: self.operator.clone(),
 			idiom: self.idiom.clone(),
 			query: self.query.clone(),

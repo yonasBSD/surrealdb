@@ -37,7 +37,7 @@ pub fn graceful_shutdown(
 			// Clone the state
 			let http_handle = http_handle.clone();
 			let canceller = canceller.clone();
-			let state = state.clone();
+			let state = Arc::clone(&state);
 			// Spawn a background task
 			tokio::spawn(async move {
 				// Stop accepting new HTTP connections

@@ -210,6 +210,7 @@ impl<'ctx> Planner<'ctx> {
 	/// leaves the expression unchanged, so we can use it directly for the
 	/// implicit `array::group` fallback without an extra clone.
 	#[allow(clippy::type_complexity)]
+	#[allow(clippy::clone_on_ref_ptr)] // Several paths clone `Arc<dyn AggregateFunction>` from concrete registry entries
 	pub(crate) async fn extract_aggregate_info(
 		&self,
 		mut expr: Expr,
@@ -248,7 +249,7 @@ impl<'ctx> Planner<'ctx> {
 			let func = if name.as_str() == "count" {
 				registry.get_count_aggregate(!call.arguments.is_empty())
 			} else {
-				registry.get_aggregate(&name).expect("aggregate function should exist").clone()
+				Arc::clone(registry.get_aggregate(&name).expect("aggregate function should exist"))
 			};
 
 			let mut args = call.arguments.into_iter();

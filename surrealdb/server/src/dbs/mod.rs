@@ -979,7 +979,7 @@ mod tests {
 		let attempts = Arc::new(AtomicUsize::new(0));
 
 		let err = retry_with_timeout("test operation", Duration::from_millis(10), || {
-			let attempts = attempts.clone();
+			let attempts = Arc::clone(&attempts);
 			async move {
 				attempts.fetch_add(1, Ordering::SeqCst);
 				sleep(Duration::from_millis(50)).await;
@@ -1001,7 +1001,7 @@ mod tests {
 			"test operation",
 			Duration::from_millis(100),
 			|| {
-				let attempts = attempts.clone();
+				let attempts = Arc::clone(&attempts);
 				async move {
 					attempts.fetch_add(1, Ordering::SeqCst);
 					Err::<(), _>("permanent")

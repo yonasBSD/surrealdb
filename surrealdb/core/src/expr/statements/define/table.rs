@@ -73,7 +73,7 @@ impl DefineTableStatement {
 		doc: Option<&CursorDoc>,
 	) -> Result<Value> {
 		// Allowed to run?
-		ctx.is_allowed(opt, Action::Edit, ResourceKind::Table, &Base::Db)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Table, Base::Db)?;
 
 		// Process the name
 		let name =
@@ -764,7 +764,7 @@ impl DefineTableStatement {
 			});
 
 			let key = RecordIdKey::Array(Array(group));
-			tx.put_record(ns, db, view_table_name, &key, record.clone()).await?;
+			tx.put_record(ns, db, view_table_name, &key, Arc::clone(&record)).await?;
 
 			let id = Arc::new(RecordId {
 				table: view_table_name.clone(),

@@ -69,7 +69,7 @@ impl ExecOperator for ExprPlan {
 	}
 
 	fn execute(&self, ctx: &ExecutionContext) -> FlowResult<ValueBatchStream> {
-		let expr = self.expr.clone();
+		let expr = Arc::clone(&self.expr);
 		let ctx = ctx.clone();
 
 		Ok(Box::pin(stream::once(async move {

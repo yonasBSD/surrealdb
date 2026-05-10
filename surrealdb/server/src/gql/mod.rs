@@ -12,6 +12,7 @@
 //!    response, depending on the `Accept` header.
 
 use std::convert::Infallible;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use async_graphql::http::is_accept_multipart_mixed;
@@ -149,7 +150,7 @@ where
 			};
 
 			// Clone Arc's before moving req (needed for GraphQL context)
-			let datastore_ctx = datastore.clone();
+			let datastore_ctx = Arc::clone(datastore);
 			let session_ctx = std::sync::Arc::new(session.clone());
 
 			let is_accept_multipart_mixed = req

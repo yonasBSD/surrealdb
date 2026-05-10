@@ -1,3 +1,9 @@
+//! Transaction implementation and cache coordination.
+//!
+//! Cache paths use `Entry::Any(val.clone())` for concrete `Arc<T>` values that must coerce to
+//! `Arc<dyn Any + Send + Sync>`; `Arc::clone(&val)` does not perform that unsized coercion.
+#![allow(clippy::clone_on_ref_ptr)]
+
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -474,7 +480,7 @@ impl Transaction {
 					let record = record.into_read_only();
 					if matches!(cache_policy, CachePolicy::ReadWrite) {
 						let qey = cache::tx::Lookup::Record(ns, db, rid.table.as_str(), &rid.key);
-						self.cache.insert(qey, cache::tx::Entry::Val(record.clone()));
+						self.cache.insert(qey, cache::tx::Entry::Val(Arc::clone(&record)));
 					}
 					record
 				}
@@ -1071,7 +1077,7 @@ impl NodeProvider for Transaction {
 				let end = crate::key::root::nd::suffix();
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Nds(val.clone());
+				let entry = cache::tx::Entry::Nds(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}
@@ -1163,7 +1169,7 @@ impl NamespaceProvider for Transaction {
 				let end = crate::key::root::ns::suffix();
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Nss(val.clone());
+				let entry = cache::tx::Entry::Nss(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}
@@ -1255,7 +1261,7 @@ impl DatabaseProvider for Transaction {
 				let end = crate::key::namespace::db::suffix(ns)?;
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Dbs(val.clone());
+				let entry = cache::tx::Entry::Dbs(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}
@@ -1422,7 +1428,7 @@ impl DatabaseProvider for Transaction {
 				let end = crate::key::database::az::suffix(ns, db)?;
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Azs(val.clone());
+				let entry = cache::tx::Entry::Azs(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}
@@ -1451,7 +1457,7 @@ impl DatabaseProvider for Transaction {
 				let end = crate::key::database::sq::suffix(ns, db)?;
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Sqs(val.clone());
+				let entry = cache::tx::Entry::Sqs(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}
@@ -1480,7 +1486,7 @@ impl DatabaseProvider for Transaction {
 				let end = crate::key::database::fc::suffix(ns, db)?;
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Fcs(val.clone());
+				let entry = cache::tx::Entry::Fcs(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}
@@ -1509,7 +1515,7 @@ impl DatabaseProvider for Transaction {
 				let end = crate::key::database::md::suffix(ns, db)?;
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Mds(val.clone());
+				let entry = cache::tx::Entry::Mds(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}
@@ -1538,7 +1544,7 @@ impl DatabaseProvider for Transaction {
 				let end = crate::key::database::pa::suffix(ns, db)?;
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Pas(val.clone());
+				let entry = cache::tx::Entry::Pas(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}
@@ -1567,7 +1573,7 @@ impl DatabaseProvider for Transaction {
 				let end = crate::key::database::ml::suffix(ns, db)?;
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Mls(val.clone());
+				let entry = cache::tx::Entry::Mls(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}
@@ -1596,7 +1602,7 @@ impl DatabaseProvider for Transaction {
 				let end = crate::key::database::cg::suffix(ns, db)?;
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Cgs(val.clone());
+				let entry = cache::tx::Entry::Cgs(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}
@@ -1920,7 +1926,7 @@ impl TableProvider for Transaction {
 				let end = crate::key::database::tb::suffix(ns, db)?;
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Tbs(val.clone());
+				let entry = cache::tx::Entry::Tbs(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}
@@ -1950,7 +1956,7 @@ impl TableProvider for Transaction {
 				let end = crate::key::table::ft::suffix(ns, db, tb)?;
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Fts(val.clone());
+				let entry = cache::tx::Entry::Fts(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}
@@ -2174,7 +2180,7 @@ impl TableProvider for Transaction {
 				let end = crate::key::table::ev::suffix(ns, db, tb)?;
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Evs(val.clone());
+				let entry = cache::tx::Entry::Evs(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}
@@ -2204,7 +2210,7 @@ impl TableProvider for Transaction {
 				let end = crate::key::table::fd::suffix(ns, db, tb)?;
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Fds(val.clone());
+				let entry = cache::tx::Entry::Fds(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}
@@ -2234,7 +2240,7 @@ impl TableProvider for Transaction {
 				let end = crate::key::table::ix::suffix(ns, db, tb)?;
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Ixs(val.clone());
+				let entry = cache::tx::Entry::Ixs(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}
@@ -2264,7 +2270,7 @@ impl TableProvider for Transaction {
 				let end = crate::key::table::lq::suffix(ns, db, tb)?;
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Lvs(val.clone());
+				let entry = cache::tx::Entry::Lvs(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}
@@ -2547,7 +2553,7 @@ impl TableProvider for Transaction {
 							record.data.def(rid);
 							// Convert to read-only format for better sharing and performance
 							let record = record.into_read_only();
-							let entry = cache::tx::Entry::Val(record.clone());
+							let entry = cache::tx::Entry::Val(Arc::clone(&record));
 							self.cache.insert(qey, entry);
 							Ok(record)
 						}
@@ -2660,7 +2666,7 @@ impl UserProvider for Transaction {
 				let end = crate::key::root::us::suffix();
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Rus(val.clone());
+				let entry = cache::tx::Entry::Rus(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}
@@ -2688,7 +2694,7 @@ impl UserProvider for Transaction {
 				let end = crate::key::namespace::us::suffix(ns)?;
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Nus(val.clone());
+				let entry = cache::tx::Entry::Nus(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}
@@ -2717,7 +2723,7 @@ impl UserProvider for Transaction {
 				let end = crate::key::database::us::suffix(ns, db)?;
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Dus(val.clone());
+				let entry = cache::tx::Entry::Dus(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}
@@ -2896,7 +2902,7 @@ impl AuthorisationProvider for Transaction {
 				let end = crate::key::root::ac::suffix();
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Ras(val.clone());
+				let entry = cache::tx::Entry::Ras(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}
@@ -2924,7 +2930,7 @@ impl AuthorisationProvider for Transaction {
 				let end = crate::key::root::access::gr::suffix(ra)?;
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Rag(val.clone());
+				let entry = cache::tx::Entry::Rag(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}
@@ -2952,7 +2958,7 @@ impl AuthorisationProvider for Transaction {
 				let end = crate::key::namespace::ac::suffix(ns)?;
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Nas(val.clone());
+				let entry = cache::tx::Entry::Nas(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}
@@ -2981,7 +2987,7 @@ impl AuthorisationProvider for Transaction {
 				let end = crate::key::namespace::access::gr::suffix(ns, na)?;
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Nag(val.clone());
+				let entry = cache::tx::Entry::Nag(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}
@@ -3010,7 +3016,7 @@ impl AuthorisationProvider for Transaction {
 				let end = crate::key::database::ac::suffix(ns, db)?;
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Das(val.clone());
+				let entry = cache::tx::Entry::Das(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}
@@ -3040,7 +3046,7 @@ impl AuthorisationProvider for Transaction {
 				let end = crate::key::database::access::gr::suffix(ns, db, da)?;
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Dag(val.clone());
+				let entry = cache::tx::Entry::Dag(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}
@@ -3408,7 +3414,7 @@ impl BucketProvider for Transaction {
 				let end = crate::key::database::bu::suffix(ns, db)?;
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Bus(val.clone());
+				let entry = cache::tx::Entry::Bus(Arc::clone(&val));
 				self.cache.insert(qey, entry);
 				Ok(val)
 			}

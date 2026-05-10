@@ -34,7 +34,7 @@ impl AlterSystemStatement {
 		doc: Option<&CursorDoc>,
 	) -> anyhow::Result<Value> {
 		// Allowed to run?
-		ctx.is_allowed(opt, Action::Edit, ResourceKind::Any, &Base::Root)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Any, Base::Root)?;
 		// Are we doing compaction?
 		if self.compact {
 			ctx.tx().compact::<Key>(None).await?;

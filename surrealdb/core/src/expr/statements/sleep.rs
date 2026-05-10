@@ -23,7 +23,7 @@ impl SleepStatement {
 		_doc: Option<&CursorDoc>,
 	) -> Result<Value> {
 		// Allowed to run?
-		ctx.is_allowed(opt, Action::Edit, ResourceKind::Table, &Base::Root)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Table, Base::Root)?;
 		// Is there a timeout?
 		if let Some(t) = ctx.timeout() {
 			timeout(t, self.sleep()).await?;

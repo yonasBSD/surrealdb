@@ -85,7 +85,7 @@ impl Surreal<Db> {
 				sessions: HashMap::new(),
 			};
 
-			let tasks = tasks::init(router_state.kvs.clone(), canceller.clone(), &engine);
+			let tasks = tasks::init(Arc::clone(&router_state.kvs), canceller.clone(), &engine);
 
 			router_loop(&router_state, canceller, tasks, route_rx, recv, notifications).await;
 
@@ -192,7 +192,7 @@ pub(crate) async fn run_router(
 	if let Some(interval) = address.config.changefeed_gc_interval {
 		opt.changefeed_gc_interval = interval;
 	}
-	let tasks = tasks::init(router_state.kvs.clone(), canceller.clone(), &opt);
+	let tasks = tasks::init(Arc::clone(&router_state.kvs), canceller.clone(), &opt);
 
 	router_loop(&router_state, canceller, tasks, route_rx, session_rx, notify).await;
 
@@ -241,7 +241,7 @@ async fn router_loop(
 				};
 				match router_state.sessions.get(&route.request.session_id) {
 					Some(Ok(state)) => {
-						let kvs = router_state.kvs.clone();
+						let kvs = Arc::clone(&router_state.kvs);
 						tokio::spawn(async move {
 							match super::router(&kvs, &state, route.request.command)
 								.await
@@ -278,7 +278,7 @@ async fn router_loop(
 					Some(Ok(state)) => {
 						match state.live_queries.get(&live_query_id) {
 							Some(sender) => {
-								let kvs = router_state.kvs.clone();
+								let kvs = Arc::clone(&router_state.kvs);
 								let vars = state.vars.read().await.clone();
 								let session = state.session.read().await.clone();
 								tokio::spawn(async move {

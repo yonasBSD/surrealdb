@@ -389,8 +389,8 @@ impl QueryPlanner {
 		&self.fallbacks
 	}
 
-	pub(crate) fn is_order(&self, irf: &IteratorRef) -> bool {
-		self.ordering_indexes.contains(irf)
+	pub(crate) fn is_order(&self, irf: IteratorRef) -> bool {
+		self.ordering_indexes.contains(&irf)
 	}
 
 	pub(crate) fn is_any_specific_permission(&self) -> bool {

@@ -48,7 +48,7 @@ impl Host {
 	) -> Self {
 		Self {
 			stk: TreeStack::new(),
-			ctx: ctx.clone(),
+			ctx: Arc::clone(ctx),
 			opt: opt.clone(),
 			doc: doc.cloned(),
 			kv,
@@ -71,7 +71,7 @@ impl Host {
 			&self.ctx,
 			scoped,
 			#[cfg(feature = "http")]
-			self.http_client.clone(),
+			Arc::clone(&self.http_client),
 		)
 	}
 }

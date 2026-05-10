@@ -196,10 +196,11 @@ impl MethodRegistry {
 /// Helper to look up a function from the registry, panicking if not found.
 /// Since these are all builtins, a missing function indicates a registration bug.
 fn get(funcs: &FunctionRegistry, name: &str) -> Arc<dyn ScalarFunction> {
-	funcs
-		.get(name)
-		.unwrap_or_else(|| panic!("Expected builtin function '{}' to be registered", name))
-		.clone()
+	Arc::clone(
+		funcs
+			.get(name)
+			.unwrap_or_else(|| panic!("Expected builtin function '{}' to be registered", name)),
+	)
 }
 
 /// Build the method registry from the function registry.

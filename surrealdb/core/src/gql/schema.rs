@@ -176,7 +176,7 @@ pub async fn generate_schema(
 		Some(ref tbs) if !tbs.is_empty() => {
 			let mut table_fields: HashMap<TableName, Arc<[FieldDefinition]>> = HashMap::new();
 			query = process_tbs(
-				tbs.clone(),
+				Arc::clone(tbs),
 				query,
 				&mut types,
 				&schema_ctx,
@@ -186,7 +186,7 @@ pub async fn generate_schema(
 			.await?;
 
 			// Generate mutations for all tables
-			mutation_obj = Some(process_mutations(tbs.clone(), &mut types, &schema_ctx).await?);
+			mutation_obj = Some(process_mutations(Arc::clone(tbs), &mut types, &schema_ctx).await?);
 			subscription_obj = process_subscriptions(&tbs[..], &table_fields);
 		}
 		_ => {}

@@ -35,7 +35,7 @@ impl DefineModelStatement {
 		doc: Option<&CursorDoc>,
 	) -> Result<Value> {
 		// Allowed to run?
-		ctx.is_allowed(opt, Action::Edit, ResourceKind::Model, &Base::Db)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Model, Base::Db)?;
 		// Fetch the transaction
 		let txn = ctx.tx();
 		// Check if the definition exists

@@ -23,8 +23,8 @@ type SharedMcpService = Arc<OnceCell<McpHttpService>>;
 
 pub fn router() -> Router<Arc<RpcState>> {
 	let mcp_cell: SharedMcpService = Arc::new(OnceCell::new());
-	let mcp_post = mcp_cell.clone();
-	let mcp_get = mcp_cell.clone();
+	let mcp_post = Arc::clone(&mcp_cell);
+	let mcp_get = Arc::clone(&mcp_cell);
 	let mcp_del = mcp_cell;
 
 	// Mirror the body-limit pattern used by every other route in this crate
@@ -64,10 +64,10 @@ async fn handle_mcp(
 		.get_or_init(|| async {
 			let recorder: Option<std::sync::Arc<dyn surrealdb_mcp::metrics::McpMetricsRecorder>> =
 				state.metrics_observer.as_ref().map(|obs| {
-					std::sync::Arc::new(crate::observe::McpRecorderAdapter::new(obs.clone()))
+					std::sync::Arc::new(crate::observe::McpRecorderAdapter::new(Arc::clone(obs)))
 						as std::sync::Arc<dyn surrealdb_mcp::metrics::McpMetricsRecorder>
 				});
-			surrealdb_mcp::service::create_http_service_with_metrics(db.clone(), recorder)
+			surrealdb_mcp::service::create_http_service_with_metrics(Arc::clone(db), recorder)
 		})
 		.await;
 

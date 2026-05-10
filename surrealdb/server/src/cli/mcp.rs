@@ -133,7 +133,7 @@ pub async fn init<
 	// so the MCP server works regardless of whether the datastore has auth
 	// enabled or guest access disabled.
 	let base_session = Session::owner();
-	let mut service = McpService::new(datastore.clone(), namespace, database, base_session)
+	let mut service = McpService::new(Arc::clone(&datastore), namespace, database, base_session)
 		.with_transport_label("stdio");
 	// When telemetry has produced a meter provider (Prometheus disabled but
 	// OTLP enabled, or just the no-op default), build a `MetricsObserver`

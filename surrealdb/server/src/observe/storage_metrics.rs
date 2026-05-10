@@ -44,7 +44,7 @@ pub fn register_storage_metrics(
 	let meter = runtime.meter(STORAGE_METER_SCOPE);
 	let mut registered = 0usize;
 	for metric in metrics.u64_metrics {
-		let ds = ds.clone();
+		let ds = Arc::clone(ds);
 		let name = metric.name;
 		// Build the OTel name. The exporter sanitises `.` to `_` so
 		// `surrealdb.storage.rocksdb.block_cache_usage` becomes

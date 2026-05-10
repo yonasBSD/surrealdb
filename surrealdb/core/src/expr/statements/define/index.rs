@@ -53,7 +53,7 @@ impl DefineIndexStatement {
 		doc: Option<&CursorDoc>,
 	) -> Result<Value> {
 		// Allowed to run?
-		ctx.is_allowed(opt, Action::Edit, ResourceKind::Index, &Base::Db)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Index, Base::Db)?;
 		// Fetch the transaction
 		let txn = ctx.tx();
 

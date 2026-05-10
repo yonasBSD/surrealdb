@@ -97,9 +97,14 @@ impl<'a> DiskAnnTruthyDocumentFilter<'a> {
 						Arc::new(RecordId::new(self.ikb.table().clone(), key.as_ref().clone()))
 					}
 				};
-				let record =
-					Self::is_record_truthy(ctx, self.opt, stk, self.cond.clone(), rid.clone())
-						.await?;
+				let record = Self::is_record_truthy(
+					ctx,
+					self.opt,
+					stk,
+					Arc::clone(&self.cond),
+					Arc::clone(&rid),
+				)
+				.await?;
 				let truthy = record.is_some();
 				e.insert(record.map(|record| (rid, record)));
 				Ok(truthy)
@@ -120,7 +125,7 @@ impl<'a> DiskAnnTruthyDocumentFilter<'a> {
 			return Ok(None);
 		}
 		let cursor_doc = CursorDoc {
-			rid: Some(rid.clone()),
+			rid: Some(Arc::clone(&rid)),
 			ir: None,
 			doc: val.into(),
 			fields_computed: false,

@@ -96,7 +96,7 @@ impl Websocket {
 		let rpc = Arc::new(Websocket {
 			id,
 			format,
-			state: state.clone(),
+			state: Arc::clone(&state),
 			shutdown: CancellationToken::new(),
 			canceller: CancellationToken::new(),
 			sessions: HashMap::new(),
@@ -109,7 +109,7 @@ impl Websocket {
 		let session = session.with_rt(true);
 		rpc.set_session(id, Arc::new(RwLock::new(session)));
 		// Add this WebSocket to the list
-		state.web_sockets.write().await.insert(id, rpc.clone());
+		state.web_sockets.write().await.insert(id, Arc::clone(&rpc));
 		// Emit a session connect event so observability sinks can track
 		// simultaneous connections without consulting the datastore.
 		// `MetricsObserver::on_session_event` increments
@@ -137,17 +137,17 @@ impl Websocket {
 				// Split the socket into sending and receiving streams
 				let (ws_sender, ws_receiver) = buffer.split();
 				// Spawn async tasks for the WebSocket
-				tasks.spawn(Self::ping(rpc.clone(), sender.clone()));
-				tasks.spawn(Self::read(rpc.clone(), ws_receiver, sender.clone(), rec_limit));
-				tasks.spawn(Self::write(rpc.clone(), ws_sender, receiver));
+				tasks.spawn(Self::ping(Arc::clone(&rpc), sender.clone()));
+				tasks.spawn(Self::read(Arc::clone(&rpc), ws_receiver, sender.clone(), rec_limit));
+				tasks.spawn(Self::write(Arc::clone(&rpc), ws_sender, receiver));
 			}
 			false => {
 				// Split the socket into sending and receiving streams
 				let (ws_sender, ws_receiver) = ws.split();
 				// Spawn async tasks for the WebSocket
-				tasks.spawn(Self::ping(rpc.clone(), sender.clone()));
-				tasks.spawn(Self::read(rpc.clone(), ws_receiver, sender.clone(), rec_limit));
-				tasks.spawn(Self::write(rpc.clone(), ws_sender, receiver));
+				tasks.spawn(Self::ping(Arc::clone(&rpc), sender.clone()));
+				tasks.spawn(Self::read(Arc::clone(&rpc), ws_receiver, sender.clone(), rec_limit));
+				tasks.spawn(Self::write(Arc::clone(&rpc), ws_sender, receiver));
 			}
 		}
 		// Wait for all tasks to finish
@@ -335,7 +335,7 @@ impl Websocket {
 							// Check to see whether we have available memory
 							if ALLOC.is_beyond_threshold() {
 								// Reject the message
-								Self::close_socket(rpc.clone(), chn).await;
+								Self::close_socket(Arc::clone(&rpc), chn).await;
 								// Exit out of the loop
 								break;
 							}
@@ -500,7 +500,7 @@ impl Websocket {
 								let session_id = client_session.unwrap_or(rpc.id);
 								// Process the message
 								let result = Self::process_message(
-									rpc.clone(),
+									Arc::clone(rpc),
 									session_id,
 									client_session,
 									req.txn.map(Into::into),
@@ -953,7 +953,7 @@ mod tests {
 			builder = builder.with_observer(obs);
 		}
 		let ds = Arc::new(builder.build_with_path("memory").await.unwrap());
-		let state = Arc::new(crate::rpc::RpcState::new(ds.clone()));
+		let state = Arc::new(crate::rpc::RpcState::new(Arc::clone(&ds)));
 		let id = Uuid::new_v4();
 		let (tx, _rx) = channel::<Message>(8);
 		Arc::new(Websocket {

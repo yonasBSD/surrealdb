@@ -160,21 +160,19 @@ impl AuditCapture<'_> {
 /// active for the entire test, including any tasks rmcp's transport
 /// spawns internally.
 pub fn install_audit_capture() -> AuditCapture<'static> {
-	let buffer = AUDIT_BUFFER
-		.get_or_init(|| {
-			use tracing::dispatcher::Dispatch;
-			use tracing_subscriber::layer::SubscriberExt;
-			let buffer: Arc<Mutex<Vec<CapturedEvent>>> = Arc::new(Mutex::new(Vec::new()));
-			// `set_global_default` can only be called once per
-			// process. We stash the buffer first so the layer can
-			// always find it, then install the subscriber.
-			let layer = GlobalAuditLayer;
-			let subscriber = tracing_subscriber::registry().with(layer);
-			tracing::dispatcher::set_global_default(Dispatch::new(subscriber))
-				.expect("audit subscriber must install once per test binary");
-			buffer
-		})
-		.clone();
+	let buffer = Arc::clone(AUDIT_BUFFER.get_or_init(|| {
+		use tracing::dispatcher::Dispatch;
+		use tracing_subscriber::layer::SubscriberExt;
+		let buffer: Arc<Mutex<Vec<CapturedEvent>>> = Arc::new(Mutex::new(Vec::new()));
+		// `set_global_default` can only be called once per
+		// process. We stash the buffer first so the layer can
+		// always find it, then install the subscriber.
+		let layer = GlobalAuditLayer;
+		let subscriber = tracing_subscriber::registry().with(layer);
+		tracing::dispatcher::set_global_default(Dispatch::new(subscriber))
+			.expect("audit subscriber must install once per test binary");
+		buffer
+	}));
 	let guard = AUDIT_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 	buffer.lock().expect("audit buffer mutex").clear();
 	AuditCapture {

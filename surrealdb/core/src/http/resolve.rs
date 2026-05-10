@@ -23,7 +23,7 @@ impl FilteringResolver {
 
 impl Resolve for FilteringResolver {
 	fn resolve(&self, name: Name) -> Resolving {
-		let filter = self.filter.clone();
+		let filter = Arc::clone(&self.filter);
 		let name_str = name.as_str().to_string();
 		Box::pin(async move {
 			// Check the domain name (if any) matches the allowlist

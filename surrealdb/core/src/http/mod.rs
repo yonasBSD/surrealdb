@@ -58,7 +58,7 @@ impl HttpClient {
 			deny,
 		});
 
-		let filter_clone = filter.clone();
+		let filter_clone = Arc::clone(&filter);
 		let max_redirects = config.max_http_redirects;
 		let redirect_function = move |attempt: Attempt| {
 			if attempt.previous().len() >= max_redirects {

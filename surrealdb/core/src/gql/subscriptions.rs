@@ -116,7 +116,7 @@ fn make_table_subscription_field(
 
 	SubscriptionField::new(tb_name_str.clone(), TypeRef::named(&tb_name_str), move |ctx| {
 		let tb_name = tb_name.clone();
-		let fds = fds.clone();
+		let fds = Arc::clone(&fds);
 		let selectable_fields = selectable_fields.clone();
 		SubscriptionFieldFuture::new(async move {
 			let ds = ctx.data::<Arc<Datastore>>()?;
@@ -135,7 +135,8 @@ fn make_table_subscription_field(
 			let live_id =
 				start_table_live_query(ds, &live_sess, &tb_name, fields, cond, fetch).await?;
 			let mut receiver = router.subscribe(live_id);
-			let cleanup = LiveQueryCleanup::new(ds.clone(), live_sess, live_id, router.clone());
+			let cleanup =
+				LiveQueryCleanup::new(Arc::clone(ds), live_sess, live_id, Arc::clone(router));
 
 			Ok(try_stream! {
 				let _cleanup = cleanup;
@@ -393,7 +394,7 @@ impl Drop for LiveQueryCleanup {
 		let Ok(handle) = tokio::runtime::Handle::try_current() else {
 			return;
 		};
-		let ds = self.ds.clone();
+		let ds = Arc::clone(&self.ds);
 		let sess = self.sess.clone();
 		let live_id = self.live_id;
 		handle.spawn(async move {

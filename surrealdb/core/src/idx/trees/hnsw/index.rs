@@ -581,7 +581,7 @@ impl HnswIndex {
 			if let Some(cache) = &cache
 				&& let Some(Some((rid, record))) = cache.get(&id)
 			{
-				res_by_pos[pos] = Some((rid.clone(), dist, Some(record.clone())));
+				res_by_pos[pos] = Some((Arc::clone(rid), dist, Some(Arc::clone(record))));
 				continue;
 			}
 			// Otherwise we get it from the state

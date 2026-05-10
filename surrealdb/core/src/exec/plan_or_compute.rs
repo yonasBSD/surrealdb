@@ -7,6 +7,8 @@
 //!
 //! This module centralises that logic so each operator does not need its own copy.
 
+use std::sync::Arc;
+
 use futures::StreamExt;
 use reblessive::tree::TreeStack;
 
@@ -34,7 +36,7 @@ pub(crate) fn get_legacy_context(
 	let options = exec_ctx
 		.options()
 		.ok_or_else(|| Error::Thrown("Options not available for legacy compute fallback".into()))?;
-	Ok((options, exec_ctx.ctx().clone()))
+	Ok((options, Arc::clone(exec_ctx.ctx())))
 }
 
 /// Extract the `Options` and `FrozenContext` for legacy fallback, adding a loop
@@ -117,7 +119,7 @@ pub(crate) async fn evaluate_body_expr(
 	param_name: &str,
 	param_value: &Value,
 ) -> crate::expr::FlowResult<Value> {
-	let frozen_ctx = ctx.ctx().clone();
+	let frozen_ctx = Arc::clone(ctx.ctx());
 
 	match try_plan_expr!(expr, &frozen_ctx, ctx.txn()) {
 		Ok(plan) => {

@@ -288,7 +288,7 @@ impl Document {
 				let mut field = FieldEditContext {
 					context: None,
 					doc: self,
-					rid: rid.clone(),
+					rid: Arc::clone(&rid),
 					def: fd,
 					stk,
 					ctx,
@@ -378,7 +378,7 @@ impl Document {
 				let mut field = FieldEditContext {
 					context: None,
 					doc: self,
-					rid: rid.clone(),
+					rid: Arc::clone(&rid),
 					def: fd,
 					stk,
 					ctx,
@@ -431,7 +431,7 @@ impl Document {
 				let mut field = FieldEditContext {
 					context: None,
 					doc: self,
-					rid: rid.clone(),
+					rid: Arc::clone(&rid),
 					def: fd,
 					stk,
 					ctx,
@@ -553,15 +553,15 @@ impl FieldEditContext<'_> {
 			// Configure the context
 			let ctx = match self.context.take() {
 				Some(mut ctx) => {
-					ctx.add_value("after", now.clone());
+					ctx.add_value("after", Arc::clone(&now));
 					ctx.add_value("value", now);
 					ctx
 				}
 				None => {
 					let mut ctx = Context::new_child(self.ctx);
-					ctx.add_value("before", self.old.clone());
-					ctx.add_value("input", self.user_input.clone());
-					ctx.add_value("after", now.clone());
+					ctx.add_value("before", Arc::clone(&self.old));
+					ctx.add_value("input", Arc::clone(&self.user_input));
+					ctx.add_value("after", Arc::clone(&now));
 					ctx.add_value("value", now);
 					ctx
 				}
@@ -590,15 +590,15 @@ impl FieldEditContext<'_> {
 			// Configure the context
 			let ctx = match self.context.take() {
 				Some(mut ctx) => {
-					ctx.add_value("after", now.clone());
+					ctx.add_value("after", Arc::clone(&now));
 					ctx.add_value("value", now);
 					ctx
 				}
 				None => {
 					let mut ctx = Context::new_child(self.ctx);
-					ctx.add_value("before", self.old.clone());
-					ctx.add_value("input", self.user_input.clone());
-					ctx.add_value("after", now.clone());
+					ctx.add_value("before", Arc::clone(&self.old));
+					ctx.add_value("input", Arc::clone(&self.user_input));
+					ctx.add_value("after", Arc::clone(&now));
 					ctx.add_value("value", now);
 					ctx
 				}
@@ -633,16 +633,16 @@ impl FieldEditContext<'_> {
 			// Configure the context
 			let ctx = match self.context.take() {
 				Some(mut ctx) => {
-					ctx.add_value("after", now.clone());
-					ctx.add_value("value", now.clone());
+					ctx.add_value("after", Arc::clone(&now));
+					ctx.add_value("value", Arc::clone(&now));
 					ctx
 				}
 				None => {
 					let mut ctx = Context::new_child(self.ctx);
-					ctx.add_value("before", self.old.clone());
-					ctx.add_value("input", self.user_input.clone());
-					ctx.add_value("after", now.clone());
-					ctx.add_value("value", now.clone());
+					ctx.add_value("before", Arc::clone(&self.old));
+					ctx.add_value("input", Arc::clone(&self.user_input));
+					ctx.add_value("after", Arc::clone(&now));
+					ctx.add_value("value", Arc::clone(&now));
 					ctx
 				}
 			};
@@ -708,15 +708,15 @@ impl FieldEditContext<'_> {
 					// Configure the context
 					let ctx = match self.context.take() {
 						Some(mut ctx) => {
-							ctx.add_value("after", now.clone());
+							ctx.add_value("after", Arc::clone(&now));
 							ctx.add_value("value", now);
 							ctx
 						}
 						None => {
 							let mut ctx = Context::new_child(self.ctx);
-							ctx.add_value("before", self.old.clone());
-							ctx.add_value("input", self.user_input.clone());
-							ctx.add_value("after", now.clone());
+							ctx.add_value("before", Arc::clone(&self.old));
+							ctx.add_value("input", Arc::clone(&self.user_input));
+							ctx.add_value("after", Arc::clone(&now));
 							ctx.add_value("value", now);
 							ctx
 						}

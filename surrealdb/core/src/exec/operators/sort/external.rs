@@ -232,7 +232,7 @@ impl ExecOperator for ExternalSort {
 			let sort_dir = dir.path().join("sort");
 
 			// Perform external sort
-			let order_by_clone = order_by.clone();
+			let order_by_clone = Arc::clone(&order_by);
 			let sorted = spawn_blocking(move || {
 				fs::create_dir(&sort_dir)?;
 

@@ -263,7 +263,7 @@ pub async fn process_mutations(
 			tb_name,
 			is_relation,
 			fds,
-			kvs: schema_ctx.datastore.clone(),
+			kvs: Arc::clone(schema_ctx.datastore),
 		};
 
 		// --- Single-record mutations ---
@@ -287,8 +287,8 @@ pub async fn process_mutations(
 // ---------------------------------------------------------------------------
 
 fn add_create_field(mutation: Object, tc: &MutationTableContext, input_name: &str) -> Object {
-	let fds = tc.fds.clone();
-	let kvs = tc.kvs.clone();
+	let fds = Arc::clone(&tc.fds);
+	let kvs = Arc::clone(&tc.kvs);
 	let tb_name = tc.tb_name.clone();
 	let is_relation = tc.is_relation;
 	mutation.field(
@@ -296,8 +296,8 @@ fn add_create_field(mutation: Object, tc: &MutationTableContext, input_name: &st
 			format!("create{}", tc.cap_name),
 			TypeRef::named(tc.tb_name_str.as_str()),
 			move |ctx| {
-				let fds = fds.clone();
-				let kvs = kvs.clone();
+				let fds = Arc::clone(&fds);
+				let kvs = Arc::clone(&kvs);
 				let tb_name = tb_name.clone();
 				FieldFuture::new(async move {
 					let sess = ctx.data::<Arc<Session>>()?;
@@ -319,16 +319,16 @@ fn add_create_field(mutation: Object, tc: &MutationTableContext, input_name: &st
 }
 
 fn add_update_field(mutation: Object, tc: &MutationTableContext, input_name: &str) -> Object {
-	let fds = tc.fds.clone();
-	let kvs = tc.kvs.clone();
+	let fds = Arc::clone(&tc.fds);
+	let kvs = Arc::clone(&tc.kvs);
 	let tb_name = tc.tb_name.clone();
 	mutation.field(
 		Field::new(
 			format!("update{}", tc.cap_name),
 			TypeRef::named(tc.tb_name_str.as_str()),
 			move |ctx| {
-				let fds = fds.clone();
-				let kvs = kvs.clone();
+				let fds = Arc::clone(&fds);
+				let kvs = Arc::clone(&kvs);
 				let tb_name = tb_name.clone();
 				FieldFuture::new(async move {
 					let sess = ctx.data::<Arc<Session>>()?;
@@ -372,16 +372,16 @@ fn add_update_field(mutation: Object, tc: &MutationTableContext, input_name: &st
 }
 
 fn add_upsert_field(mutation: Object, tc: &MutationTableContext, input_name: &str) -> Object {
-	let fds = tc.fds.clone();
-	let kvs = tc.kvs.clone();
+	let fds = Arc::clone(&tc.fds);
+	let kvs = Arc::clone(&tc.kvs);
 	let tb_name = tc.tb_name.clone();
 	mutation.field(
 		Field::new(
 			format!("upsert{}", tc.cap_name),
 			TypeRef::named(tc.tb_name_str.as_str()),
 			move |ctx| {
-				let fds = fds.clone();
-				let kvs = kvs.clone();
+				let fds = Arc::clone(&fds);
+				let kvs = Arc::clone(&kvs);
 				let tb_name = tb_name.clone();
 				FieldFuture::new(async move {
 					let sess = ctx.data::<Arc<Session>>()?;
@@ -425,14 +425,14 @@ fn add_upsert_field(mutation: Object, tc: &MutationTableContext, input_name: &st
 }
 
 fn add_delete_field(mutation: Object, tc: &MutationTableContext) -> Object {
-	let kvs = tc.kvs.clone();
+	let kvs = Arc::clone(&tc.kvs);
 	let tb_name = tc.tb_name.clone();
 	mutation.field(
 		Field::new(
 			format!("delete{}", tc.cap_name),
 			TypeRef::named_nn(TypeRef::BOOLEAN),
 			move |ctx| {
-				let kvs = kvs.clone();
+				let kvs = Arc::clone(&kvs);
 				let tb_name = tb_name.clone();
 				FieldFuture::new(async move {
 					let sess = ctx.data::<Arc<Session>>()?;
@@ -469,8 +469,8 @@ fn add_delete_field(mutation: Object, tc: &MutationTableContext) -> Object {
 // ---------------------------------------------------------------------------
 
 fn add_create_many_field(mutation: Object, tc: &MutationTableContext, input_name: &str) -> Object {
-	let fds = tc.fds.clone();
-	let kvs = tc.kvs.clone();
+	let fds = Arc::clone(&tc.fds);
+	let kvs = Arc::clone(&tc.kvs);
 	let tb_name = tc.tb_name.clone();
 	let is_relation = tc.is_relation;
 	mutation.field(
@@ -478,8 +478,8 @@ fn add_create_many_field(mutation: Object, tc: &MutationTableContext, input_name
 			format!("createMany{}", tc.cap_name),
 			TypeRef::named_nn_list_nn(tc.tb_name_str.as_str()),
 			move |ctx| {
-				let fds = fds.clone();
-				let kvs = kvs.clone();
+				let fds = Arc::clone(&fds);
+				let kvs = Arc::clone(&kvs);
 				let tb_name = tb_name.clone();
 				FieldFuture::new(async move {
 					let sess = ctx.data::<Arc<Session>>()?;
@@ -526,16 +526,16 @@ fn add_create_many_field(mutation: Object, tc: &MutationTableContext, input_name
 }
 
 fn add_update_many_field(mutation: Object, tc: &MutationTableContext, input_name: &str) -> Object {
-	let fds = tc.fds.clone();
-	let kvs = tc.kvs.clone();
+	let fds = Arc::clone(&tc.fds);
+	let kvs = Arc::clone(&tc.kvs);
 	let tb_name = tc.tb_name.clone();
 	mutation.field(
 		Field::new(
 			format!("updateMany{}", tc.cap_name),
 			TypeRef::named_nn_list_nn(tc.tb_name_str.as_str()),
 			move |ctx| {
-				let fds = fds.clone();
-				let kvs = kvs.clone();
+				let fds = Arc::clone(&fds);
+				let kvs = Arc::clone(&kvs);
 				let tb_name = tb_name.clone();
 				FieldFuture::new(async move {
 					let sess = ctx.data::<Arc<Session>>()?;
@@ -578,16 +578,16 @@ fn add_update_many_field(mutation: Object, tc: &MutationTableContext, input_name
 }
 
 fn add_upsert_many_field(mutation: Object, tc: &MutationTableContext, input_name: &str) -> Object {
-	let fds = tc.fds.clone();
-	let kvs = tc.kvs.clone();
+	let fds = Arc::clone(&tc.fds);
+	let kvs = Arc::clone(&tc.kvs);
 	let tb_name = tc.tb_name.clone();
 	mutation.field(
 		Field::new(
 			format!("upsertMany{}", tc.cap_name),
 			TypeRef::named_nn_list_nn(tc.tb_name_str.as_str()),
 			move |ctx| {
-				let fds = fds.clone();
-				let kvs = kvs.clone();
+				let fds = Arc::clone(&fds);
+				let kvs = Arc::clone(&kvs);
 				let tb_name = tb_name.clone();
 				FieldFuture::new(async move {
 					let sess = ctx.data::<Arc<Session>>()?;
@@ -630,16 +630,16 @@ fn add_upsert_many_field(mutation: Object, tc: &MutationTableContext, input_name
 }
 
 fn add_delete_many_field(mutation: Object, tc: &MutationTableContext) -> Object {
-	let fds = tc.fds.clone();
-	let kvs = tc.kvs.clone();
+	let fds = Arc::clone(&tc.fds);
+	let kvs = Arc::clone(&tc.kvs);
 	let tb_name = tc.tb_name.clone();
 	mutation.field(
 		Field::new(
 			format!("deleteMany{}", tc.cap_name),
 			TypeRef::named_nn(TypeRef::INT),
 			move |ctx| {
-				let fds = fds.clone();
-				let kvs = kvs.clone();
+				let fds = Arc::clone(&fds);
+				let kvs = Arc::clone(&kvs);
 				let tb_name = tb_name.clone();
 				FieldFuture::new(async move {
 					let sess = ctx.data::<Arc<Session>>()?;

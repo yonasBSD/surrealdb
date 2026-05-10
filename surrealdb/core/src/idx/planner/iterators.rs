@@ -476,10 +476,10 @@ impl IndexRangeThingIterator {
 		for (op, v) in ranges {
 			let key = storekey::encode_vec(v.as_ref()).map_err(|_| Error::Unencodable)?;
 			match op {
-				BinaryOperator::LessThan => to.push((key, false, v.clone())),
-				BinaryOperator::LessThanEqual => to.push((key, true, v.clone())),
-				BinaryOperator::MoreThan => from.push((key, true, v.clone())),
-				BinaryOperator::MoreThanEqual => from.push((key, false, v.clone())),
+				BinaryOperator::LessThan => to.push((key, false, Arc::clone(v))),
+				BinaryOperator::LessThanEqual => to.push((key, true, Arc::clone(v))),
+				BinaryOperator::MoreThan => from.push((key, true, Arc::clone(v))),
+				BinaryOperator::MoreThanEqual => from.push((key, false, Arc::clone(v))),
 				_ => {
 					bail!(Error::Unreachable(format!(
 						"Invalid operator for range extraction {}",
@@ -2046,7 +2046,7 @@ mod tests {
 			IndexCountThingIterator::new(ikb.ns(), ikb.db(), ikb.table(), ikb.index()).unwrap();
 		let tx = Arc::new(ds.transaction(Read, Optimistic).await.unwrap());
 		let mut ctx = ds.setup_ctx().unwrap();
-		ctx.set_transaction(tx.clone());
+		ctx.set_transaction(Arc::clone(&tx));
 		let ctx = ctx.freeze();
 		let count = count_iter.next_count(&ctx, &ctx.tx(), u32::MAX).await.unwrap();
 		tx.cancel().await.unwrap();

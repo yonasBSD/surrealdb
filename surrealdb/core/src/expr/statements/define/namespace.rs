@@ -44,7 +44,7 @@ impl DefineNamespaceStatement {
 		doc: Option<&CursorDoc>,
 	) -> Result<Value> {
 		// Allowed to run?
-		ctx.is_allowed(opt, Action::Edit, ResourceKind::Namespace, &Base::Root)?;
+		ctx.is_allowed(opt, Action::Edit, ResourceKind::Namespace, Base::Root)?;
 		// Fetch the transaction
 		let txn = ctx.tx();
 		// Process the name

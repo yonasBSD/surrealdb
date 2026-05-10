@@ -1252,7 +1252,7 @@ mod tests {
 			let mut stack = reblessive::TreeStack::new();
 
 			let opts = Options::new(&CommonConfig::default());
-			let stk_ctx = ctx.clone();
+			let stk_ctx = Arc::clone(&ctx);
 			let az = stack
 				.enter(|stk| async move {
 					Arc::new(
@@ -1325,7 +1325,7 @@ mod tests {
 		async fn remove_insert_task(&self, stk: &mut Stk, rid: &RecordId) {
 			let mut ctx = Context::new_child(&self.ctx);
 			let tx = self.new_tx(TransactionType::Write).await;
-			ctx.set_transaction(tx.clone());
+			ctx.set_transaction(Arc::clone(&tx));
 			let ctx = ctx.freeze();
 
 			let mut require_compaction = false;
@@ -1454,11 +1454,13 @@ mod tests {
 
 		let test = TestContext::new().await;
 		// Ensure the documents are pre-existing
-		concurrent_doc_update(test.clone(), doc1.clone(), 1).await;
-		concurrent_doc_update(test.clone(), doc2.clone(), 1).await;
+		concurrent_doc_update(test.clone(), Arc::clone(&doc1), 1).await;
+		concurrent_doc_update(test.clone(), Arc::clone(&doc2), 1).await;
 		// Prepare the concurrent tasks
-		let task1 = tokio::spawn(concurrent_doc_update(test.clone(), doc1.clone(), usize::MAX));
-		let task2 = tokio::spawn(concurrent_doc_update(test.clone(), doc2.clone(), usize::MAX));
+		let task1 =
+			tokio::spawn(concurrent_doc_update(test.clone(), Arc::clone(&doc1), usize::MAX));
+		let task2 =
+			tokio::spawn(concurrent_doc_update(test.clone(), Arc::clone(&doc2), usize::MAX));
 		let task3 = tokio::spawn(compaction(test.clone()));
 		let task4 = tokio::spawn(concurrent_search(test.clone(), vec![doc1, doc2]));
 		let _ = tokio::try_join!(task1, task2, task3, task4).expect("Tasks failed");
@@ -1494,7 +1496,7 @@ mod tests {
 			async move {
 				let mut ctx = Context::new_child(&test.ctx);
 				let tx = test.new_tx(TransactionType::Read).await;
-				ctx.set_transaction(tx.clone());
+				ctx.set_transaction(Arc::clone(&tx));
 				(ctx.freeze(), tx)
 			}
 		};
@@ -1656,7 +1658,7 @@ mod tests {
 
 		let tx = test.new_tx(TransactionType::Read).await;
 		let mut ctx = Context::new_child(&test.ctx);
-		ctx.set_transaction(tx.clone());
+		ctx.set_transaction(Arc::clone(&tx));
 		let ctx = ctx.freeze();
 		let mut stack = reblessive::TreeStack::new();
 		let qt = stack
@@ -1685,7 +1687,7 @@ mod tests {
 		let tx = test.new_tx(TransactionType::Read).await;
 		assert_eq!(test.tt_delta_count(&tx).await, 0);
 		let mut ctx = Context::new_child(&test.ctx);
-		ctx.set_transaction(tx.clone());
+		ctx.set_transaction(Arc::clone(&tx));
 		let ctx = ctx.freeze();
 		let mut stack = reblessive::TreeStack::new();
 		let qt = stack

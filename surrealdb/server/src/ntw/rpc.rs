@@ -126,7 +126,7 @@ async fn get_handler(
 		})
 		// Handle the WebSocket upgrade and process messages
 		.on_upgrade(move |socket| {
-			handle_socket(state.datastore.clone(), rpc_state, socket, session, id)
+			handle_socket(Arc::clone(&state.datastore), rpc_state, socket, session, id)
 		}))
 }
 
@@ -185,7 +185,7 @@ async fn post_handler(
 	// `SurrealAuth` middleware from Basic/Bearer headers on THIS request)
 	// is compared to the target session's stored principal to prevent
 	// session hijack across callers - see `Http::verify_caller_for_session`.
-	let caller_au: Arc<Auth> = session.au.clone();
+	let caller_au: Arc<Auth> = Arc::clone(&session.au);
 	// Isolate this request's session under a unique key to prevent
 	// concurrent requests from racing on a shared session slot.
 	let request_session_id = Uuid::new_v4();

@@ -143,7 +143,7 @@ impl CommitCoordinator {
 		});
 		// Create a new commit batcher
 		let batcher = CommitBatcher {
-			shared: shared.clone(),
+			shared: Arc::clone(&shared),
 			db,
 			wait_threshold,
 			max_batch_size,
