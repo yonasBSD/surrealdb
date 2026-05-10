@@ -750,6 +750,7 @@ pub async fn init<C: TransactionBuilderFactory + BucketStoreProvider>(
 		default_namespace,
 		default_database,
 		no_defaults,
+		#[cfg_attr(not(feature = "surrealism"), allow(unused_variables))]
 		lazy_surrealism,
 	}: StartCommandDbsOptions,
 ) -> Result<(Datastore, Receiver<Notification>, C::RouterState)> {

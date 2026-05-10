@@ -53,6 +53,7 @@ arbitrary = [
     "geo-types/arbitrary",
     "uuid/arbitrary",
     "surrealdb-types/arbitrary",
+    "surrealdb-strand/arbitrary",
 ]
 allocation-tracking = []
 trace-doc-ops = []
