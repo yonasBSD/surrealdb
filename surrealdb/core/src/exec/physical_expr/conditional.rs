@@ -24,6 +24,10 @@ impl PhysicalExpr for IfElseExpr {
 		"IfElse"
 	}
 
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+
 	fn required_context(&self) -> crate::exec::ContextLevel {
 		use crate::exec::ContextLevel;
 

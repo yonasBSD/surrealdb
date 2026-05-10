@@ -1290,7 +1290,7 @@ pub(crate) async fn expr_to_physical_expr(
 /// and produce a boolean result. Operators that produce non-boolean results (arithmetic,
 /// ranges), require short-circuit logic (And, Or, NullCoalescing), or need special index
 /// context (Matches, NearestNeighbor) are excluded.
-fn is_simple_binary_eligible(op: &crate::expr::operator::BinaryOperator) -> bool {
+pub(crate) fn is_simple_binary_eligible(op: &crate::expr::operator::BinaryOperator) -> bool {
 	use crate::expr::operator::BinaryOperator;
 	matches!(
 		op,

@@ -23,6 +23,10 @@ impl PhysicalExpr for IndexPart {
 		"Index"
 	}
 
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+
 	fn required_context(&self) -> ContextLevel {
 		self.expr.required_context()
 	}

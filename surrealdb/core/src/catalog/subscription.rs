@@ -14,7 +14,7 @@ use crate::val::{TableName, Value};
 
 #[revisioned(revision = 1)]
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub enum SubscriptionFields {
+pub(crate) enum SubscriptionFields {
 	Diff,
 	Select(Fields),
 }

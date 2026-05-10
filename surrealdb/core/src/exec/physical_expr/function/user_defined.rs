@@ -35,6 +35,10 @@ impl PhysicalExpr for UserDefinedFunctionExec {
 		"UserDefinedFunction"
 	}
 
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+
 	fn required_context(&self) -> crate::exec::ContextLevel {
 		// User-defined functions are stored in the database, and arguments
 		// may have their own context requirements

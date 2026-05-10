@@ -26,6 +26,10 @@ impl PhysicalExpr for WherePart {
 		"Where"
 	}
 
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+
 	fn required_context(&self) -> ContextLevel {
 		self.predicate.required_context()
 	}

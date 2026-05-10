@@ -39,6 +39,10 @@ impl PhysicalExpr for MethodPart {
 		"Method"
 	}
 
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+
 	fn required_context(&self) -> ContextLevel {
 		self.args.iter().map(|a| a.required_context()).max().unwrap_or(ContextLevel::Root)
 	}
@@ -127,6 +131,10 @@ pub struct ClosureFieldCallPart {
 impl PhysicalExpr for ClosureFieldCallPart {
 	fn name(&self) -> &'static str {
 		"ClosureFieldCall"
+	}
+
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
 	}
 
 	fn required_context(&self) -> ContextLevel {

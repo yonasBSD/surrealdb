@@ -67,7 +67,7 @@ features = ["kv-mem", "kv-rocksdb", "http", "scripting", "graphql"]
 targets = []
 
 [dependencies]
-surrealdb-strand.workspace = true
+surrealdb-strand = { workspace = true }
 
 # External surreal crates
 surrealmx = { workspace = true, optional = true }
@@ -90,10 +90,10 @@ js = { workspace = true, features = [
 ], optional = true }
 lexicmp.workspace = true
 reblessive = { workspace = true, features = ["tree"] }
-revision.workspace = true
+revision = { workspace = true }
 storekey.workspace = true
 surrealdb-types = { workspace = true }
-surrealdb-collections.workspace = true
+surrealdb-collections = { workspace = true }
 vart.workspace = true
 
 # External KV stores
@@ -131,6 +131,7 @@ hex.workspace = true
 humantime.workspace = true
 ipnet.workspace = true
 md-5.workspace = true
+memchr.workspace = true
 ndarray.workspace = true
 ndarray-stats.workspace = true
 num_cpus.workspace = true

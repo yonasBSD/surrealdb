@@ -73,7 +73,7 @@ affinitypool = "0.4.0"
 dmp = "0.2.3"
 indxdb = "0.12.0"
 lexicmp = "0.2.0"
-revision = { version = "0.17.0", features = [
+revision = { version = "0.20.0", features = [
     "bytes",
     "chrono",
     "geo",
@@ -83,6 +83,7 @@ revision = { version = "0.17.0", features = [
     "specialised-vectors",
     "uuid",
 ] }
+
 storekey = { version = "0.11.0", features = ["bytes", "uuid"] }
 surrealkv = "0.21.1"
 surrealmx = "0.18.0"
@@ -102,11 +103,8 @@ ahash = "0.8.12"
 ammonia = "4.1.2"
 anyhow = "1.0.102"
 arbitrary = "1.4.2"
-arc-swap = "1.9.1"
 argon2 = "0.5.3"
-arrayvec = "0.7.6"
 async-channel = "2.5.0"
-async-executor = "1.14.0"
 async-stream = "0.3.6"
 async-graphql = { version = "7.2.1", default-features = false, features = ["custom-error-conversion"] }
 async-graphql-axum = "7.2.1"
@@ -150,6 +148,7 @@ jemallocator = { version = "0.6.1", package = "tikv-jemallocator" }
 jsonwebtoken = { version = "10.3.0", default-features = false, features = ["use_pem"] }
 logos = "0.16.1" # TODO: pin version
 md-5 = "0.10.6"
+memchr = "2.8.0"
 mimalloc = "0.1.49"
 native-tls = "0.2.18"
 ndarray = "0.17.2"
@@ -508,6 +507,8 @@ strip = false
 
 [profile.make]
 inherits = "dev"
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
 
 [profile.profiling]
 debug = true

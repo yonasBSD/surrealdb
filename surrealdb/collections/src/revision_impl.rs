@@ -92,6 +92,63 @@ impl<T: Revisioned + Eq + Ord> Revisioned for VecSet<T> {
 	}
 }
 
+impl<K, V> revision::SkipRevisioned for VecMap<K, V>
+where
+	K: revision::DeserializeRevisioned + revision::SkipRevisioned + revision::Revisioned + Ord,
+	V: revision::DeserializeRevisioned + revision::SkipRevisioned + revision::Revisioned,
+{
+	fn skip_revisioned<R: std::io::Read>(reader: &mut R) -> Result<(), revision::Error> {
+		let len = usize::deserialize_revisioned(reader)?;
+		for _ in 0..len {
+			K::skip_revisioned(reader)?;
+			V::skip_revisioned(reader)?;
+		}
+		Ok(())
+	}
+}
+
+impl<T> revision::SkipRevisioned for VecSet<T>
+where
+	T: revision::DeserializeRevisioned + revision::SkipRevisioned + revision::Revisioned + Ord,
+{
+	fn skip_revisioned<R: std::io::Read>(reader: &mut R) -> Result<(), revision::Error> {
+		let len = usize::deserialize_revisioned(reader)?;
+		for _ in 0..len {
+			T::skip_revisioned(reader)?;
+		}
+		Ok(())
+	}
+}
+
+// VecMap/VecSet share their wire format with BTreeMap/BTreeSet: a
+// length-prefixed run of strictly ascending entries. Walking is therefore
+// identical to the generic MapWalker / SeqWalker.
+impl<K, V> revision::WalkRevisioned for VecMap<K, V>
+where
+	K: revision::Revisioned + Ord,
+	V: revision::Revisioned,
+{
+	type Walker<'r, R: std::io::Read + 'r> = revision::MapWalker<'r, K, V, R>;
+
+	fn walk_revisioned<'r, R: std::io::Read>(
+		reader: &'r mut R,
+	) -> Result<Self::Walker<'r, R>, revision::Error> {
+		revision::MapWalker::new(reader)
+	}
+}
+
+impl<T> revision::WalkRevisioned for VecSet<T>
+where
+	T: revision::Revisioned + Eq + Ord + 'static,
+{
+	type Walker<'r, R: std::io::Read + 'r> = revision::SeqWalker<'r, T, R>;
+
+	fn walk_revisioned<'r, R: std::io::Read>(
+		reader: &'r mut R,
+	) -> Result<Self::Walker<'r, R>, revision::Error> {
+		revision::SeqWalker::new(reader)
+	}
+}
 #[cfg(test)]
 mod tests {
 	//! Wire-format equivalence tests with [`BTreeMap`] / [`BTreeSet`].

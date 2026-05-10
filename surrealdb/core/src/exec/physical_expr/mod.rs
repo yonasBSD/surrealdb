@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -258,7 +259,7 @@ impl<'a> EvalContext<'a> {
 
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
-pub trait PhysicalExpr: ToSql + SendSyncRequirement + Debug {
+pub trait PhysicalExpr: ToSql + SendSyncRequirement + Debug + 'static {
 	fn name(&self) -> &'static str;
 
 	/// The minimum context level required to evaluate this expression.
@@ -372,25 +373,14 @@ pub trait PhysicalExpr: ToSql + SendSyncRequirement + Debug {
 		None
 	}
 
-	/// Try to evaluate this expression synchronously.
-	///
-	/// Returns `Some(result)` if the expression can be evaluated without any
-	/// async work. Returns `None` if async evaluation is needed (subqueries,
-	/// I/O, etc.).
-	///
-	/// The default returns `None`, falling through to async `evaluate`.
-	/// Override for purely synchronous expressions like literals, field access,
-	/// and comparisons between sync operands.
-	fn try_evaluate_sync(&self, _ctx: &EvalContext<'_>) -> Option<FlowResult<Value>> {
-		None
-	}
+	/// Borrow as [`Any`] for downcasting to a concrete expression type.
+	fn as_any(&self) -> &dyn Any;
+}
 
-	/// Whether this expression is always synchronous.
-	///
-	/// Used by batch operations to choose between sync and async code paths.
-	/// Default: `false` (conservative — assume async is needed).
-	fn is_sync(&self) -> bool {
-		false
+impl dyn PhysicalExpr {
+	/// Downcast a [`PhysicalExpr`] trait object to a concrete implementation.
+	pub(crate) fn downcast_ref<T: PhysicalExpr>(&self) -> Option<&T> {
+		self.as_any().downcast_ref::<T>()
 	}
 }
 

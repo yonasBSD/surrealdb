@@ -21,6 +21,7 @@ use crate::exec::planner::util::{
 	SELECT_ITERATION_PARAMS, fold_condition_expressions, index_covers_ordering,
 	resolve_condition_params, resolve_projection_field_idioms, strip_knn_from_condition,
 };
+use crate::exec::pre_decode_filter::{PreDecodeFilterStatus, pre_decode_filter_for_execute};
 use crate::exec::{
 	AccessMode, ContextLevel, EvalContext, ExecOperator, ExecutionContext, FlowResult,
 	OperatorMetrics, PhysicalExpr, ValueBatch, ValueBatchStream, monitor_stream,
@@ -77,6 +78,8 @@ pub struct DynamicScan {
 	/// KNN distance context, shared with IndexFunctionExec for vector::distance::knn().
 	/// Populated by KnnScan during execution.
 	pub(crate) knn_context: Option<Arc<crate::exec::function::KnnContext>>,
+	/// Predicate pre-decode filter status (plan-time); see [`PreDecodeFilterStatus`].
+	pub(crate) pre_decode_filter_status: PreDecodeFilterStatus,
 }
 
 impl DynamicScan {
@@ -105,7 +108,14 @@ impl DynamicScan {
 			start,
 			metrics: Arc::new(OperatorMetrics::new()),
 			knn_context: None,
+			pre_decode_filter_status: PreDecodeFilterStatus::NotApplicable,
 		}
+	}
+
+	/// Set plan-time pre-decode filter status for EXPLAIN and execution.
+	pub(crate) fn with_pre_decode_filter(mut self, status: PreDecodeFilterStatus) -> Self {
+		self.pre_decode_filter_status = status;
+		self
 	}
 
 	/// Set the KNN context for distance propagation.
@@ -135,6 +145,9 @@ impl ExecOperator for DynamicScan {
 		}
 		if let Some(ref start) = self.start {
 			attrs.push(("offset".to_string(), start.to_sql()));
+		}
+		if let Some(s) = self.pre_decode_filter_status.explain_text() {
+			attrs.push(("pre_decode_filter".to_string(), s));
 		}
 		attrs
 	}
@@ -217,6 +230,7 @@ impl ExecOperator for DynamicScan {
 		let limit_expr = self.limit.clone();
 		let start_expr = self.start.clone();
 		let knn_context = self.knn_context.clone();
+		let pre_decode_filter_status = self.pre_decode_filter_status.clone();
 		let ctx = ctx.clone();
 
 		let stream = async_stream::try_stream! {
@@ -276,6 +290,7 @@ impl ExecOperator for DynamicScan {
 				let results = super::record_id::execute_record_lookup(
 					&rid, version, check_perms, needed_fields.as_ref(), &ctx,
 					predicate.as_ref(), limit_val, start_val, None,
+					&pre_decode_filter_status,
 				).await?;
 
 				if !results.is_empty() {
@@ -449,6 +464,12 @@ impl ExecOperator for DynamicScan {
 			// Create the source stream based on scan type.
 			// `applied_pre_skip` tracks how many rows the source will skip
 			// before decoding, so the pipeline can adjust its start accordingly.
+			let pre_decode_filter = pre_decode_filter_for_execute(
+				&pre_decode_filter_status,
+				&field_state,
+				check_perms,
+			);
+
 			let (mut source, applied_pre_skip) = {
 				// Table scan (with runtime index selection)
 				resolve_table_scan_stream(
@@ -461,11 +482,12 @@ impl ExecOperator for DynamicScan {
 						with,
 						direction,
 						version,
-					storage_limit: effective_storage_limit,
-					pre_skip,
-					has_pushed_limit: effective_storage_limit.is_some(),
-					limit_hint: limit_val.map(|l| (l + start_val).min(u32::MAX as usize) as u32),
-					knn_context: knn_context.clone(),
+						storage_limit: effective_storage_limit,
+						pre_skip,
+						has_pushed_limit: effective_storage_limit.is_some(),
+						limit_hint: limit_val.map(|l| (l + start_val).min(u32::MAX as usize) as u32),
+						knn_context: knn_context.clone(),
+						pre_decode_filter,
 					},
 				).await?
 			};
@@ -528,6 +550,8 @@ struct TableScanConfig {
 	limit_hint: Option<u32>,
 	/// KNN distance context for vector::distance::knn() support.
 	knn_context: Option<Arc<crate::exec::function::KnnContext>>,
+	/// Optional structural WHERE pre-decode filter for raw KV table scans.
+	pre_decode_filter: Option<Arc<crate::exec::pre_decode_filter::PreDecodeFilter>>,
 }
 
 /// Resolve the optimal access path for a table scan and return the source
@@ -632,6 +656,7 @@ async fn resolve_table_scan_stream(
 				None,
 				cfg.version,
 				None,
+				None,
 			);
 			let stream = operator.execute(ctx)?;
 			Ok((stream, 0))
@@ -703,6 +728,7 @@ async fn resolve_table_scan_stream(
 				cfg.pre_skip,
 				prefetch,
 				cfg.limit_hint,
+				cfg.pre_decode_filter.clone(),
 			);
 			Ok((stream, cfg.pre_skip))
 		}
@@ -733,6 +759,7 @@ fn create_index_operator(
 			None,
 			None,
 			cfg.version.clone(),
+			None,
 			None,
 		)),
 		AccessPath::FullTextSearch {

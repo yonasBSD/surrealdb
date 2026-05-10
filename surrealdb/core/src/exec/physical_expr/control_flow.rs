@@ -62,6 +62,10 @@ impl PhysicalExpr for ControlFlowExpr {
 		"ControlFlow"
 	}
 
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+
 	fn required_context(&self) -> ContextLevel {
 		self.inner.as_ref().map_or(ContextLevel::Root, |e| e.required_context())
 	}

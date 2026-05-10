@@ -180,6 +180,10 @@ impl PhysicalExpr for RecordIdExpr {
 		"RecordIdExpr"
 	}
 
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+
 	fn required_context(&self) -> ContextLevel {
 		self.key.required_context()
 	}

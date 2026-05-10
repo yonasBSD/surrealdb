@@ -29,6 +29,10 @@ impl PhysicalExpr for AllPart {
 		"All"
 	}
 
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+
 	fn required_context(&self) -> ContextLevel {
 		// All (.*) may trigger record fetch + computed field evaluation
 		ContextLevel::Database
@@ -116,6 +120,10 @@ impl PhysicalExpr for FlattenPart {
 		"Flatten"
 	}
 
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+
 	fn required_context(&self) -> ContextLevel {
 		ContextLevel::Root
 	}
@@ -168,6 +176,10 @@ impl PhysicalExpr for FirstPart {
 		"First"
 	}
 
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+
 	fn required_context(&self) -> ContextLevel {
 		ContextLevel::Root
 	}
@@ -204,6 +216,10 @@ pub struct LastPart;
 impl PhysicalExpr for LastPart {
 	fn name(&self) -> &'static str {
 		"Last"
+	}
+
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
 	}
 
 	fn required_context(&self) -> ContextLevel {

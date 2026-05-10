@@ -156,14 +156,14 @@ impl InfoStructure for ApiMethod {
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ApiActionDefinition {
 	pub methods: Vec<ApiMethod>,
-	pub action: Expr,
+	pub(crate) action: Expr,
 	pub config: ApiConfigDefinition,
 }
 
 impl_kv_value_revisioned!(ApiActionDefinition);
 
 impl ApiActionDefinition {
-	pub fn to_sql_action(&self) -> sql::statements::define::ApiAction {
+	pub(crate) fn to_sql_action(&self) -> sql::statements::define::ApiAction {
 		sql::statements::define::ApiAction {
 			methods: self.methods.clone(),
 			action: self.action.clone().into(),
@@ -194,7 +194,7 @@ pub struct ApiConfigDefinition {
 
 impl ApiConfigDefinition {
 	/// Convert the API config definition into a SQL config.
-	pub fn to_sql_config(&self) -> sql::statements::define::config::api::ApiConfig {
+	pub(crate) fn to_sql_config(&self) -> sql::statements::define::config::api::ApiConfig {
 		sql::statements::define::config::api::ApiConfig {
 			middleware: self.middleware.iter().map(|mw| mw.to_sql_middleware()).collect(),
 			permissions: self.permissions.clone().into(),

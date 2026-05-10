@@ -39,6 +39,12 @@
 //! fields the user explicitly selected. Importantly, `reserved_names` does NOT
 //! block alias-based names — those are user-chosen and always accepted. Only
 //! synthetic fallback names are guarded.
+//!
+//! # Relation to `pre_decode_filter`
+//!
+//! Pre-decode WHERE rejection using raw KV bytes lives in [`crate::exec::pre_decode_filter`] and
+//! runs *before* any `PhysicalExpr` evaluation. This registry is **post-decode only**: it names
+//! expressions computed on decoded `Value`s for `Sort` / `SelectProject` via `Compute`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

@@ -58,7 +58,7 @@ impl EventDefinition {
 impl_kv_value_revisioned!(EventDefinition);
 
 impl EventDefinition {
-	pub fn to_sql_definition(&self) -> sql::DefineEventStatement {
+	pub(crate) fn to_sql_definition(&self) -> sql::DefineEventStatement {
 		sql::DefineEventStatement {
 			kind: DefineKind::Default,
 			name: sql::Expr::Idiom(sql::Idiom::field(self.name.clone())),

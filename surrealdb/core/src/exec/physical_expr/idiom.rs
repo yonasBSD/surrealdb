@@ -5,7 +5,6 @@ use surrealdb_types::{SqlFormat, ToSql};
 
 use crate::exec::physical_expr::{EvalContext, PhysicalExpr};
 use crate::exec::{AccessMode, CombineAccessModes, ContextLevel, ExecOperator};
-use crate::expr::FlowResult;
 use crate::val::Value;
 
 // ============================================================================
@@ -51,6 +50,18 @@ impl IdiomExpr {
 			parts,
 		}
 	}
+
+	/// Static object field path using only `Field` parts (e.g. `a.b`).
+	pub(crate) fn try_static_object_field_path(&self) -> Option<Vec<String>> {
+		if self.start_expr.is_some() || self.parts.is_empty() {
+			return None;
+		}
+		let mut path = Vec::with_capacity(self.parts.len());
+		for p in &self.parts {
+			path.push(p.try_simple_field()?.to_owned());
+		}
+		Some(path)
+	}
 }
 
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
@@ -58,6 +69,10 @@ impl IdiomExpr {
 impl PhysicalExpr for IdiomExpr {
 	fn name(&self) -> &'static str {
 		"IdiomExpr"
+	}
+
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
 	}
 
 	fn required_context(&self) -> ContextLevel {
@@ -111,18 +126,6 @@ impl PhysicalExpr for IdiomExpr {
 		} else {
 			None
 		}
-	}
-
-	fn try_evaluate_sync(&self, ctx: &EvalContext<'_>) -> Option<FlowResult<Value>> {
-		if self.start_expr.is_none() && self.parts.len() == 1 {
-			self.parts[0].try_evaluate_sync(ctx)
-		} else {
-			None
-		}
-	}
-
-	fn is_sync(&self) -> bool {
-		self.start_expr.is_none() && self.parts.len() == 1 && self.parts[0].is_sync()
 	}
 
 	fn embedded_operators(&self) -> Vec<(&str, &Arc<dyn ExecOperator>)> {

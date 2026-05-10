@@ -63,7 +63,7 @@ use crate::val::{Array, Datetime, Number, Object, TryAdd as _, TryFloatDiv, TryM
 /// An expression which will be aggregated over for each group.
 #[revisioned(revision = 1)]
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub enum Aggregation {
+pub(crate) enum Aggregation {
 	Count,
 	/// The usizes are index into the exprs field on the aggregate collector and represent the
 	/// expression which was fed as an argument to the aggregate expression
@@ -80,7 +80,7 @@ pub enum Aggregation {
 }
 
 impl Aggregation {
-	pub fn to_stat(&self) -> AggregationStat {
+	pub(crate) fn to_stat(&self) -> AggregationStat {
 		match *self {
 			Aggregation::Count => AggregationStat::Count {
 				count: 0,
@@ -137,7 +137,7 @@ impl Aggregation {
 /// A enum containing the data for an aggregation.
 #[revisioned(revision = 1)]
 #[derive(Clone, Debug, PartialEq)]
-pub enum AggregationStat {
+pub(crate) enum AggregationStat {
 	Count {
 		count: i64,
 	},
@@ -191,7 +191,7 @@ pub enum AggregationStat {
 
 impl AggregationStat {
 	/// Returns a per group record count this aggregation list keeps track of, if any.
-	pub fn get_count(aggregation_stats: &[AggregationStat]) -> Option<i64> {
+	pub(crate) fn get_count(aggregation_stats: &[AggregationStat]) -> Option<i64> {
 		aggregation_stats.iter().find_map(|x| match x {
 			AggregationStat::Count {
 				count,
@@ -250,7 +250,10 @@ pub fn group_field_name(idx: usize) -> Strand {
 ///
 /// Assumes the correct number of arguments are in the arguments array as required by the
 /// aggregation stats.
-pub fn add_to_aggregation_stats(arguments: &[Value], stats: &mut [AggregationStat]) -> Result<()> {
+pub(crate) fn add_to_aggregation_stats(
+	arguments: &[Value],
+	stats: &mut [AggregationStat],
+) -> Result<()> {
 	for stat in stats {
 		match stat {
 			AggregationStat::Count {
@@ -420,7 +423,7 @@ pub fn add_to_aggregation_stats(arguments: &[Value], stats: &mut [AggregationSta
 
 /// Creates object that can act as a document to calculate the final value for an aggregated
 /// statement.
-pub fn create_field_document(group: &[Value], stats: &[AggregationStat]) -> Object {
+pub(crate) fn create_field_document(group: &[Value], stats: &[AggregationStat]) -> Object {
 	let mut res = Object::default();
 	//setup the document for final value calculation
 	for (idx, a) in stats.iter().enumerate() {
@@ -975,7 +978,7 @@ impl MutVisitor for ParentRewritor {
 /// Enum for the field expression of an aggregate.
 #[revisioned(revision = 1)]
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub enum AggregateFields {
+pub(crate) enum AggregateFields {
 	/// the selector had a `VALUE` clause
 	Value(Expr),
 	/// Normal selector.
@@ -985,15 +988,15 @@ pub enum AggregateFields {
 /// A struct which contains an anaylzed aggregation and data on how to compute that aggregation.
 #[revisioned(revision = 1)]
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub struct AggregationAnalysis {
+pub(crate) struct AggregationAnalysis {
 	/// The expressions which calculate the arguments to an aggregate.
-	pub aggregate_arguments: Vec<Expr>,
+	pub(crate) aggregate_arguments: Vec<Expr>,
 	/// The aggregated expressions that are calculated.
-	pub aggregations: Vec<Aggregation>,
+	pub(crate) aggregations: Vec<Aggregation>,
 	/// The expressions which identify the group.
-	pub group_expressions: Vec<Expr>,
+	pub(crate) group_expressions: Vec<Expr>,
 	/// The expression to compute the resulting object from the calculated aggregates.
-	pub fields: AggregateFields,
+	pub(crate) fields: AggregateFields,
 }
 
 impl AggregationAnalysis {
@@ -1004,7 +1007,7 @@ impl AggregationAnalysis {
 	/// there is no aggregate which maintains a per group record count and will reject any
 	/// accumulate aggregations as we currently don't have a way to support them on
 	/// materialized views.
-	pub fn analyze_fields_groups(
+	pub(crate) fn analyze_fields_groups(
 		fields: &Fields,
 		groups: &Groups,
 		materialized_view: bool,

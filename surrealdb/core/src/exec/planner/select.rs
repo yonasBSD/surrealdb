@@ -45,6 +45,7 @@ use crate::exec::operators::{
 	Sort, SortByKey, SortDirection, SortKey, SortTopK, SortTopKByKey, SourceExpr, Split, TableScan,
 	Timeout, Union, UnionIndexScan, UnwrapExactlyOne, VersionScope,
 };
+use crate::exec::pre_decode_filter::pre_decode_filter_status_at_plan_time;
 use crate::exec::{ExecOperator, OperatorMetrics};
 use crate::expr::field::{Field, Fields};
 use crate::expr::{Cond, Expr, Idiom, Literal};
@@ -1382,14 +1383,24 @@ impl<'ctx> Planner<'ctx> {
 				Some(e @ Expr::Literal(Literal::RecordId(_))) => self.physical_expr(e).await?,
 				_ => unreachable!("verified above"),
 			};
-			let mut scan = RecordIdScan::new(rid_expr, version.clone(), needed_fields, None);
-			// Resolve table context at plan time
-			if let Some(ref tb) = table_name_for_resolve
+			let resolved_table_ctx: Option<ResolvedTableContext> = if let Some(ref tb) =
+				table_name_for_resolve
 				&& let (Some(txn), Some(ns), Some(db)) = (&self.txn, &self.ns, &self.db)
-				&& let Some(tc) = Self::try_resolve_table_ctx(txn, self.ctx, ns, db, tb).await
 			{
+				Self::try_resolve_table_ctx(txn, self.ctx, ns, db, tb).await
+			} else {
+				None
+			};
+			let pdf = Self::pre_decode_filter_status_for(
+				resolved_table_ctx.as_ref(),
+				None,
+				needed_fields.as_ref(),
+			);
+			let mut scan = RecordIdScan::new(rid_expr, version.clone(), needed_fields, None);
+			if let Some(tc) = resolved_table_ctx {
 				scan = scan.with_resolved(tc);
 			}
+			scan = scan.with_pre_decode_filter(pdf);
 			let scan: Arc<dyn ExecOperator> = Arc::new(scan);
 			let limited = if limit.is_some() || start.is_some() {
 				let limit_expr = match limit {
@@ -1816,15 +1827,23 @@ impl<'ctx> Planner<'ctx> {
 		{
 			let filter_action = filter_action_for_predicate(&scan_predicate);
 			let record_id_expr = self.physical_expr(rid_expr).await?;
-			// Resolve table context at plan time for the point lookup
-			let mut scan =
-				RecordIdScan::new(record_id_expr, version, needed_fields, scan_predicate);
-			if let (Some(txn), Some(ns), Some(db)) = (&self.txn, &self.ns, &self.db)
-				&& let Some(tc) =
+			let resolved_table_ctx: Option<ResolvedTableContext> =
+				if let (Some(txn), Some(ns), Some(db)) = (&self.txn, &self.ns, &self.db) {
 					Self::try_resolve_table_ctx(txn, self.ctx, ns, db, table_name).await
-			{
+				} else {
+					None
+				};
+			let pdf = Self::pre_decode_filter_status_for(
+				resolved_table_ctx.as_ref(),
+				scan_predicate.as_ref(),
+				needed_fields.as_ref(),
+			);
+			let mut scan =
+				RecordIdScan::new(record_id_expr, version, needed_fields, scan_predicate.clone());
+			if let Some(tc) = resolved_table_ctx {
 				scan = scan.with_resolved(tc);
 			}
+			scan = scan.with_pre_decode_filter(pdf);
 			return Ok(PlannedSource {
 				operator: Arc::new(scan) as Arc<dyn ExecOperator>,
 				filter_action,
@@ -1903,6 +1922,14 @@ impl<'ctx> Planner<'ctx> {
 						} else {
 							None
 						};
+						// Only thread the compiled WHERE into IndexScan when there is no outer
+						// Filter for the same condition. For `Residual`, the pipeline adds a
+						// Filter above the scan; applying `scan_predicate` again here would
+						// duplicate work and skew EXPLAIN row accounting.
+						let index_where_predicate = match &filter_action {
+							FilterAction::FullyConsumed => scan_predicate.clone(),
+							FilterAction::Residual(_) | FilterAction::UseOriginal => None,
+						};
 						let mut scan = IndexScan::new(
 							index_ref,
 							access,
@@ -1912,6 +1939,7 @@ impl<'ctx> Planner<'ctx> {
 							idx_start,
 							version.clone(),
 							Some(needed_fields),
+							index_where_predicate,
 						)
 						.with_batch_ceiling(batch_ceiling);
 						if let Some(ref tc) = table_ctx {
@@ -1994,6 +2022,11 @@ impl<'ctx> Planner<'ctx> {
 						} else {
 							(None, None, false)
 						};
+						let pdf = Self::pre_decode_filter_status_for(
+							table_ctx.as_ref(),
+							scan_predicate.as_ref(),
+							needed_fields.as_ref(),
+						);
 						let mut scan = TableScan::new(
 							table,
 							direction,
@@ -2006,6 +2039,7 @@ impl<'ctx> Planner<'ctx> {
 						if let Some(tc) = table_ctx.clone() {
 							scan = scan.with_resolved(tc);
 						}
+						scan = scan.with_pre_decode_filter(pdf);
 						return Ok(PlannedSource {
 							operator: Arc::new(scan) as Arc<dyn ExecOperator>,
 							filter_action,
@@ -2070,6 +2104,7 @@ impl<'ctx> Planner<'ctx> {
 										None,
 										None,
 										version.clone(),
+										None,
 										None,
 									);
 									if let Some(ref ceiling) = merge_batch_ceiling {
@@ -2258,7 +2293,20 @@ impl<'ctx> Planner<'ctx> {
 		} else {
 			(None, None, false)
 		};
+		let resolved_table_ctx: Option<ResolvedTableContext> =
+			if let Expr::Table(table_name) = &expr
+				&& let (Some(txn), Some(ns), Some(db)) = (&self.txn, &self.ns, &self.db)
+			{
+				Self::try_resolve_table_ctx(txn, self.ctx, ns, db, table_name).await
+			} else {
+				None
+			};
 		let source_expr = self.physical_expr(expr).await?;
+		let pdf = Self::pre_decode_filter_status_for(
+			resolved_table_ctx.as_ref(),
+			scan_predicate.as_ref(),
+			needed_fields.as_ref(),
+		);
 		Ok(PlannedSource {
 			operator: Arc::new(
 				DynamicScan::new(
@@ -2272,11 +2320,27 @@ impl<'ctx> Planner<'ctx> {
 					dyn_limit,
 					dyn_start,
 				)
-				.with_knn_context(knn_ctx),
+				.with_knn_context(knn_ctx)
+				.with_pre_decode_filter(pdf),
 			) as Arc<dyn ExecOperator>,
 			filter_action,
 			limit_pushed,
 		})
+	}
+
+	/// Compute the plan-time [`PreDecodeFilterStatus`] for a KV scan from an optional resolved
+	/// table context, the scan's WHERE predicate (if any), and the scan's projected fields.
+	///
+	/// Centralises the field-state projection and call into
+	/// [`pre_decode_filter_status_at_plan_time`] used by [`TableScan`], [`DynamicScan`] and
+	/// [`RecordIdScan`] planning paths.
+	fn pre_decode_filter_status_for(
+		table_ctx: Option<&ResolvedTableContext>,
+		predicate: Option<&Arc<dyn crate::exec::PhysicalExpr>>,
+		needed_fields: Option<&std::collections::HashSet<String>>,
+	) -> crate::exec::pre_decode_filter::PreDecodeFilterStatus {
+		let projected = table_ctx.map(|tc| tc.field_state_for_projection(needed_fields));
+		pre_decode_filter_status_at_plan_time(predicate, projected.as_ref())
 	}
 
 	/// Try to resolve a `ResolvedTableContext` for the given table.

@@ -3,7 +3,7 @@ use std::fmt::{self, Display};
 use std::io::{BufRead, Read, Write};
 use std::ops::Deref;
 
-use revision::{DeserializeRevisioned, Revisioned, SerializeRevisioned};
+use revision::{DeserializeRevisioned, Revisioned, SerializeRevisioned, SkipRevisioned};
 use storekey::{BorrowDecode, Decode, Encode};
 use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql};
@@ -166,6 +166,24 @@ impl DeserializeRevisioned for TableName {
 	}
 }
 
+impl SkipRevisioned for TableName {
+	fn skip_revisioned<R: Read>(r: &mut R) -> Result<(), revision::Error> {
+		<Strand as SkipRevisioned>::skip_revisioned(r)
+	}
+}
+
+impl revision::WalkRevisioned for TableName {
+	type Walker<'r, R: Read + 'r> = revision::LeafWalker<'r, TableName, R>;
+
+	fn walk_revisioned<'r, R: Read>(
+		reader: &'r mut R,
+	) -> Result<Self::Walker<'r, R>, revision::Error> {
+		Ok(revision::LeafWalker::new(reader))
+	}
+}
+
+impl revision::LengthPrefixedBytes for TableName {}
+
 impl<F> Encode<F> for TableName {
 	fn encode<W: Write>(&self, w: &mut storekey::Writer<W>) -> Result<(), storekey::EncodeError> {
 		<str as Encode<F>>::encode::<W>(self.as_str(), w)
@@ -181,5 +199,24 @@ impl<'de, F> BorrowDecode<'de, F> for TableName {
 impl<F> Decode<F> for TableName {
 	fn decode<R: BufRead>(r: &mut storekey::Reader<R>) -> Result<Self, storekey::DecodeError> {
 		Ok(TableName(<Strand as Decode<F>>::decode(r)?))
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use revision::{SerializeRevisioned, WalkRevisioned};
+
+	use super::TableName;
+
+	#[test]
+	fn table_name_with_bytes_matches_serialize() {
+		let name = TableName::from("users");
+		let mut bytes = Vec::new();
+		name.serialize_revisioned(&mut bytes).unwrap();
+		let mut r = bytes.as_slice();
+		let walker = TableName::walk_revisioned(&mut r).unwrap();
+		let observed = walker.with_bytes(|raw| raw.to_vec()).unwrap();
+		assert_eq!(observed.as_slice(), b"users");
+		assert!(r.is_empty());
 	}
 }

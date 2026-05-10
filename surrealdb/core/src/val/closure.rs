@@ -298,3 +298,22 @@ impl DeserializeRevisioned for Closure {
 		Err(revision::Error::Conversion("Closures cannot be deserialized from disk".to_string()))
 	}
 }
+
+impl revision::SkipRevisioned for Closure {
+	fn skip_revisioned<R: std::io::Read>(_reader: &mut R) -> Result<(), revision::Error> {
+		Err(revision::Error::Conversion("Closures cannot be skipped on the wire".to_string()))
+	}
+}
+
+impl revision::WalkRevisioned for Closure {
+	type Walker<'r, R: std::io::Read + 'r> = revision::LeafWalker<'r, Closure, R>;
+
+	fn walk_revisioned<'r, R: std::io::Read>(
+		reader: &'r mut R,
+	) -> Result<Self::Walker<'r, R>, revision::Error> {
+		// Closures never appear on the wire; expose a leaf walker whose
+		// `decode`/`skip` invariably error so callers walking from outer
+		// types fail fast rather than silently advancing.
+		Ok(revision::LeafWalker::new(reader))
+	}
+}

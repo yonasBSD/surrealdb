@@ -59,6 +59,10 @@ impl PhysicalExpr for RecursePart {
 		"Recurse"
 	}
 
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+
 	fn required_context(&self) -> ContextLevel {
 		self.op.required_context()
 	}
@@ -167,6 +171,10 @@ pub struct RepeatRecursePart;
 impl PhysicalExpr for RepeatRecursePart {
 	fn name(&self) -> &'static str {
 		"RepeatRecurse"
+	}
+
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
 	}
 
 	fn required_context(&self) -> ContextLevel {

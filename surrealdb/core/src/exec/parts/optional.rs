@@ -36,6 +36,10 @@ impl PhysicalExpr for OptionalChainPart {
 		"OptionalChain"
 	}
 
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+
 	fn required_context(&self) -> ContextLevel {
 		self.tail.iter().map(|p| p.required_context()).max().unwrap_or(ContextLevel::Root)
 	}

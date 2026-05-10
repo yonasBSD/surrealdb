@@ -98,6 +98,10 @@ impl PhysicalExpr for BlockPhysicalExpr {
 		"Block"
 	}
 
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+
 	fn required_context(&self) -> crate::exec::ContextLevel {
 		// Derive the required context from the block's expressions
 		block_required_context(&self.block)

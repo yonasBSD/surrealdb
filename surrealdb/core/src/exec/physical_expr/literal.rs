@@ -27,6 +27,10 @@ impl PhysicalExpr for Literal {
 		"Literal"
 	}
 
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+
 	fn required_context(&self) -> crate::exec::ContextLevel {
 		// Literals are constant values, no context needed
 		crate::exec::ContextLevel::Root
@@ -43,14 +47,6 @@ impl PhysicalExpr for Literal {
 
 	fn try_literal(&self) -> Option<&Value> {
 		Some(&self.0)
-	}
-
-	fn try_evaluate_sync(&self, _ctx: &EvalContext<'_>) -> Option<FlowResult<Value>> {
-		Some(Ok(self.0.clone()))
-	}
-
-	fn is_sync(&self) -> bool {
-		true
 	}
 }
 
@@ -140,6 +136,10 @@ impl Param {
 impl PhysicalExpr for Param {
 	fn name(&self) -> &'static str {
 		"Param"
+	}
+
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
 	}
 
 	fn required_context(&self) -> crate::exec::ContextLevel {
@@ -241,40 +241,6 @@ impl PhysicalExpr for Param {
 		// Parameter references are read-only
 		AccessMode::ReadOnly
 	}
-
-	fn try_evaluate_sync(&self, ctx: &EvalContext<'_>) -> Option<FlowResult<Value>> {
-		match self.0.as_str() {
-			"this" | "self" => {
-				if let Some(v) = ctx.current_value {
-					return Some(Ok(v.clone()));
-				}
-				if let Some(local_params) = ctx.local_params
-					&& let Some(v) = local_params.get(self.0.as_str())
-				{
-					return Some(Ok(v.clone()));
-				}
-				if let Some(v) = ctx.exec_ctx.value(self.0.as_str()) {
-					return Some(Ok(v.clone()));
-				}
-				return Some(Ok(Value::None));
-			}
-			_ => {}
-		}
-		if let Some(local_params) = ctx.local_params
-			&& let Some(value) = local_params.get(self.0.as_str())
-		{
-			return Some(Ok(value.clone()));
-		}
-		if let Some(v) = ctx.exec_ctx.value(self.0.as_str()) {
-			return Some(Ok(v.clone()));
-		}
-		if self.0.as_str() == "parent"
-			&& let Some(v) = ctx.document_root
-		{
-			return Some(Ok(v.clone()));
-		}
-		None
-	}
 }
 
 impl ToSql for Param {
@@ -296,6 +262,10 @@ pub struct MockExpr(pub(crate) Mock);
 impl PhysicalExpr for MockExpr {
 	fn name(&self) -> &'static str {
 		"Mock"
+	}
+
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
 	}
 
 	fn required_context(&self) -> crate::exec::ContextLevel {

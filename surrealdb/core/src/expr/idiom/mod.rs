@@ -240,6 +240,24 @@ impl DeserializeRevisioned for Idiom {
 	}
 }
 
+impl revision::SkipRevisioned for Idiom {
+	fn skip_revisioned<R: std::io::Read>(reader: &mut R) -> Result<(), revision::Error> {
+		<String as revision::SkipRevisioned>::skip_revisioned(reader)
+	}
+}
+
+impl revision::WalkRevisioned for Idiom {
+	type Walker<'r, R: std::io::Read + 'r> = revision::LeafWalker<'r, Idiom, R>;
+
+	fn walk_revisioned<'r, R: std::io::Read>(
+		reader: &'r mut R,
+	) -> Result<Self::Walker<'r, R>, revision::Error> {
+		Ok(revision::LeafWalker::new(reader))
+	}
+}
+
+impl revision::LengthPrefixedBytes for Idiom {}
+
 impl InfoStructure for Idiom {
 	fn structure(self) -> Value {
 		self.to_sql().into()
@@ -413,5 +431,20 @@ mod tests {
 	fn test_idiom_sorting(#[case] mut idioms: Vec<Idiom>, #[case] expected: Vec<Idiom>) {
 		idioms.sort();
 		assert_eq!(idioms, expected);
+	}
+
+	#[test]
+	fn idiom_with_bytes_matches_serialize() {
+		use revision::{SerializeRevisioned, WalkRevisioned};
+
+		let idiom = Idiom::from(vec![Part::Field(Strand::new_static("foo"))]);
+		let mut bytes = Vec::new();
+		idiom.serialize_revisioned(&mut bytes).unwrap();
+		let expected_raw = idiom.to_raw_string();
+		let mut r = bytes.as_slice();
+		let walker = Idiom::walk_revisioned(&mut r).unwrap();
+		let observed = walker.with_bytes(|raw| raw.to_vec()).unwrap();
+		assert_eq!(observed.as_slice(), expected_raw.as_bytes());
+		assert!(r.is_empty());
 	}
 }

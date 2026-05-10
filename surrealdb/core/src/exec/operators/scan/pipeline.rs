@@ -25,6 +25,7 @@ use crate::exec::permission::{
 	PhysicalPermission, check_permission_for_value, convert_permission_to_physical,
 };
 use crate::exec::planner::expr_to_physical_expr;
+use crate::exec::pre_decode_filter::{PreDecodeFilter, PreDecodeFilterOutcome};
 use crate::exec::{EvalContext, ExecutionContext, PhysicalExpr, ValueBatch, ValueBatchStream};
 use crate::expr::{ControlFlow, ControlFlowExt};
 use crate::idx::planner::ScanDirection;
@@ -223,6 +224,7 @@ pub(crate) fn kv_scan_stream(
 	pre_skip: usize,
 	prefetch: bool,
 	limit_hint: Option<u32>,
+	pre_decode_filter: Option<Arc<PreDecodeFilter>>,
 ) -> ValueBatchStream {
 	let skip = pre_skip.min(u32::MAX as usize) as u32;
 	let stream = async_stream::try_stream! {
@@ -233,6 +235,11 @@ pub(crate) fn kv_scan_stream(
 			let entries = result.context("Failed to scan record")?;
 			let mut batch = Vec::with_capacity(entries.len());
 			for (key, val) in entries {
+				if let Some(ref pdf) = pre_decode_filter
+					&& pdf.apply(&key, val.as_slice()) == PreDecodeFilterOutcome::Reject
+				{
+					continue;
+				}
 				batch.push(decode_record(&key, val)?);
 			}
 			if !batch.is_empty() {
@@ -319,35 +326,6 @@ pub(crate) async fn filter_and_process_batch(
 		&& (!check_perms || state.field_permissions.is_empty())
 		&& let Some(pred) = predicate
 	{
-		if pred.is_sync() {
-			let eval_ctx = EvalContext::from_exec_ctx(ctx);
-			let mut write_idx = 0;
-			for read_idx in 0..batch.len() {
-				let keep = {
-					let row_ctx = eval_ctx.with_value(&batch[read_idx]);
-					pred.try_evaluate_sync(&row_ctx)
-				};
-				match keep {
-					Some(Ok(result)) if result.is_truthy() => {
-						if write_idx != read_idx {
-							batch.swap(write_idx, read_idx);
-						}
-						write_idx += 1;
-					}
-					Some(Ok(_)) => {}
-					Some(Err(e)) => return Err(e),
-					None => {
-						if write_idx != read_idx {
-							batch.swap(write_idx, read_idx);
-						}
-						write_idx += 1;
-					}
-				}
-			}
-			batch.truncate(write_idx);
-			return Ok(());
-		}
-
 		let eval_ctx = EvalContext::from_exec_ctx(ctx);
 		let results = pred.evaluate_batch(eval_ctx, &batch[..]).await?;
 		let mut write_idx = 0;
@@ -383,7 +361,7 @@ pub(crate) async fn filter_and_process_batch(
 		}
 		// WHERE predicate (evaluated on the permission-reduced document)
 		if let Some(pred) = predicate {
-			let eval_ctx = EvalContext::from_exec_ctx(ctx).with_value(&batch[write_idx]);
+			let eval_ctx = EvalContext::from_exec_ctx(ctx).with_value_and_doc(&batch[write_idx]);
 			if !pred.evaluate(eval_ctx).await?.is_truthy() {
 				continue;
 			}
@@ -517,6 +495,13 @@ pub(crate) struct ComputedFieldDef {
 	expr: Arc<dyn PhysicalExpr>,
 	/// Optional type coercion
 	kind: Option<crate::expr::Kind>,
+}
+
+impl ComputedFieldDef {
+	/// Root field name this computed-field definition is attached to.
+	pub(crate) fn field_name(&self) -> &str {
+		&self.field_name
+	}
 }
 
 /// Build field state from raw transaction and context parameters.

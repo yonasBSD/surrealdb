@@ -1,6 +1,8 @@
 use std::fmt::{Display, Formatter};
 
-use revision::{DeserializeRevisioned, Revisioned, SerializeRevisioned, revisioned};
+use revision::{
+	DeserializeRevisioned, Revisioned, SerializeRevisioned, SkipRevisioned, revisioned,
+};
 use serde::{Deserialize, Serialize};
 use storekey::{BorrowDecode, Encode};
 use surrealdb_strand::Strand;
@@ -53,6 +55,24 @@ impl DeserializeRevisioned for DatabaseId {
 	#[inline]
 	fn deserialize_revisioned<R: std::io::Read>(reader: &mut R) -> Result<Self, revision::Error> {
 		DeserializeRevisioned::deserialize_revisioned(reader).map(DatabaseId)
+	}
+}
+
+impl SkipRevisioned for DatabaseId {
+	#[inline]
+	fn skip_revisioned<R: std::io::Read>(reader: &mut R) -> Result<(), revision::Error> {
+		<u32 as SkipRevisioned>::skip_revisioned(reader)
+	}
+}
+
+impl revision::WalkRevisioned for DatabaseId {
+	type Walker<'r, R: std::io::Read + 'r> = revision::LeafWalker<'r, DatabaseId, R>;
+
+	#[inline]
+	fn walk_revisioned<'r, R: std::io::Read>(
+		reader: &'r mut R,
+	) -> Result<Self::Walker<'r, R>, revision::Error> {
+		Ok(revision::LeafWalker::new(reader))
 	}
 }
 

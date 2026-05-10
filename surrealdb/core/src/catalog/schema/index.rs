@@ -2,7 +2,9 @@ use std::fmt::{self, Display, Formatter};
 use std::hash::{Hash, Hasher};
 
 use anyhow::Result;
-use revision::{DeserializeRevisioned, Revisioned, SerializeRevisioned, revisioned};
+use revision::{
+	DeserializeRevisioned, Revisioned, SerializeRevisioned, SkipRevisioned, revisioned,
+};
 use storekey::{BorrowDecode, Encode};
 use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
@@ -42,6 +44,24 @@ impl DeserializeRevisioned for IndexId {
 	#[inline]
 	fn deserialize_revisioned<R: std::io::Read>(reader: &mut R) -> Result<Self, revision::Error> {
 		DeserializeRevisioned::deserialize_revisioned(reader).map(IndexId)
+	}
+}
+
+impl SkipRevisioned for IndexId {
+	#[inline]
+	fn skip_revisioned<R: std::io::Read>(reader: &mut R) -> Result<(), revision::Error> {
+		<u32 as SkipRevisioned>::skip_revisioned(reader)
+	}
+}
+
+impl revision::WalkRevisioned for IndexId {
+	type Walker<'r, R: std::io::Read + 'r> = revision::LeafWalker<'r, IndexId, R>;
+
+	#[inline]
+	fn walk_revisioned<'r, R: std::io::Read>(
+		reader: &'r mut R,
+	) -> Result<Self::Walker<'r, R>, revision::Error> {
+		Ok(revision::LeafWalker::new(reader))
 	}
 }
 

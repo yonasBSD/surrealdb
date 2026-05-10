@@ -9,7 +9,7 @@ use crate::val::{TableName, Value};
 
 #[revisioned(revision = 1)]
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub enum ViewDefinition {
+pub(crate) enum ViewDefinition {
 	/// The view is cached, and has no aggregation.
 	/// It is only updated any of the target tables are updated.
 	Materialized {

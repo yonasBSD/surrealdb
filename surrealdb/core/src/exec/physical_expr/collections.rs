@@ -22,6 +22,10 @@ impl PhysicalExpr for ArrayLiteral {
 		"ArrayLiteral"
 	}
 
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+
 	fn required_context(&self) -> crate::exec::ContextLevel {
 		self.elements
 			.iter()
@@ -70,6 +74,10 @@ impl PhysicalExpr for ObjectLiteral {
 		"ObjectLiteral"
 	}
 
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+
 	fn required_context(&self) -> crate::exec::ContextLevel {
 		self.entries
 			.iter()
@@ -116,6 +124,10 @@ pub struct SetLiteral {
 impl PhysicalExpr for SetLiteral {
 	fn name(&self) -> &'static str {
 		"SetLiteral"
+	}
+
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
 	}
 
 	fn required_context(&self) -> crate::exec::ContextLevel {

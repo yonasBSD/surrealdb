@@ -3549,15 +3549,24 @@ dependencies = [
 
 [[package]]
 name = "revision"
-version = "0.17.0"
+version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11c3c8ec8b2be254beb5f8acdd80cdd57b7b5d40988c2ec3d0b7cdb6f7c2829b"
+checksum = "38f76940ef714781367baa972823c5d1c52a98534fc36b816a484135ac5ec78a"
+dependencies = [
+ "revision-derive 0.19.0",
+]
+
+[[package]]
+name = "revision"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2554a8f54f00623ca0008916733357488569874b84bad55d5a15768d4dddf918"
 dependencies = [
  "bytes",
  "chrono",
  "geo 0.31.0",
  "regex",
- "revision-derive",
+ "revision-derive 0.20.0",
  "roaring",
  "rust_decimal",
  "uuid",
@@ -3565,9 +3574,20 @@ dependencies = [
 
 [[package]]
 name = "revision-derive"
-version = "0.17.0"
+version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76be63634a8b1809e663bc0b975d78f6883c0fadbcce9c52e19b9e421f423357"
+checksum = "e4e3a45c13d9d10b1b68aa2ba0b6c311716689ad8e0cc89de5ad4d83986c7216"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "revision-derive"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "424de6e69cad1f9f0d7d26aeff49471164ec5f73d159b6df9047167a87398d32"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4277,7 +4297,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 name = "surrealdb-collections"
 version = "3.1.0-beta"
 dependencies = [
- "revision",
+ "revision 0.20.0",
  "storekey",
 ]
 
@@ -4323,6 +4343,7 @@ dependencies = [
  "jsonwebtoken",
  "lexicmp",
  "md-5",
+ "memchr",
  "mime",
  "ndarray",
  "ndarray-stats",
@@ -4341,7 +4362,7 @@ dependencies = [
  "rayon",
  "reblessive",
  "regex",
- "revision",
+ "revision 0.20.0",
  "ring",
  "roaring",
  "rquickjs",
@@ -4433,7 +4454,7 @@ dependencies = [
 name = "surrealdb-strand"
 version = "3.1.0-beta"
 dependencies = [
- "revision",
+ "revision 0.20.0",
  "serde",
  "storekey",
 ]
@@ -4562,7 +4583,7 @@ dependencies = [
  "clap",
  "futures",
  "reblessive",
- "revision",
+ "revision 0.19.0",
  "rust_decimal",
  "semver",
  "serde",

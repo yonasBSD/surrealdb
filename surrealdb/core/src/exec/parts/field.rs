@@ -27,6 +27,10 @@ impl PhysicalExpr for FieldPart {
 		"Field"
 	}
 
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+
 	fn required_context(&self) -> ContextLevel {
 		// Field access might trigger record fetch if applied to RecordId,
 		// so we conservatively require database context.
@@ -66,18 +70,6 @@ impl PhysicalExpr for FieldPart {
 
 	fn try_simple_field(&self) -> Option<&str> {
 		Some(&self.name)
-	}
-
-	fn try_evaluate_sync(&self, ctx: &EvalContext<'_>) -> Option<FlowResult<Value>> {
-		let value = ctx.current_value.unwrap_or(&Value::NONE);
-		match value {
-			Value::Object(obj) => Some(Ok(obj.get(&self.name).cloned().unwrap_or(Value::None))),
-			_ => None,
-		}
-	}
-
-	fn is_sync(&self) -> bool {
-		true
 	}
 }
 

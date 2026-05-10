@@ -1,4 +1,6 @@
-use revision::{DeserializeRevisioned, Revisioned, SerializeRevisioned, revisioned};
+use revision::{
+	DeserializeRevisioned, Revisioned, SerializeRevisioned, SkipRevisioned, revisioned,
+};
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 use uuid::Uuid;
 
@@ -37,6 +39,24 @@ impl DeserializeRevisioned for TableId {
 	#[inline]
 	fn deserialize_revisioned<R: std::io::Read>(reader: &mut R) -> Result<Self, revision::Error> {
 		DeserializeRevisioned::deserialize_revisioned(reader).map(TableId)
+	}
+}
+
+impl SkipRevisioned for TableId {
+	#[inline]
+	fn skip_revisioned<R: std::io::Read>(reader: &mut R) -> Result<(), revision::Error> {
+		<u32 as SkipRevisioned>::skip_revisioned(reader)
+	}
+}
+
+impl revision::WalkRevisioned for TableId {
+	type Walker<'r, R: std::io::Read + 'r> = revision::LeafWalker<'r, TableId, R>;
+
+	#[inline]
+	fn walk_revisioned<'r, R: std::io::Read>(
+		reader: &'r mut R,
+	) -> Result<Self::Walker<'r, R>, revision::Error> {
+		Ok(revision::LeafWalker::new(reader))
 	}
 }
 

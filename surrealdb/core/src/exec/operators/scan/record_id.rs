@@ -20,6 +20,7 @@ use crate::exec::permission::{
 	PhysicalPermission, convert_permission_to_physical, should_check_perms,
 	validate_record_user_access,
 };
+use crate::exec::pre_decode_filter::{PreDecodeFilterStatus, pre_decode_filter_for_execute};
 use crate::exec::{
 	AccessMode, ContextLevel, EvalContext, ExecOperator, ExecutionContext, FlowResult,
 	OperatorMetrics, OutputOrdering, PhysicalExpr, ValueBatch, ValueBatchStream, monitor_stream,
@@ -56,6 +57,8 @@ pub struct RecordIdScan {
 	/// Plan-time resolved table context. When present, `execute_record_lookup`
 	/// skips runtime `get_table_def()` and `build_field_state()` entirely.
 	pub(crate) resolved: Option<ResolvedTableContext>,
+	/// Predicate pre-decode filter status (plan-time); see [`PreDecodeFilterStatus`].
+	pub(crate) pre_decode_filter_status: PreDecodeFilterStatus,
 	/// Per-operator runtime metrics for EXPLAIN ANALYZE.
 	pub(crate) metrics: Arc<OperatorMetrics>,
 }
@@ -73,6 +76,7 @@ impl RecordIdScan {
 			needed_fields,
 			predicate,
 			resolved: None,
+			pre_decode_filter_status: PreDecodeFilterStatus::NotApplicable,
 			metrics: Arc::new(OperatorMetrics::new()),
 		}
 	}
@@ -80,6 +84,12 @@ impl RecordIdScan {
 	/// Set the plan-time resolved table context.
 	pub(crate) fn with_resolved(mut self, resolved: ResolvedTableContext) -> Self {
 		self.resolved = Some(resolved);
+		self
+	}
+
+	/// Set plan-time pre-decode filter status for EXPLAIN and execution.
+	pub(crate) fn with_pre_decode_filter(mut self, status: PreDecodeFilterStatus) -> Self {
+		self.pre_decode_filter_status = status;
 		self
 	}
 }
@@ -98,6 +108,9 @@ impl ExecOperator for RecordIdScan {
 		}
 		if let Some(ref pred) = self.predicate {
 			attrs.push(("predicate".to_string(), pred.to_sql()));
+		}
+		if let Some(s) = self.pre_decode_filter_status.explain_text() {
+			attrs.push(("pre_decode_filter".to_string(), s));
 		}
 		attrs
 	}
@@ -169,6 +182,7 @@ impl ExecOperator for RecordIdScan {
 		let needed_fields = self.needed_fields.clone();
 		let predicate = self.predicate.clone();
 		let resolved = self.resolved.clone();
+		let pre_decode_filter_status = self.pre_decode_filter_status.clone();
 		let ctx = ctx.clone();
 
 		let stream = async_stream::try_stream! {
@@ -204,6 +218,7 @@ impl ExecOperator for RecordIdScan {
 			let results = execute_record_lookup(
 				&rid, version, check_perms, needed_fields.as_ref(), &ctx,
 				predicate.as_ref(), None, 0, resolved.as_ref(),
+				&pre_decode_filter_status,
 			).await?;
 
 			if !results.is_empty() {
@@ -245,6 +260,7 @@ pub(crate) async fn execute_record_lookup(
 	limit: Option<usize>,
 	start: usize,
 	resolved: Option<&ResolvedTableContext>,
+	pre_decode_filter_status: &PreDecodeFilterStatus,
 ) -> Result<Vec<Value>, ControlFlow> {
 	let db_ctx = ctx.database().context("RecordLookup requires database context")?;
 	let txn = ctx.txn();
@@ -322,6 +338,9 @@ pub(crate) async fn execute_record_lookup(
 			let prefetch = effective_storage_limit.is_none();
 			let limit_hint = limit.map(|l| (l + start).try_into().unwrap_or(u32::MAX));
 
+			let pre_decode_filter =
+				pre_decode_filter_for_execute(pre_decode_filter_status, &field_state, check_perms);
+
 			let mut source = kv_scan_stream(
 				Arc::clone(&txn),
 				beg,
@@ -332,6 +351,7 @@ pub(crate) async fn execute_record_lookup(
 				pre_skip,
 				prefetch,
 				limit_hint,
+				pre_decode_filter,
 			);
 
 			let mut pipeline = ScanPipeline::new(

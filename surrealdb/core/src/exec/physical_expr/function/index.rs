@@ -38,6 +38,10 @@ impl PhysicalExpr for IndexFunctionExec {
 		"IndexFunction"
 	}
 
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+
 	fn required_context(&self) -> crate::exec::ContextLevel {
 		let args_ctx = args_required_context(&self.arguments);
 		args_ctx.max(self.func_required_context)

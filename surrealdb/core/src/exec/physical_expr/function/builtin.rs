@@ -29,6 +29,10 @@ impl PhysicalExpr for BuiltinFunctionExec {
 		"BuiltinFunction"
 	}
 
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+
 	fn required_context(&self) -> crate::exec::ContextLevel {
 		// Built-in functions need either their declared context level or
 		// whatever context their arguments need, whichever is higher

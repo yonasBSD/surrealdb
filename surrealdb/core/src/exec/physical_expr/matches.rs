@@ -177,6 +177,10 @@ impl PhysicalExpr for MatchesOp {
 		"MatchesOp"
 	}
 
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+
 	fn required_context(&self) -> ContextLevel {
 		// Need Root context for transaction and index store access,
 		// plus whatever the child expressions need.

@@ -62,6 +62,12 @@ pub struct IndexScan {
 	/// Outer `None` = sub-operator mode (parent handles fields).
 	/// `Some(None)` = all fields, `Some(Some(set))` = specific fields.
 	pub(crate) needed_fields: Option<Option<HashSet<String>>>,
+	/// Full WHERE predicate as a streaming physical expression. Unlike
+	/// [`TableScan`](super::TableScan), index seeks only narrow candidates;
+	/// this predicate is evaluated on fetched rows to enforce any conditions
+	/// beyond what the indexer proved (matching `DynamicScan`'s unified
+	/// outer pipeline behaviour).
+	pub(crate) where_predicate: Option<Arc<dyn PhysicalExpr>>,
 	/// Per-batch size ceiling when LIMIT wasn't pushed (due to a residual
 	/// filter preventing direct pushdown).  The scan reads batches of at
 	/// most this many entries, enabling faster early termination from the
@@ -84,6 +90,7 @@ impl IndexScan {
 		start: Option<Arc<dyn PhysicalExpr>>,
 		version: Option<Arc<dyn PhysicalExpr>>,
 		needed_fields: Option<Option<HashSet<String>>>,
+		where_predicate: Option<Arc<dyn PhysicalExpr>>,
 	) -> Self {
 		Self {
 			index_ref,
@@ -95,6 +102,7 @@ impl IndexScan {
 			version,
 			resolved: None,
 			needed_fields,
+			where_predicate,
 			batch_ceiling: None,
 			metrics: Arc::new(OperatorMetrics::new()),
 		}
@@ -205,6 +213,9 @@ impl ExecOperator for IndexScan {
 		}
 		if let Some(ref start) = self.start {
 			mode = mode.combine(start.access_mode());
+		}
+		if let Some(ref pred) = self.where_predicate {
+			mode = mode.combine(pred.access_mode());
 		}
 		mode
 	}
@@ -330,6 +341,7 @@ impl ExecOperator for IndexScan {
 		let version_expr = self.version.clone();
 		let resolved = self.resolved.clone();
 		let needed_fields = self.needed_fields.clone();
+		let where_predicate = self.where_predicate.clone();
 		let ctx = ctx.clone();
 
 		let stream = async_stream::try_stream! {
@@ -432,7 +444,7 @@ impl ExecOperator for IndexScan {
 			// to avoid double-checking.
 			let mut pipeline = super::pipeline::ScanPipeline::new(
 				PhysicalPermission::Allow,
-				None,
+				where_predicate,
 				field_state,
 				check_perms,
 				limit_val,

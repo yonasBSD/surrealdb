@@ -22,6 +22,10 @@ impl PhysicalExpr for ScalarSubquery {
 		"ScalarSubquery"
 	}
 
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+
 	fn required_context(&self) -> crate::exec::ContextLevel {
 		// Delegate to the subquery plan's context requirements
 		self.plan.required_context()

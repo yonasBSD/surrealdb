@@ -622,6 +622,31 @@ impl DeserializeRevisioned for Strand {
 	}
 }
 
+impl revision::SkipRevisioned for Strand {
+	#[inline]
+	fn skip_revisioned<R: std::io::Read>(reader: &mut R) -> Result<(), Error> {
+		<String as revision::SkipRevisioned>::skip_revisioned(reader)
+	}
+
+	#[inline]
+	fn skip_revisioned_slice(reader: &mut revision::SliceReader<'_>) -> Result<(), Error> {
+		<String as revision::SkipRevisioned>::skip_revisioned_slice(reader)
+	}
+}
+
+impl revision::WalkRevisioned for Strand {
+	type Walker<'r, R: std::io::Read + 'r> = revision::LeafWalker<'r, Strand, R>;
+
+	#[inline]
+	fn walk_revisioned<'r, R: std::io::Read>(
+		reader: &'r mut R,
+	) -> Result<Self::Walker<'r, R>, Error> {
+		Ok(revision::LeafWalker::new(reader))
+	}
+}
+
+impl revision::LengthPrefixedBytes for Strand {}
+
 // -----------------------------------------------------------------------
 // storekey
 // -----------------------------------------------------------------------
@@ -1053,6 +1078,19 @@ mod tests {
 				String::deserialize_revisioned(&mut strand_bytes.as_slice()).unwrap();
 			assert_eq!(from_strand_bytes, input);
 		}
+	}
+
+	/// [`revision::LengthPrefixedBytes`] enables [`revision::LeafWalker::with_bytes`] on
+	/// slice-backed readers; payload bytes must match UTF-8 encoding of the strand.
+	#[test]
+	fn revision_leaf_walker_with_bytes_matches_strand_utf8() {
+		use revision::{SerializeRevisioned, WalkRevisioned};
+		let s = Strand::from("hello ρ");
+		let mut buf = Vec::new();
+		s.serialize_revisioned(&mut buf).unwrap();
+		let mut r = buf.as_slice();
+		let w = Strand::walk_revisioned(&mut r).unwrap();
+		w.with_bytes(|bytes| assert_eq!(bytes, s.as_str().as_bytes())).unwrap();
 	}
 
 	/// Same assertions for the `storekey` encoding, covering both the

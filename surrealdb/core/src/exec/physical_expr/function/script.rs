@@ -28,6 +28,10 @@ impl PhysicalExpr for JsFunctionExec {
 		"JsFunction"
 	}
 
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+
 	fn required_context(&self) -> crate::exec::ContextLevel {
 		// Script functions access database context through the frozen context
 		// when needed, so they can operate at root level. Requiring Database

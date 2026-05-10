@@ -31,6 +31,10 @@ impl PhysicalExpr for ClosureExec {
 		"Closure"
 	}
 
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+
 	fn required_context(&self) -> crate::exec::ContextLevel {
 		// Closures are just values, they don't need any special context
 		crate::exec::ContextLevel::Root
@@ -87,6 +91,10 @@ pub struct ClosureCallExec {
 impl PhysicalExpr for ClosureCallExec {
 	fn name(&self) -> &'static str {
 		"ClosureCall"
+	}
+
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
 	}
 
 	fn required_context(&self) -> crate::exec::ContextLevel {

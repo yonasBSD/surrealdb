@@ -44,6 +44,10 @@ impl PhysicalExpr for DestructurePart {
 		"Destructure"
 	}
 
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+
 	fn required_context(&self) -> ContextLevel {
 		fn field_context(fields: &[DestructureField]) -> ContextLevel {
 			fields

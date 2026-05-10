@@ -39,6 +39,10 @@ impl PhysicalExpr for SurrealismModuleExec {
 		"SurrealismModule"
 	}
 
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
+	}
+
 	fn required_context(&self) -> crate::exec::ContextLevel {
 		// Module functions require database context, and arguments
 		// may have their own context requirements
@@ -200,6 +204,10 @@ pub struct SiloModuleExec {
 impl PhysicalExpr for SiloModuleExec {
 	fn name(&self) -> &'static str {
 		"SiloModule"
+	}
+
+	fn as_any(&self) -> &dyn std::any::Any {
+		self
 	}
 
 	fn required_context(&self) -> crate::exec::ContextLevel {
