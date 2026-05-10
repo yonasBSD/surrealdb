@@ -4,12 +4,16 @@ mod common;
 mod http_integration {
 	use std::time::Duration;
 
+	use futures_util::{SinkExt, StreamExt};
 	use http::header::HeaderValue;
 	use http::{Method, header};
 	use reqwest::Client;
 	use serde_json::json;
 	use surrealdb::headers::{AUTH_DB, AUTH_NS};
 	use test_log::test;
+	use tokio_tungstenite::connect_async;
+	use tokio_tungstenite::tungstenite::Message;
+	use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 	use ulid::Ulid;
 
 	use super::common::{self, PASS, StartServerArguments, USER};
@@ -2184,6 +2188,20 @@ mod http_integration {
 				.await
 				.unwrap();
 			assert_eq!(res.status(), 403, "body: {}", res.text().await.unwrap());
+			// The /sql WebSocket upgrade must also be denied when the SQL HTTP
+			// route is denied, otherwise --deny-http sql can be bypassed by
+			// switching from HTTP POST to WebSocket on the same route.
+			let res = client
+				.get(format!("{base_url}/sql"))
+				.basic_auth(USER, Some(PASS))
+				.header(header::CONNECTION, "Upgrade")
+				.header(header::UPGRADE, "websocket")
+				.header(header::SEC_WEBSOCKET_VERSION, "13")
+				.header(header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==")
+				.send()
+				.await
+				.unwrap();
+			assert_eq!(res.status(), 403, "body: {}", res.text().await.unwrap());
 			let res = client
 				.post(format!("{base_url}/import"))
 				.basic_auth(USER, Some(PASS))
@@ -2290,6 +2308,20 @@ mod http_integration {
 					.unwrap();
 				assert_eq!(res.status(), 403, "body: {}", res.text().await.unwrap());
 			}
+			// The /sql WebSocket upgrade must also be denied when the SQL HTTP
+			// route is denied via --deny-http (with rpc still allowed).
+			println!("Testing \"/sql\" WebSocket route is denied...");
+			let res = client
+				.get(format!("{base_url}/sql"))
+				.basic_auth(USER, Some(PASS))
+				.header(header::CONNECTION, "Upgrade")
+				.header(header::UPGRADE, "websocket")
+				.header(header::SEC_WEBSOCKET_VERSION, "13")
+				.header(header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==")
+				.send()
+				.await
+				.unwrap();
+			assert_eq!(res.status(), 403, "body: {}", res.text().await.unwrap());
 			// WebSocket
 			println!("Testing \"/rpc\" route...");
 			client
@@ -2361,6 +2393,40 @@ mod http_integration {
 				.await;
 			assert!(res.is_err(), "Request to \"/rpc\" endpoint unexpectedly succeeded")
 		}
+	}
+
+	/// Positive control for the `/sql` WebSocket route: with no deny flags
+	/// configured, a WebSocket upgrade succeeds and a `RETURN 1;` query
+	/// executed over the socket round-trips a valid JSON response. Pairs
+	/// with the deny-case assertions in `http_capabilities` to make sure
+	/// the capability checks added in `get_handler` do not regress the
+	/// happy path.
+	#[test(tokio::test)]
+	async fn sql_websocket_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+		let (addr, _server) = common::start_server_without_auth().await.unwrap();
+		let ns = Ulid::new().to_string();
+		let db = Ulid::new().to_string();
+
+		let url = format!("ws://{addr}/sql");
+		let mut req = url.into_client_request()?;
+		req.headers_mut().insert("surreal-ns", ns.parse()?);
+		req.headers_mut().insert("surreal-db", db.parse()?);
+
+		let (mut ws, response) = connect_async(req).await?;
+		assert_eq!(response.status(), http::StatusCode::SWITCHING_PROTOCOLS);
+
+		ws.send(Message::Text("RETURN 1;".into())).await?;
+		let frame = tokio::time::timeout(Duration::from_secs(5), ws.next())
+			.await?
+			.ok_or_else(|| std::io::Error::other("websocket closed before response"))??;
+		let text = match frame {
+			Message::Text(text) => text,
+			other => panic!("expected text frame, got {other:?}"),
+		};
+		let body: serde_json::Value = serde_json::from_str(&text)?;
+		assert_eq!(body[0]["status"], "OK", "body: {body}");
+		assert_eq!(body[0]["result"], 1, "body: {body}");
+		Ok(())
 	}
 
 	#[test(tokio::test)]
@@ -2523,6 +2589,19 @@ mod http_integration {
 				.unwrap();
 			let res = res.text().await.unwrap();
 			assert!(res.contains("The HTTP route 'sql' is forbidden"), "body: {}", res);
+			// The /sql WebSocket upgrade must enforce the same subject-level
+			// arbitrary-query capability as the HTTP POST handler.
+			let res = client
+				.get(format!("{base_url}/sql"))
+				.basic_auth(USER, Some(PASS))
+				.header(header::CONNECTION, "Upgrade")
+				.header(header::UPGRADE, "websocket")
+				.header(header::SEC_WEBSOCKET_VERSION, "13")
+				.header(header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==")
+				.send()
+				.await
+				.unwrap();
+			assert_eq!(res.status(), 403, "body: {}", res.text().await.unwrap());
 		}
 		// Deny arbitrary querying
 		{
@@ -2560,6 +2639,19 @@ mod http_integration {
 				.unwrap();
 			let res = res.text().await.unwrap();
 			assert!(res.contains("The HTTP route 'sql' is forbidden"), "body: {}", res);
+			// The /sql WebSocket upgrade must enforce the same subject-level
+			// arbitrary-query capability as the HTTP POST handler.
+			let res = client
+				.get(format!("{base_url}/sql"))
+				.basic_auth(USER, Some(PASS))
+				.header(header::CONNECTION, "Upgrade")
+				.header(header::UPGRADE, "websocket")
+				.header(header::SEC_WEBSOCKET_VERSION, "13")
+				.header(header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==")
+				.send()
+				.await
+				.unwrap();
+			assert_eq!(res.status(), 403, "body: {}", res.text().await.unwrap());
 		}
 	}
 
