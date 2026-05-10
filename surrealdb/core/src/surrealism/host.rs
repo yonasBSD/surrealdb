@@ -131,7 +131,13 @@ fn module_scoped_capabilities(
 		FunctionTargets::All => {}
 	}
 
-	caps
+	let net_targets = module_allow_net_targets(module);
+	let network = if net_targets.is_empty() {
+		Targets::None
+	} else {
+		Targets::Some(net_targets)
+	};
+	caps.with_network_targets(network)
 }
 
 #[async_trait]
