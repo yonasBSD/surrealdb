@@ -83,8 +83,14 @@ pub(crate) async fn evaluate_all(value: &Value, ctx: EvalContext<'_>) -> FlowRes
 			if has_record_ids {
 				let mut results = Vec::with_capacity(arr.len());
 				for item in arr.iter() {
-					let fetched = Box::pin(evaluate_all(item, ctx.clone())).await?;
-					results.push(fetched);
+					// Match legacy `val/value/get.rs`: under `.*`, only RecordId
+					// elements trigger a fetch; everything else passes through
+					// unchanged.
+					let processed = match item {
+						Value::RecordId(_) => Box::pin(evaluate_all(item, ctx.clone())).await?,
+						_ => item.clone(),
+					};
+					results.push(processed);
 				}
 				Ok(Value::Array(results.into()))
 			} else {
@@ -99,7 +105,10 @@ pub(crate) async fn evaluate_all(value: &Value, ctx: EvalContext<'_>) -> FlowRes
 				crate::exec::operators::fetch::fetch_record(ctx.exec_ctx, rid).await
 			}
 		}
-		other => Ok(Value::Array(vec![other.clone()].into())),
+		// Anything else (NONE, NULL, scalars, geometries) returns NONE, matching the
+		// legacy compute path. Issue #7143: previously this wrapped the value in a
+		// single-element array, so `none.*` produced `[NONE]` instead of `NONE`.
+		_ => Ok(Value::None),
 	}
 }
 
