@@ -63,6 +63,9 @@ pub struct Datastore {
 	prefix_extractor_enabled: bool,
 	/// threshold of estimeded size above which we run a scan in seperate thread.
 	inline_scan_threshold: u32,
+	/// Whether scan/count `ReadOptions` set `verify_checksums(true)`.
+	/// When false, CRC32C verification is skipped on cold block reads.
+	scan_verify_checksums: bool,
 }
 
 pub struct Transaction {
@@ -92,6 +95,8 @@ pub struct Transaction {
 	prefix_extractor_enabled: bool,
 	/// threshold of estimeded size above which we run a scan in seperate thread.
 	inline_scan_threshold: u32,
+	/// Whether scan/count `ReadOptions` set `verify_checksums(true)`.
+	scan_verify_checksums: bool,
 }
 
 /// The rocksdb transaction and its pre-captured snapshot, bundled together so
@@ -383,6 +388,7 @@ impl Datastore {
 			garbage_collector,
 			prefix_extractor_enabled: config.prefix_extractor_enabled,
 			inline_scan_threshold: config.inline_scan_threshold,
+			scan_verify_checksums: config.scan_verify_checksums,
 		})
 	}
 
@@ -617,6 +623,7 @@ impl Datastore {
 			db: self.db.clone(),
 			prefix_extractor_enabled: self.prefix_extractor_enabled,
 			inline_scan_threshold: self.inline_scan_threshold,
+			scan_verify_checksums: self.scan_verify_checksums,
 		}))
 	}
 }
@@ -747,6 +754,7 @@ impl Transaction {
 		ro.set_auto_readahead_size(true);
 		ro.set_async_io(true);
 		ro.fill_cache(true);
+		ro.set_verify_checksums(self.scan_verify_checksums);
 		self.apply_prefix_mode(&mut ro, rng);
 		if self.versioned {
 			let ts = version.unwrap_or(u64::MAX);
@@ -771,6 +779,7 @@ impl Transaction {
 		ro.set_auto_readahead_size(true);
 		ro.set_async_io(true);
 		ro.fill_cache(false);
+		ro.set_verify_checksums(self.scan_verify_checksums);
 		self.apply_prefix_mode(&mut ro, rng);
 		if self.versioned {
 			let ts = version.unwrap_or(u64::MAX);

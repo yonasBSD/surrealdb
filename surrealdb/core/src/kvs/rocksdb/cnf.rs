@@ -437,6 +437,14 @@ pub struct RocksDbConfig {
 	/// regardless of this value
 	/// (default: dynamic from 512 KiB to 4 MiB depending on system memory)
 	pub inline_scan_threshold: u32,
+
+	/// Whether to verify per-block CRC32C checksums when iterating during
+	/// scans and counts. Verification runs on first read of a block (cold
+	/// path); cached blocks are not re-checksummed. Disabling trades
+	/// integrity for cold-scan throughput; only safe on trusted storage.
+	/// Applies to both `scan_read_options` and `count_read_options`
+	/// (default: true).
+	pub scan_verify_checksums: bool,
 }
 
 impl Default for RocksDbConfig {
@@ -486,6 +494,7 @@ impl Default for RocksDbConfig {
 			whole_key_filtering: true,
 			memtable_prefix_bloom_ratio: 0.1,
 			inline_scan_threshold: default_inline_scan_threshold(),
+			scan_verify_checksums: true,
 		}
 	}
 }
@@ -556,10 +565,8 @@ impl Config for RocksDbConfig {
 			)
 			.parse_key_bool("rocksdb_prefix_extractor_enabled", &mut self.prefix_extractor_enabled)
 			.parse_key_bool("rocksdb_whole_key_filtering", &mut self.whole_key_filtering)
-			.parse_key(
-				"rocksdb_memtable_prefix_bloom_ratio",
-				&mut self.memtable_prefix_bloom_ratio,
-			);
+			.parse_key("rocksdb_memtable_prefix_bloom_ratio", &mut self.memtable_prefix_bloom_ratio)
+			.parse_key_bool("rocksdb_scan_verify_checksums", &mut self.scan_verify_checksums);
 
 		if map.has_key("datastore_sync") {
 			map.parse_key("datastore_sync", &mut self.sync_mode);
