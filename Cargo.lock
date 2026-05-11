@@ -2038,6 +2038,7 @@ name = "demo"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "reqwest 0.13.3",
  "serde_json",
  "surrealdb",
  "surrealdb-types",
@@ -7797,6 +7798,7 @@ dependencies = [
  "surrealdb-types",
  "surrealism-macros",
  "surrealism-types",
+ "tokio",
  "wit-bindgen 0.51.0",
 ]
 
