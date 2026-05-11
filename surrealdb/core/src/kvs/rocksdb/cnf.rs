@@ -133,20 +133,29 @@ fn default_keep_log_file_num() -> usize {
 	}
 }
 
-/// Scale the per-iterator auto-readahead cap with system memory. The
-/// implicit iterator prefetcher can grow up to this size per active
-/// iterator, so many concurrent range scans multiply the cost. On
-/// small systems the cap is reduced proportionally.
-/// < 1 GiB: 512 KiB, < 4 GiB: 1 MiB, otherwise 4 MiB.
+/// Cap the per-iterator auto-readahead size at 256 KiB. The implicit
+/// prefetcher doubles its read window after each sequential block read,
+/// starting at `initial_auto_readahead_size`; this constant bounds the
+/// upper limit of that doubling.
+///
+/// The optimum is hardware-dependent and tracks the kernel block-layer
+/// limit on a single device IO request, exposed at
+/// `/sys/block/<device>/queue/max_sectors_kb`. When RocksDB's readahead
+/// exceeds `max_sectors_kb`, the kernel splits each prefetch into
+/// multiple device IOs, adding per-IO overhead. The empirical optimum
+/// is therefore approximately the first multiple of `max_sectors_kb`.
+///
+/// Benchmarked on a cold-cache seekrandom workload (200M-key DB,
+/// seek_nexts=10000) on an NVMe with `max_sectors_kb=128`: 128 KiB was
+/// the per-machine optimum (578 ops/s, 640 MB/s) and 4 MiB was ~60%
+/// slower. Production-class NVMe drives typically ship with
+/// `max_sectors_kb=512`, where the same logic implies an optimum closer
+/// to 512 KiB. 256 KiB is chosen here as RocksDB's own default and a
+/// safe middle ground for both 128 KiB and 512 KiB hardware. Operators
+/// on either end of that range can override via the
+/// `SURREAL_ROCKSDB_MAX_AUTO_READAHEAD_SIZE` env var.
 fn default_max_auto_readahead_size() -> usize {
-	let mem = *TOTAL_SYSTEM_MEMORY;
-	if mem < GIB {
-		(512 * KIB) as usize
-	} else if mem < 4 * GIB {
-		MIB as usize
-	} else {
-		(4 * MIB) as usize
-	}
+	(256 * KIB) as usize
 }
 
 /// Scale the inline scan threshold with system memory. Scans at or
