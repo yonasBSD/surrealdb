@@ -627,7 +627,7 @@ impl TryAdd for Value {
 				Self::Set(v)
 			}
 			(Self::Object(v), Self::Object(w)) => Self::Object(v.add(w)),
-			(v, w) => bail!(Error::TryAdd(v.to_raw_string(), w.to_raw_string())),
+			(v, w) => bail!(Error::TryAdd(v.kind_of().to_owned(), w.kind_of().to_owned())),
 		})
 	}
 }
@@ -662,7 +662,7 @@ impl TrySub for Value {
 				}
 				Self::from(v)
 			}
-			(v, w) => bail!(Error::TrySub(v.to_raw_string(), w.to_raw_string())),
+			(v, w) => bail!(Error::TrySub(v.kind_of().to_owned(), w.kind_of().to_owned())),
 		})
 	}
 }
@@ -723,7 +723,7 @@ impl TryMul for Value {
 
 				Ok(Value::Duration(Duration(StdDuration::new(secs, subsec_nanos))))
 			}
-			(v, w) => bail!(Error::TryMul(v.to_raw_string(), w.to_raw_string())),
+			(v, w) => bail!(Error::TryMul(v.kind_of().to_owned(), w.kind_of().to_owned())),
 		}
 	}
 }
@@ -780,7 +780,7 @@ impl TryDiv for Value {
 				Ok(Value::Duration(Duration(StdDuration::new(secs, subsec_nanos))))
 			}
 
-			(v, w) => bail!(Error::TryDiv(v.to_raw_string(), w.to_raw_string())),
+			(v, w) => bail!(Error::TryDiv(v.kind_of().to_owned(), w.kind_of().to_owned())),
 		}
 	}
 }
@@ -797,7 +797,7 @@ impl TryFloatDiv for Value {
 	fn try_float_div(self, other: Self) -> Result<Self::Output> {
 		Ok(match (self, other) {
 			(Self::Number(v), Self::Number(w)) => Self::Number(v.try_float_div(w)?),
-			(v, w) => bail!(Error::TryDiv(v.to_raw_string(), w.to_raw_string())),
+			(v, w) => bail!(Error::TryDiv(v.kind_of().to_owned(), w.kind_of().to_owned())),
 		})
 	}
 }
@@ -814,7 +814,7 @@ impl TryRem for Value {
 	fn try_rem(self, other: Self) -> Result<Self> {
 		Ok(match (self, other) {
 			(Self::Number(v), Self::Number(w)) => Self::Number(v.try_rem(w)?),
-			(v, w) => bail!(Error::TryRem(v.to_raw_string(), w.to_raw_string())),
+			(v, w) => bail!(Error::TryRem(v.kind_of().to_owned(), w.kind_of().to_owned())),
 		})
 	}
 }
@@ -831,7 +831,7 @@ impl TryPow for Value {
 	fn try_pow(self, other: Self) -> Result<Self> {
 		Ok(match (self, other) {
 			(Value::Number(v), Value::Number(w)) => Self::Number(v.try_pow(w)?),
-			(v, w) => bail!(Error::TryPow(v.to_raw_string(), w.to_raw_string())),
+			(v, w) => bail!(Error::TryPow(v.kind_of().to_owned(), w.kind_of().to_owned())),
 		})
 	}
 }
@@ -848,7 +848,7 @@ impl TryNeg for Value {
 	fn try_neg(self) -> Result<Self> {
 		Ok(match self {
 			Self::Number(n) => Self::Number(n.try_neg()?),
-			v => bail!(Error::TryNeg(v.to_sql())),
+			v => bail!(Error::TryNeg(v.kind_of().to_owned())),
 		})
 	}
 }
