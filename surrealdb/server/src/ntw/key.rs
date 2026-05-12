@@ -75,6 +75,21 @@ async fn execute_and_return(
 	expr: Option<String>,
 ) -> Result<Output, anyhow::Error> {
 	let vars = if let Some(expr) = expr {
+		// SECURITY: only allow a single SurrealQL value expression in the body.
+		// Earlier this path called `Datastore::execute(&expr, ..)` directly on
+		// the raw body, so an authenticated caller could put semicolon-
+		// separated statements in a POST/PUT/PATCH /key body and run arbitrary
+		// SurrealQL ahead of the intended CREATE/UPDATE/UPSERT — bypassing
+		// deployments that intentionally enable only the Key route. Parse the
+		// body first; reject anything that isn't exactly one expression.
+		let ast = syn::parse(&expr)
+			.context("Invalid /key request body: expected a single SurrealQL value")?;
+		if ast.num_statements() != 1 {
+			return Err(anyhow::anyhow!(
+				"Invalid /key request body: expected a single SurrealQL value, got {} statements",
+				ast.num_statements()
+			));
+		}
 		let mut value = db.execute(&expr, session, Some(vars.clone())).await?;
 		if let Some(resp) = value.pop() {
 			vars.insert("data".to_owned(), resp.result?);
