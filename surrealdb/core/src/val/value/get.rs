@@ -5,7 +5,6 @@ use futures::future::try_join_all;
 use reblessive::tree::Stk;
 use surrealdb_types::ToSql;
 
-use crate::catalog::providers::TableProvider;
 use crate::ctx::{Context, FrozenContext};
 use crate::dbs::Options;
 use crate::doc::CursorDoc;
@@ -587,17 +586,8 @@ impl Value {
 							if let Some(cur) = doc
 								&& cur.rid.as_deref() == Some(&val)
 							{
-								let (ns_id, db_id) = ctx.expect_ns_db_ids(opt).await?;
-								let record = ctx
-									.tx()
-									.get_record(ns_id, db_id, &val.table, &val.key, None)
-									.await?;
-								let raw = if record.data.is_none() {
-									Value::None
-								} else {
-									record.data.clone()
-								};
-								return stk.run(|stk| raw.get(stk, ctx, opt, None, next)).await;
+								let current = cur.doc.as_ref().clone();
+								return stk.run(|stk| current.get(stk, ctx, opt, None, next)).await;
 							}
 
 							// Fetch the record id's contents
