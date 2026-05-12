@@ -143,6 +143,27 @@ pub fn record((arg1, Optional(arg2)): (Value, Optional<Value>)) -> Result<Value>
 			value: arg1.into_string(),
 		}),
 
+		// SECURITY: the legacy two-argument form `type::record(<value>, "table")`
+		// used to validate that the value's record id belonged to the supplied
+		// table. The current `type::record(table, key)` semantic flips the
+		// roles, so a SIGNIN clause like `SELECT * FROM type::record($id, "user")`
+		// no longer rejects an `$id` whose table is not `user` — it just builds
+		// `<$id>:user`. When `$id` is already a record id, preserve the old
+		// validation: error if the record's table doesn't match the constraint
+		// string. Other shapes fall through to the new semantic.
+		(Value::RecordId(rid), Some(Value::String(constraint))) => {
+			if rid.table.as_str() != constraint.as_str() {
+				bail!(Error::IdInvalid {
+					value: format!(
+						"{}: expected a record in table '{}'",
+						Value::RecordId(rid).into_raw_string(),
+						constraint
+					),
+				});
+			}
+			Ok(Value::RecordId(rid))
+		}
+
 		// Handle second argument
 		(arg1, Some(arg2)) => Ok(Value::RecordId(RecordId {
 			key: match arg2 {
