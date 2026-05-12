@@ -1937,6 +1937,10 @@ criteria = "safe-to-deploy"
 version = "0.18.1"
 criteria = "safe-to-run"
 
+[[exemptions.xxhash-rust]]
+version = "0.8.15"
+criteria = "safe-to-deploy"
+
 [[exemptions.yasna]]
 version = "0.5.2"
 criteria = "safe-to-run"

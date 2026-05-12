@@ -7848,9 +7848,9 @@ dependencies = [
 
 [[package]]
 name = "surrealkv"
-version = "0.21.1"
+version = "0.21.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5a39b9baad29d5a4ca629d9b5e1176c543430648e0e8f55a64a4a8217cc131d"
+checksum = "b0672cbbe282723a62ccee14b95232ca0b4c9bf44ea22fb520c43e7c517fb8ec"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -7872,6 +7872,7 @@ dependencies = [
  "sha2",
  "snap",
  "tokio",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -10211,6 +10212,12 @@ dependencies = [
  "libc",
  "rustix 1.1.4",
 ]
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdd20c5420375476fbd4394763288da7eb0cc0b8c11deed431a91562af7335d3"
 
 [[package]]
 name = "yasna"
