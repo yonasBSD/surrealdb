@@ -441,7 +441,16 @@ pub trait RpcProtocol {
 				PublicValue::None => (),
 				PublicValue::Null => session.db = None,
 				PublicValue::String(db) => {
-					let ns = session.ns.clone().expect("namespace should be set");
+					// SECURITY: a `use` call that sets `db` without a namespace
+					// previously hit `.expect("namespace should be set")`, and the
+					// crate's `panic = 'abort'` setting would have aborted the
+					// whole server process — a one-RPC remote DoS. Return a clean
+					// error instead.
+					let Some(ns) = session.ns.clone() else {
+						return Err(invalid_params(
+							"Cannot set database without first selecting a namespace".to_string(),
+						));
+					};
 					let tx = self
 						.kvs()
 						.transaction(TransactionType::Write, LockType::Optimistic)
