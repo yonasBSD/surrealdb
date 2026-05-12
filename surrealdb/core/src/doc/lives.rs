@@ -164,22 +164,18 @@ impl Document {
 		// query context to prevent unreachable behaviour
 		// and ensure that queries can be executed.
 		ctx.set_transaction(tx);
-		// Add the session params to this LIVE query, so
-		// that queries can use these within field
-		// projections and WHERE clauses.
+		// Captured user variables first; trusted LIVE / session params last so
+		// a user-named `$value` / `$before` / `$after` / `$event` cannot shadow
+		// the real document context that table permission expressions read.
+		ctx.add_values(live_subscription.vars.clone());
 		ctx.add_value("access", sess.pick(AC.as_ref()).into());
 		ctx.add_value("auth", sess.pick(RD.as_ref()).into());
 		ctx.add_value("token", sess.pick(TK.as_ref()).into());
 		ctx.add_value("session", sess.clone().into());
-		// Add $before, $after, $value, and $event params
-		// to this LIVE query so the user can use these
-		// within field projections and WHERE clauses.
 		ctx.add_value("event", met);
 		ctx.add_value("value", Arc::clone(&current));
 		ctx.add_value("after", current);
 		ctx.add_value("before", initial);
-		// Add the variables to the context
-		ctx.add_values(live_subscription.vars.clone());
 		// Freeze the context
 		let ctx = ctx.freeze();
 
@@ -731,6 +727,46 @@ mod tests {
 			.await
 			.expect("execute should not return an Err");
 		res.remove(0).result.expect("CREATE should succeed despite THROW in LIVE SELECT");
+	}
+
+	/// A user-named `$value` / `$before` / `$after` / `$event` captured at LIVE registration
+	/// time must not override the real document context when the WHERE clause is evaluated
+	/// at notification time. Without the reorder fix the captured `$value` would shadow the
+	/// real document, letting a subscriber pass table permission expressions like
+	/// `WHERE $value.ok = true` against an attacker-chosen document instead of the live one.
+	#[tokio::test]
+	async fn test_live_user_value_does_not_shadow_real_document() {
+		let (recv, ds) = new_ds_with_broker().await.unwrap();
+		let (ns, db, tb) = ("test", "test", "person");
+		setup_ns_db_table(&ds, ns, db, tb).await;
+
+		let ses = Session::owner().with_ns(ns).with_db(db).with_rt(true);
+		// Capture a user `$value` claiming `ok = true`, then register a LIVE query whose
+		// WHERE references `$value.ok`. The capture pass picks `$value` up because it is
+		// not in PROTECTED_PARAM_NAMES.
+		ds.execute(
+			"LET $value = { ok: true }; LIVE SELECT * FROM person WHERE $value.ok = true",
+			&ses,
+			None,
+		)
+		.await
+		.unwrap();
+
+		let ses_write = Session::owner().with_ns(ns).with_db(db);
+		let mut res = ds
+			.execute("CREATE person:42 SET ok = false", &ses_write, None)
+			.await
+			.expect("execute should not return an Err");
+		res.remove(0).result.expect("CREATE should succeed");
+
+		// With the fix the system `$value` (the real document, ok=false) wins, so the
+		// WHERE clause is false and no notification fires. Wait briefly to be sure.
+		let result =
+			tokio::time::timeout(tokio::time::Duration::from_millis(300), recv.recv()).await;
+		assert!(
+			result.is_err(),
+			"no notification should fire when the real document does not match the WHERE"
+		);
 	}
 
 	/// A LIVE query with a FETCH clause that always errors must not abort subsequent writes.
