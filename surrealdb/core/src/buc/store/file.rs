@@ -177,6 +177,16 @@ impl FileStore {
 		// Combine the canonical root with the relative path
 		let full_path = canonical_root.join(&relative_path).clean();
 
+		// SECURITY: First ensure the resolved path stays inside *this* bucket's
+		// canonical root. `path_clean::clean` collapses `..` segments, so a key
+		// like `/../other.txt` (direct bucket) or `/../../../other_ns/...`
+		// (global PrefixedStore bucket) would otherwise escape upward and only
+		// the global allowlist check below would gate it — letting one bucket
+		// read or write another bucket's files under the same allowlisted root.
+		if !full_path.starts_with(&canonical_root) {
+			return Err(format!("Path escapes the bucket root: {}", full_path.display()));
+		}
+
 		// Verify the path is within the allowlist
 		if !is_path_allowed(&full_path, self.options.lowercase_paths, &self.config.bucket_list) {
 			return Err(format!(
