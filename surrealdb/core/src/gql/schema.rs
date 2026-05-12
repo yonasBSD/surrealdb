@@ -203,7 +203,7 @@ pub async fn generate_schema(
 	}
 
 	if let Some(fns) = fns {
-		query = process_fns(fns, query, &mut types, session, datastore).await?;
+		query = process_fns(fns, query, &mut types, datastore).await?;
 	}
 
 	// Register all geometry-related types (enum, object types, union, input types)

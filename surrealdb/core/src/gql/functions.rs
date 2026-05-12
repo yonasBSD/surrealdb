@@ -34,7 +34,6 @@ pub async fn process_fns(
 	fns: Arc<[FunctionDefinition]>,
 	mut query: Object,
 	types: &mut Vec<Type>,
-	session: &Session,
 	datastore: &Arc<Datastore>,
 ) -> Result<Object, GqlError> {
 	for fnd in fns.iter() {
@@ -43,8 +42,12 @@ pub async fn process_fns(
 			continue;
 		};
 
-		// Clone values that will be moved into the resolver closure
-		let sess1 = session.clone();
+		// SECURITY: do NOT close over the schema-generation-time session. The
+		// schema is cached per (ns, db, gql-config), so a session captured here
+		// would be reused for every later caller's fn_* invocation — running
+		// their queries under the first caller's auth. Read the per-request
+		// session from the GraphQL context instead, matching the other
+		// resolvers in this crate.
 		let kvs1 = Arc::clone(datastore);
 		let fnd1 = fnd.clone();
 
@@ -57,10 +60,10 @@ pub async fn process_fns(
 				Some(&format!("fn_{}_return", fnd.name)),
 			)?,
 			move |ctx| {
-				let sess1 = sess1.clone();
 				let kvs1 = Arc::clone(&kvs1);
 				let fnd1 = fnd1.clone();
 				FieldFuture::new(async move {
+					let sess1 = ctx.data::<Arc<Session>>()?;
 					let gql_args = ctx.args.as_index_map();
 					let mut args = Vec::new();
 
@@ -88,7 +91,7 @@ pub async fn process_fns(
 					let plan = LogicalPlan {
 						expressions: vec![TopLevelExpr::Expr(func_call)],
 					};
-					let res = execute_plan(&kvs1, &sess1, plan).await?;
+					let res = execute_plan(&kvs1, sess1.as_ref(), plan).await?;
 
 					// Convert the SurrealQL result to a GraphQL value
 					let gql_res = match res {
