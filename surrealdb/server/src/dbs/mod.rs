@@ -583,11 +583,11 @@ impl DbsCapabilities {
 	}
 
 	pub fn into_cli_capabilities(self) -> Capabilities {
-		merge_capabilities(SdkCapabilities::all().into(), self)
+		merge_capabilities(SdkCapabilities::all().into(), &self)
 	}
 }
 
-fn merge_capabilities(initial: Capabilities, caps: DbsCapabilities) -> Capabilities {
+fn merge_capabilities(initial: Capabilities, caps: &DbsCapabilities) -> Capabilities {
 	initial
 		.with_scripting(caps.get_scripting())
 		.with_guest_access(caps.get_allow_guests())
@@ -608,7 +608,7 @@ fn merge_capabilities(initial: Capabilities, caps: DbsCapabilities) -> Capabilit
 
 impl From<DbsCapabilities> for Capabilities {
 	fn from(caps: DbsCapabilities) -> Self {
-		merge_capabilities(Default::default(), caps)
+		merge_capabilities(Default::default(), &caps)
 	}
 }
 

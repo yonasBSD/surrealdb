@@ -5,70 +5,47 @@
 use std::sync::Arc;
 
 use super::Planner;
-use super::util::{derive_field_name, idiom_to_field_name};
+use super::util::{derive_field_name, idiom_to_field_path};
 use crate::err::Error;
+use crate::exec::field_path::FieldPathPart;
 use crate::exec::operators::{
 	AggregateExprInfo, AggregateField, ExtractedAggregate, aggregate_field_name,
 };
 use crate::expr::field::{Field, Fields};
-use crate::expr::part::Part;
 use crate::expr::visit::{MutVisitor, VisitMut};
 use crate::expr::{Expr, Function, FunctionCall, Idiom, Literal};
 
-/// Build a nested output path from an idiom by walking its [`Part`]s
-/// directly so a single [`Part::Field`] whose identifier contains a dot
-/// (e.g. `` AS `foo.bar` ``) stays a flat `["foo.bar"]` key rather than
-/// being split on `.`.
+/// Build a nested output path from an idiom for use as an [`AggregateField::output_path`].
 ///
-/// Mirrors the behaviour of `idiom_to_field_path` in the projection
-/// planner so both pipelines agree on output field names:
+/// Single source of truth: delegates to [`idiom_to_field_path`] so the
+/// projection pipeline and the aggregation pipeline always agree on output
+/// field names. The returned `Vec<String>` is the flattened form of the
+/// canonical [`FieldPath`]:
 ///
-/// - Graph-traversal aliases (`` ->friends->person AS buddy ``) are detected before simplification
-///   and collapse to the alias identifier.
+/// - Graph-traversal aliases (`` ->friends->person AS buddy ``) collapse to a single flat key (the
+///   alias identifier).
+/// - Multi-part idioms (`AS foo.bar`) nest as `["foo", "bar"]`.
+/// - Single-part idioms whose identifier contains a dot (`` AS `foo.bar` ``) stay a single flat
+///   `["foo.bar"]` key.
 /// - Execution-only parts (array filters, indices, method calls, etc.) are dropped via
-///   [`Idiom::simplify`].
-/// - Simplified paths that still contain non-[`Part::Field`] components fall back to the simplified
-///   SQL form so the streaming path produces the same flat key the compute-only path would.
+///   `Idiom::simplify`, matching projection behaviour.
 fn alias_output_path(idiom: &Idiom) -> Vec<String> {
-	use surrealdb_types::ToSql;
-
-	// Graph traversals with an inline alias collapse to a single flat
-	// field name (the alias identifier), matching `idiom_to_field_name`.
-	// Delegate to `idiom_to_field_name` rather than recursing into
-	// `alias_output_path`, because a multi-part inline alias (e.g.
-	// `->x AS foo.bar` where the alias is parsed as `[Field(foo),
-	// Field(bar)]`) must flatten to a single `"foo.bar"` key to match
-	// `idiom_to_field_path`, not nest into `["foo", "bar"]`.
-	for part in idiom.0.iter() {
-		if let Part::Lookup(lookup) = part
-			&& lookup.alias.is_some()
-		{
-			return vec![idiom_to_field_name(idiom)];
-		}
-	}
-
-	let simplified = idiom.simplify();
-	let mut parts = Vec::with_capacity(simplified.0.len());
-	for part in simplified.0.iter() {
-		match part {
-			Part::Field(name) => parts.push(name.as_str().to_owned()),
-			// Unaliased graph traversals become their own output key (e.g.
-			// `->knows` or `<-foo<-bar`), matching `idiom_to_field_path`'s
-			// `Part::Lookup` arm. Without this, `->knows.name` would
-			// collapse to the flat `"->knows.name"` key here while the
-			// projection planner would nest into `{ "->knows": { name: _ } }`.
-			Part::Lookup(lookup) => parts.push(lookup.to_sql()),
-			// Other unsupported parts (e.g. `Part::Start` for parameter
-			// starts) fall back to a single flat key derived from the
-			// simplified SQL form, matching `idiom_to_field_path`'s
-			// fallback arm.
-			_ => return vec![simplified.to_sql()],
-		}
-	}
-	if parts.is_empty() {
-		return vec![simplified.to_sql()];
-	}
-	parts
+	idiom_to_field_path(idiom)
+		.0
+		.into_iter()
+		.map(|part| match part {
+			FieldPathPart::Field(s) | FieldPathPart::Lookup(s) => s,
+			// `idiom_to_field_path` walks `Idiom::simplify`, which strips
+			// indices and First/Last markers, so these variants should not
+			// appear here. If a future change to `idiom_to_field_path`
+			// emits them anyway, render them in their textual form rather
+			// than panicking — preserving the "produce a stable string
+			// key" invariant.
+			FieldPathPart::Index(i) => format!("[{i}]"),
+			FieldPathPart::First => "[0]".to_string(),
+			FieldPathPart::Last => "[$]".to_string(),
+		})
+		.collect()
 }
 
 // ============================================================================

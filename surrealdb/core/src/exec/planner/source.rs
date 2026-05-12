@@ -333,7 +333,10 @@ impl<'ctx> Planner<'ctx> {
 
 		if needs_full_pipeline {
 			let config = SelectPipelineConfig {
-				cond,
+				where_clause: match cond {
+					Some(c) => crate::exec::planner::select::WhereClauseState::Original(c),
+					None => crate::exec::planner::select::WhereClauseState::None,
+				},
 				split,
 				group,
 				order,
@@ -341,8 +344,6 @@ impl<'ctx> Planner<'ctx> {
 				start,
 				omit: vec![],
 				tempfiles: false,
-				filter_pushed: false,
-				precompiled_predicate: None,
 			};
 			self.plan_pipeline(base_scan, expr, config).await
 		} else {

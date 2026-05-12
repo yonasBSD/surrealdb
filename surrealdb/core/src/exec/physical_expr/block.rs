@@ -210,8 +210,18 @@ impl BlockPhysicalExpr {
 						})));
 					}
 					Err(e @ (Error::PlannerUnsupported(_) | Error::PlannerUnimplemented(_))) => {
-						if let Error::PlannerUnimplemented(msg) = &e {
-							tracing::warn!("PlannerUnimplemented fallback in block (LET): {msg}");
+						match &e {
+							Error::PlannerUnimplemented(msg) => {
+								tracing::warn!(
+									"PlannerUnimplemented fallback in block (LET): {msg}"
+								);
+							}
+							Error::PlannerUnsupported(msg) => {
+								tracing::debug!(
+									"PlannerUnsupported fallback in block (LET): {msg}",
+								);
+							}
+							_ => {}
 						}
 						let (opt, frozen) = get_legacy_context(current_exec_ctx, legacy_ctx)?;
 						let doc =
@@ -278,8 +288,18 @@ impl BlockPhysicalExpr {
 						})))
 					}
 					Err(e @ (Error::PlannerUnsupported(_) | Error::PlannerUnimplemented(_))) => {
-						if let Error::PlannerUnimplemented(msg) = &e {
-							tracing::warn!("PlannerUnimplemented fallback in block (expr): {msg}");
+						match &e {
+							Error::PlannerUnimplemented(msg) => {
+								tracing::warn!(
+									"PlannerUnimplemented fallback in block (expr): {msg}"
+								);
+							}
+							Error::PlannerUnsupported(msg) => {
+								tracing::debug!(
+									"PlannerUnsupported fallback in block (expr): {msg}",
+								);
+							}
+							_ => {}
 						}
 						let (opt, frozen) = get_legacy_context(current_exec_ctx, legacy_ctx)?;
 						let doc =

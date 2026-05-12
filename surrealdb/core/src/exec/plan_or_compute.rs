@@ -96,8 +96,14 @@ pub(crate) async fn evaluate_expr(
 			collect_single_value(stream).await
 		}
 		Err(e @ (Error::PlannerUnsupported(_) | Error::PlannerUnimplemented(_))) => {
-			if let Error::PlannerUnimplemented(msg) = &e {
-				tracing::warn!("PlannerUnimplemented fallback in evaluate_expr: {msg}");
+			match &e {
+				Error::PlannerUnimplemented(msg) => {
+					tracing::warn!("PlannerUnimplemented fallback in evaluate_expr: {msg}");
+				}
+				Error::PlannerUnsupported(msg) => {
+					tracing::debug!("PlannerUnsupported fallback in evaluate_expr: {msg}",);
+				}
+				_ => {}
 			}
 			let (opt, frozen) =
 				get_legacy_context(ctx).context("Legacy compute fallback context unavailable")?;
@@ -132,8 +138,14 @@ pub(crate) async fn evaluate_body_expr(
 			}
 		}
 		Err(e @ (Error::PlannerUnsupported(_) | Error::PlannerUnimplemented(_))) => {
-			if let Error::PlannerUnimplemented(msg) = &e {
-				tracing::warn!("PlannerUnimplemented fallback in evaluate_body_expr: {msg}");
+			match &e {
+				Error::PlannerUnimplemented(msg) => {
+					tracing::warn!("PlannerUnimplemented fallback in evaluate_body_expr: {msg}");
+				}
+				Error::PlannerUnsupported(msg) => {
+					tracing::debug!("PlannerUnsupported fallback in evaluate_body_expr: {msg}",);
+				}
+				_ => {}
 			}
 			let (opt, frozen) = get_legacy_context_with_param(ctx, param_name, param_value)
 				.context("Legacy compute fallback context unavailable")?;

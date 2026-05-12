@@ -17,14 +17,12 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use futures::StreamExt;
-use surrealdb_strand::Strand;
 
 use crate::catalog::providers::TableProvider;
 use crate::catalog::{DatabaseId, NamespaceId};
 use crate::exec::permission::{
 	PhysicalPermission, check_permission_for_value, convert_permission_to_physical,
 };
-use crate::exec::planner::expr_to_physical_expr;
 use crate::exec::pre_decode_filter::{PreDecodeFilter, PreDecodeFilterOutcome};
 use crate::exec::{EvalContext, ExecutionContext, PhysicalExpr, ValueBatch, ValueBatchStream};
 use crate::expr::{ControlFlow, ControlFlowExt};
@@ -462,13 +460,18 @@ pub(crate) async fn eval_limit_expr(
 ///
 /// `field_permissions` and `dep_map` are wrapped in `Arc` so that
 /// [`filter_field_state_for_projection`] can share them across filtered
-/// copies without cloning the underlying `HashMap`.
+/// copies without cloning the underlying collection.
 #[derive(Debug, Clone)]
 pub(crate) struct FieldState {
 	/// Computed field definitions converted to physical expressions
 	pub(crate) computed_fields: Vec<ComputedFieldDef>,
-	/// Field-level permissions (field name -> permission)
-	pub(crate) field_permissions: Arc<HashMap<String, PhysicalPermission>>,
+	/// Field-level permissions, stored as `(idiom, perm)` pairs because the
+	/// idiom may contain wildcards (`outer.*`, `items[*]`) that must be
+	/// expanded against each value at evaluation time. Keyed lookup by
+	/// flat field-name string is the wrong question — nested paths cannot
+	/// be matched via top-level keys. See
+	/// [`filter_fields_by_permission`] for the expansion logic.
+	pub(crate) field_permissions: Arc<Vec<(crate::expr::Idiom, PhysicalPermission)>>,
 	/// Dependency map for computed fields, used for projection filtering.
 	/// Stored alongside the cached state so that projected queries can
 	/// cheaply determine the subset of computed fields they need.
@@ -480,7 +483,7 @@ impl FieldState {
 	pub(crate) fn empty() -> Self {
 		Self {
 			computed_fields: Vec::new(),
-			field_permissions: Arc::new(HashMap::new()),
+			field_permissions: Arc::new(Vec::new()),
 			dep_map: Arc::new(HashMap::new()),
 		}
 	}
@@ -511,14 +514,15 @@ impl ComputedFieldDef {
 /// topological sorting. It takes explicit parameters instead of
 /// `ExecutionContext`, making it usable at both plan time and execution time.
 pub(crate) async fn build_field_state_raw(
-	txn: &Transaction,
-	ctx: &crate::ctx::FrozenContext,
+	planner: &crate::exec::planner::Planner<'_>,
 	ns_id: crate::catalog::NamespaceId,
 	db_id: crate::catalog::DatabaseId,
 	table_name: &TableName,
 	check_perms: bool,
 	version: Option<u64>,
 ) -> Result<FieldState, ControlFlow> {
+	let txn =
+		planner.txn().context("build_field_state_raw requires a planner with a transaction")?;
 	let field_defs = txn
 		.all_tb_fields(ns_id, db_id, table_name, version)
 		.await
@@ -535,6 +539,16 @@ pub(crate) async fn build_field_state_raw(
 	if !has_computed && !has_field_perms {
 		return Ok(FieldState::empty());
 	}
+
+	// Computed-field and permission expressions are compiled through the
+	// supplied planner. When the planner has a transaction (plan-time path),
+	// inner subqueries benefit from plan-time index resolution; the
+	// planner's `CycleGuard` prevents recursive table-resolution for
+	// self-referential permissions like
+	// `WHERE (SELECT FROM same_table) != NONE`. When the planner is txn-less
+	// (runtime fallback), inner subqueries compile to runtime-resolving
+	// scans — bit-for-bit identical to the legacy behaviour. See
+	// `language-tests/tests/reproductions/skip_fetch_perms_subquery_dereference.surql`.
 
 	// Collect ALL computed fields and their dependency metadata.
 	let mut raw_computed: Vec<RawComputedField> = Vec::new();
@@ -555,10 +569,9 @@ pub(crate) async fn build_field_state_raw(
 
 			dep_map.insert(field_name.clone(), deps.clone());
 
-			let physical_expr =
-				expr_to_physical_expr(expr.clone(), ctx).await.with_context(|| {
-					format!("Computed field '{field_name}' has unsupported expression")
-				})?;
+			let physical_expr = planner.physical_expr(expr.clone()).await.with_context(|| {
+				format!("Computed field '{field_name}' has unsupported expression")
+			})?;
 
 			raw_computed.push((field_name, physical_expr, fd.field_kind.clone(), deps.fields));
 		}
@@ -579,15 +592,20 @@ pub(crate) async fn build_field_state_raw(
 		});
 	}
 
-	// Build field permissions
-	let mut field_permissions = HashMap::new();
+	// Build field permissions, preserving each field's original Idiom so
+	// `filter_fields_by_permission` can expand wildcards via `Value::each`.
+	// `Permission::Full` entries are skipped — they're "always allow" and
+	// don't need a runtime check.
+	let mut field_permissions: Vec<(crate::expr::Idiom, PhysicalPermission)> = Vec::new();
 	if check_perms {
 		for fd in field_defs.iter() {
-			let field_name = fd.name.to_raw_string();
-			let physical_perm = convert_permission_to_physical(&fd.select_permission, ctx)
+			if matches!(fd.select_permission, crate::catalog::Permission::Full) {
+				continue;
+			}
+			let physical_perm = convert_permission_to_physical(&fd.select_permission, planner)
 				.await
 				.context("Failed to convert field permission")?;
-			field_permissions.insert(field_name, physical_perm);
+			field_permissions.push((fd.name.clone(), physical_perm));
 		}
 	}
 
@@ -624,10 +642,13 @@ pub(crate) async fn build_field_state(
 		}
 	}
 
-	// Delegate to the raw implementation
+	// Fresh `Planner::with_txn` so subqueries inside computed-field /
+	// field-permission bodies get plan-time index resolution. The cycle
+	// guard starts empty; same-table recursion is broken by the inner
+	// `try_resolve_table_ctx` push.
+	let planner = crate::exec::planner::Planner::for_database(ctx.ctx(), ctx.txn(), db_ctx);
 	let full_state = build_field_state_raw(
-		&ctx.txn(),
-		ctx.ctx(),
+		&planner,
 		db_ctx.ns_ctx.ns.namespace_id,
 		db_ctx.db.database_id,
 		table_name,
@@ -742,6 +763,12 @@ pub(crate) async fn compute_fields_for_value(
 }
 
 /// Filter fields from a value based on field-level permissions.
+///
+/// Each `(idiom, perm)` entry is expanded via [`Value::each`] to handle
+/// wildcards (`outer.*`, `items[*]`), then each concrete path is checked
+/// with `$value` bound to the picked field value — matching the legacy
+/// [`crate::doc::pluck::Document::pluck_select`] semantics that the
+/// streaming runtime previously skipped for nested paths (issue #83).
 pub(crate) async fn filter_fields_by_permission(
 	ctx: &ExecutionContext,
 	state: &FieldState,
@@ -750,31 +777,40 @@ pub(crate) async fn filter_fields_by_permission(
 	if state.field_permissions.is_empty() {
 		return Ok(());
 	}
+	if !matches!(value, Value::Object(_)) {
+		return Ok(());
+	}
 
-	// Collect fields to check. `Strand::clone` is a 24-byte inline
-	// copy for short names (the vast majority of field names) or an
-	// `Arc` refcount bump for long ones — either way zero heap
-	// allocation per key, unlike `.to_string()` (blanket `Display`
-	// impl allocates + formats) or `.as_str().to_owned()` (direct
-	// `alloc + memcpy`). Probing through `.as_str()` works because
-	// `HashMap<String, _>::get` accepts any `&Q` where
-	// `String: Borrow<Q>`, and `Object::remove` already takes `&str`.
-	let field_names: Vec<Strand> = {
-		let Value::Object(obj) = &*value else {
-			return Ok(());
-		};
-		obj.keys().cloned().collect()
-	};
-
-	for field_name in field_names {
-		// Check if there's a permission for this field
-		if let Some(perm) = state.field_permissions.get(field_name.as_str()) {
-			let allowed = check_permission_for_value(perm, &*value, ctx)
-				.await
-				.context("Failed to check field permission")?;
-
-			if !allowed && let Value::Object(obj) = value {
-				obj.remove(field_name.as_str());
+	// Snapshot the row only when we actually need to evaluate something
+	// against the unmutated document. Per-field denies cut from `value`;
+	// predicates and `each` read from the snapshot so earlier cuts don't
+	// affect later field expansion.
+	let mut snapshot: Option<Value> = None;
+	for (idiom, perm) in state.field_permissions.iter() {
+		match perm {
+			PhysicalPermission::Allow => continue,
+			PhysicalPermission::Deny => {
+				let original = snapshot.get_or_insert_with(|| value.clone());
+				for path in original.each(&idiom.0) {
+					value.cut(&path.0);
+				}
+			}
+			PhysicalPermission::Conditional(_) => {
+				let original = snapshot.get_or_insert_with(|| value.clone());
+				for path in original.each(&idiom.0) {
+					let field_value = original.pick(&path.0);
+					let allowed =
+						check_permission_for_value(perm, original, Some(&field_value), ctx)
+							.await
+							.map_err(|e| {
+							ControlFlow::Err(anyhow::anyhow!(
+								"Failed to check field permission: {e}"
+							))
+						})?;
+					if !allowed {
+						value.cut(&path.0);
+					}
+				}
 			}
 		}
 	}

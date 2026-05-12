@@ -246,7 +246,7 @@ impl Context {
 			#[cfg(feature = "surrealism")]
 			surrealism_cache: parent.surrealism_cache.clone(),
 			function_registry: Arc::clone(&parent.function_registry),
-			new_planner_strategy: parent.new_planner_strategy.clone(),
+			new_planner_strategy: parent.new_planner_strategy,
 			redact_volatile_explain_attrs: parent.redact_volatile_explain_attrs,
 			statement_counters: parent.statement_counters.clone(),
 			matches_context: parent.matches_context.clone(),
@@ -290,7 +290,7 @@ impl Context {
 			#[cfg(feature = "surrealism")]
 			surrealism_cache: parent.surrealism_cache.clone(),
 			function_registry: Arc::clone(&parent.function_registry),
-			new_planner_strategy: parent.new_planner_strategy.clone(),
+			new_planner_strategy: parent.new_planner_strategy,
 			redact_volatile_explain_attrs: parent.redact_volatile_explain_attrs,
 			statement_counters: parent.statement_counters.clone(),
 			matches_context: parent.matches_context.clone(),
@@ -341,7 +341,7 @@ impl Context {
 			#[cfg(feature = "surrealism")]
 			surrealism_cache: from.surrealism_cache.clone(),
 			function_registry: Arc::clone(&from.function_registry),
-			new_planner_strategy: from.new_planner_strategy.clone(),
+			new_planner_strategy: from.new_planner_strategy,
 			redact_volatile_explain_attrs: from.redact_volatile_explain_attrs,
 			statement_counters: from.statement_counters.clone(),
 			matches_context: from.matches_context.clone(),
@@ -385,7 +385,7 @@ impl Context {
 			#[cfg(feature = "surrealism")]
 			surrealism_cache: from.surrealism_cache.clone(),
 			function_registry: Arc::clone(&from.function_registry),
-			new_planner_strategy: from.new_planner_strategy.clone(),
+			new_planner_strategy: from.new_planner_strategy,
 			redact_volatile_explain_attrs: from.redact_volatile_explain_attrs,
 			statement_counters: from.statement_counters.clone(),
 			matches_context: from.matches_context.clone(),
@@ -422,7 +422,7 @@ impl Context {
 		config: Arc<CommonConfig>,
 		#[cfg(feature = "surrealism")] surrealism_cache: Arc<SurrealismCache>,
 	) -> Result<Context> {
-		let planner_strategy = capabilities.planner_strategy().clone();
+		let planner_strategy = *capabilities.planner_strategy();
 		let mut ctx = Self {
 			values: HashMap::default(),
 			parent: None,
@@ -1000,7 +1000,7 @@ impl Context {
 		// non-default value (e.g. language tests). Otherwise the capability-level
 		// strategy (set via from_ds) is preserved.
 		if session.new_planner_strategy != NewPlannerStrategy::default() {
-			self.new_planner_strategy = session.new_planner_strategy.clone();
+			self.new_planner_strategy = session.new_planner_strategy;
 		}
 		// Propagate duration redaction flag from session.
 		if session.redact_volatile_explain_attrs {

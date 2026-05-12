@@ -37,9 +37,18 @@ impl<'ctx> Planner<'ctx> {
 		let mut parts = idiom.0;
 
 		if let Some(Part::Start(_)) = parts.first() {
+			// `peek + remove` instead of one destructure because we need
+			// the index check separately. The `else` arm is provably
+			// unreachable given the `peek` succeeded — degraded to a typed
+			// `Error::Internal` so a future Part::Start variant change
+			// surfaces a useful planner-bug message rather than a panic on
+			// production user input.
 			let start_part = parts.remove(0);
 			let Part::Start(start_expr) = start_part else {
-				unreachable!()
+				return Err(Error::Internal(
+					"convert_idiom: parts.first() reported Part::Start but parts.remove(0) was not Part::Start"
+						.into(),
+				));
 			};
 			let start_phys = self.physical_expr(start_expr).await?;
 			let remaining_parts = self.convert_parts(parts).await?;
@@ -170,11 +179,18 @@ impl<'ctx> Planner<'ctx> {
 					let mut chain: Arc<dyn ExecOperator> = Arc::new(CurrentValueSource::new());
 					chain = self.plan_lookup_with_input(chain, first_lookup).await?;
 
-					// Consume all consecutive Part::Lookup nodes
+					// Consume all consecutive Part::Lookup nodes. The
+					// `peek + next` pattern provably yields a `Part::Lookup`,
+					// but if a future Part variant ever matches the peek and
+					// not the destructure we'd rather see a typed error than
+					// a panic on user input.
 					let mut fused = false;
 					while matches!(iter.peek(), Some(Part::Lookup(_))) {
 						let Some(Part::Lookup(next_lookup)) = iter.next() else {
-							unreachable!()
+							return Err(Error::Internal(
+								"convert_parts lookup fusion: iter.peek() reported Part::Lookup but iter.next() did not yield one"
+									.into(),
+							));
 						};
 						let (d, e) = lookup_metadata(&next_lookup);
 						direction = d;
@@ -235,7 +251,7 @@ impl<'ctx> Planner<'ctx> {
 			}
 
 			Part::Where(expr) => {
-				let needs_parent = ast_expr_references_parent(&expr);
+				let needs_parent = super::row_scope::references_parent(&expr);
 				let phys_expr = self.physical_expr(expr).await?;
 				Ok(Arc::new(WherePart {
 					predicate: phys_expr,
@@ -368,10 +384,15 @@ impl<'ctx> Planner<'ctx> {
 						// extract it, convert to a physical expression, and prepend
 						// to the path. This occurs when the parser wraps non-idiom
 						// expressions (like $this or level * 2) in Part::Start
-						// within destructure aliases.
+						// within destructure aliases. The `else` arm is provably
+						// unreachable; converted to `Error::Internal` for the
+						// same reason as the matching site in `convert_idiom`.
 						let start_expr = if matches!(parts.first(), Some(Part::Start(_))) {
 							let Part::Start(expr) = parts.remove(0) else {
-								unreachable!()
+								return Err(Error::Internal(
+									"convert_destructure: parts.first() reported Part::Start but parts.remove(0) was not Part::Start"
+										.into(),
+								));
 							};
 							Some(self.physical_expr(expr).await?)
 						} else {
@@ -498,37 +519,6 @@ fn extract_body_operator(path: &[Arc<dyn PhysicalExpr>]) -> Option<Arc<dyn ExecO
 	} else {
 		None
 	}
-}
-
-/// Returns true if an AST expression references the `$parent` parameter.
-///
-/// Used at planning time to set `WherePart::needs_parent`, avoiding a
-/// per-element `Value::clone()` + context allocation when the predicate
-/// never references `$parent`.
-fn ast_expr_references_parent(expr: &crate::expr::expression::Expr) -> bool {
-	use crate::expr::expression::Expr;
-	use crate::expr::visit::{Visit, Visitor};
-	struct Check(bool);
-	impl Visitor for Check {
-		type Error = std::convert::Infallible;
-		fn visit_expr(&mut self, e: &Expr) -> Result<(), Self::Error> {
-			if let Expr::Param(p) = e
-				&& p.as_str() == "parent"
-			{
-				self.0 = true;
-			}
-			if self.0 {
-				return Ok(());
-			}
-			e.visit(self)
-		}
-		fn visit_select(&mut self, _: &crate::expr::SelectStatement) -> Result<(), Self::Error> {
-			Ok(())
-		}
-	}
-	let mut c = Check(false);
-	let _ = c.visit_expr(expr);
-	c.0
 }
 
 /// Check if a slice of AST parts contains a `RepeatRecurse` marker at any nesting level.

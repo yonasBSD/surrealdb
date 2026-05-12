@@ -60,12 +60,16 @@
 //! ```
 
 mod aggregate;
+mod cycle_guard;
 mod idiom;
+mod row_scope;
 mod select;
 mod source;
 pub(crate) mod util;
 
 use std::sync::Arc;
+
+pub(crate) use cycle_guard::CycleGuard;
 
 // Re-exports for external callers
 use self::util::literal_to_value;
@@ -124,6 +128,25 @@ pub struct Planner<'ctx> {
 	/// Propagated to `GraphEdgeScan` operators created during idiom
 	/// conversion so that graph edge traversals respect the VERSION clause.
 	pub(crate) version: Option<Arc<dyn crate::exec::PhysicalExpr>>,
+	/// Plan-time cycle detector for permission and computed-field
+	/// compilation. Default empty for fresh planners (`new` / `with_txn`);
+	/// nested planners spawned to compile a permission or computed-field
+	/// body inherit the parent's guard via [`Planner::with_cycle_guard`].
+	///
+	/// See [`cycle_guard`] for the design rationale.
+	pub(crate) cycle_guard: CycleGuard,
+	/// Cached `(NamespaceId, DatabaseId)` lookup keyed by `(ns, db)`.
+	///
+	/// Resolved on first use by [`Planner::ns_db_ids`]. `(ns, db, txn)` are
+	/// immutable for the planner's lifetime, so the result is stable.
+	/// `None` after init means the lookup failed (txn unavailable or
+	/// namespace/db not yet created) — callers fall back to runtime
+	/// resolution.
+	ns_db_ids_cache:
+		tokio::sync::OnceCell<Option<(crate::catalog::NamespaceId, crate::catalog::DatabaseId)>>,
+	/// Cached `new_planner_strategy()` snapshot — the strategy doesn't
+	/// change during a single planning pass.
+	planner_strategy: NewPlannerStrategy,
 }
 
 impl<'ctx> Planner<'ctx> {
@@ -140,6 +163,9 @@ impl<'ctx> Planner<'ctx> {
 			ns: None,
 			db: None,
 			version: None,
+			cycle_guard: CycleGuard::default(),
+			ns_db_ids_cache: tokio::sync::OnceCell::new(),
+			planner_strategy: *ctx.new_planner_strategy(),
 		}
 	}
 
@@ -162,13 +188,85 @@ impl<'ctx> Planner<'ctx> {
 			ns,
 			db,
 			version: None,
+			cycle_guard: CycleGuard::default(),
+			ns_db_ids_cache: tokio::sync::OnceCell::new(),
+			planner_strategy: *ctx.new_planner_strategy(),
 		}
+	}
+
+	/// Runtime-only fallback constructor: build a planner from an already-active
+	/// [`DatabaseContext`] (and therefore from a live transaction + ns/db). This
+	/// is **not** the canonical entry point — top-level planning goes through
+	/// [`try_plan_expr`](crate::exec::planner::try_plan_expr) which routes via
+	/// [`Planner::with_txn`]. `for_database` exists for the narrow case of a
+	/// scan operator that hits a cache miss mid-execution (today: the
+	/// `build_field_state` cache miss in [`crate::exec::operators::scan::pipeline`])
+	/// and has to compile a permission / computed-field body without a parent
+	/// planner to inherit from.
+	///
+	/// The cycle guard starts empty. Same-table recursion at this point is
+	/// broken by [`crate::exec::planner::select::Planner::try_resolve_table_ctx`]
+	/// pushing onto this fresh guard — no separate runtime mechanism applies.
+	#[inline]
+	pub(crate) fn for_database(
+		ctx: &'ctx FrozenContext,
+		txn: Arc<crate::kvs::Transaction>,
+		db_ctx: &crate::exec::DatabaseContext,
+	) -> Self {
+		Self::with_txn(
+			ctx,
+			txn,
+			Some(db_ctx.ns_name().to_owned()),
+			Some(db_ctx.db_name().to_owned()),
+		)
 	}
 
 	/// Set the VERSION expression for propagation to graph edge scans.
 	pub fn with_version(mut self, version: Option<Arc<dyn crate::exec::PhysicalExpr>>) -> Self {
 		self.version = version;
 		self
+	}
+
+	/// Inherit a parent planner's cycle guard.
+	///
+	/// Used when a nested planner is constructed (during permission /
+	/// computed-field body compilation, scalar subquery planning, etc.)
+	/// so the cycle detector sees the parent's in-progress tables. Without
+	/// this, a self-referential permission like
+	/// `WHERE (SELECT FROM same_table) != NONE` would re-enter
+	/// `try_resolve_table_ctx` on the inner subquery and recurse.
+	#[must_use]
+	pub(crate) fn with_cycle_guard(mut self, guard: CycleGuard) -> Self {
+		self.cycle_guard = guard;
+		self
+	}
+
+	/// Get a clone of the cycle guard (cheap `Arc` bump). Pass to
+	/// `with_cycle_guard` on a child planner to share the same set of
+	/// in-progress tables.
+	#[inline]
+	pub(crate) fn cycle_guard(&self) -> CycleGuard {
+		self.cycle_guard.clone()
+	}
+
+	/// Plan-time transaction, when available. Returns `None` for txn-less
+	/// planners (constructed via `Planner::new`); the caller must fall back
+	/// to runtime resolution in that case.
+	#[inline]
+	pub(crate) fn txn(&self) -> Option<&Arc<crate::kvs::Transaction>> {
+		self.txn.as_ref()
+	}
+
+	/// Namespace name for plan-time catalog lookups, when set.
+	#[inline]
+	pub(crate) fn ns(&self) -> Option<&str> {
+		self.ns.as_deref()
+	}
+
+	/// Database name for plan-time catalog lookups, when set.
+	#[inline]
+	pub(crate) fn db(&self) -> Option<&str> {
+		self.db.as_deref()
 	}
 
 	/// Get the function registry.
@@ -302,45 +400,13 @@ impl<'ctx> Planner<'ctx> {
 	///
 	/// This is the main entry point for the planner. When a transaction is
 	/// available, performs plan-time index resolution and sort elimination.
+	///
+	/// DML/DDL statements are rejected by [`Planner::plan_expr`]; this
+	/// method only adds the [`require_planned`] strategy translation on
+	/// top.
 	pub async fn plan(&self, expr: &Expr) -> Result<Arc<dyn ExecOperator>, Error> {
-		match expr {
-			// DML/DDL — same as sync plan, always fall back to old executor
-			Expr::Create(_) => Err(Error::PlannerUnsupported(
-				"CREATE statements not yet supported in execution plans".to_string(),
-			)),
-			Expr::Update(_) => Err(Error::PlannerUnsupported(
-				"UPDATE statements not yet supported in execution plans".to_string(),
-			)),
-			Expr::Upsert(_) => Err(Error::PlannerUnsupported(
-				"UPSERT statements not yet supported in execution plans".to_string(),
-			)),
-			Expr::Delete(_) => Err(Error::PlannerUnsupported(
-				"DELETE statements not yet supported in execution plans".to_string(),
-			)),
-			Expr::Insert(_) => Err(Error::PlannerUnsupported(
-				"INSERT statements not yet supported in execution plans".to_string(),
-			)),
-			Expr::Relate(_) => Err(Error::PlannerUnsupported(
-				"RELATE statements not yet supported in execution plans".to_string(),
-			)),
-			Expr::Define(_) => Err(Error::PlannerUnsupported(
-				"DEFINE statements not yet supported in execution plans".to_string(),
-			)),
-			Expr::Remove(_) => Err(Error::PlannerUnsupported(
-				"REMOVE statements not yet supported in execution plans".to_string(),
-			)),
-			Expr::Rebuild(_) => Err(Error::PlannerUnsupported(
-				"REBUILD statements not yet supported in execution plans".to_string(),
-			)),
-			Expr::Alter(_) => Err(Error::PlannerUnsupported(
-				"ALTER statements not yet supported in execution plans".to_string(),
-			)),
-
-			other => {
-				let result = self.plan_expr(other.clone()).await;
-				self.require_planned(result)
-			}
-		}
+		let result = self.plan_expr(expr.clone()).await;
+		self.require_planned(result)
 	}
 
 	// ========================================================================
@@ -824,7 +890,21 @@ impl<'ctx> Planner<'ctx> {
 					})
 				}
 			}
-			_ => unreachable!("physical_statement_subquery called with non-statement expr"),
+			other => {
+				// Server-side log carries the Debug-formatted expr for
+				// diagnosis; the client-facing message is intentionally
+				// opaque so user-supplied AST fragments don't leak back
+				// through the wire error.
+				tracing::error!(
+					expr = ?other,
+					"physical_statement_subquery dispatched with non-statement expr"
+				);
+				return Err(Error::Internal(
+					"physical_statement_subquery dispatched with non-statement expr; \
+					 only Select/Info/Foreach/Sleep/Explain are valid here"
+						.into(),
+				));
+			}
 		};
 		Ok(Arc::new(ScalarSubquery {
 			plan,
@@ -940,8 +1020,7 @@ impl<'ctx> Planner<'ctx> {
 	fn require_planned<T>(&self, result: Result<T, Error>) -> Result<T, Error> {
 		match result {
 			Err(Error::PlannerUnimplemented(msg))
-				if *self.ctx.new_planner_strategy()
-					== NewPlannerStrategy::AllReadOnlyStatements =>
+				if self.planner_strategy == NewPlannerStrategy::AllReadOnlyStatements =>
 			{
 				Err(Error::Query {
 					message: format!("New executor does not support: {msg}"),
@@ -1075,8 +1154,18 @@ impl<'ctx> Planner<'ctx> {
 		let crate::expr::statements::SetStatement {
 			name,
 			what,
-			kind: _,
+			kind,
 		} = let_stmt;
+
+		// Reject protected parameter names at plan time. Mirrors
+		// `SetStatement::compute` and the top-level `Expr::Let` executor arm —
+		// both raise `Error::InvalidParam` at runtime; we error one step
+		// earlier so callers in blocks / FOR bodies see the same rejection.
+		if crate::cnf::PROTECTED_PARAM_NAMES.contains(&name.as_str()) {
+			return Err(Error::InvalidParam {
+				name: name.to_string(),
+			});
+		}
 
 		let value: Arc<dyn ExecOperator> = match what {
 			Expr::Select(select) => self.plan_select_statement(*select).await?,
@@ -1116,7 +1205,7 @@ impl<'ctx> Planner<'ctx> {
 			}
 		};
 
-		Ok(Arc::new(crate::exec::operators::LetPlan::new(name, value)))
+		Ok(Arc::new(crate::exec::operators::LetPlan::new(name, kind, value)))
 	}
 
 	async fn plan_info_statement(
@@ -1269,10 +1358,47 @@ pub(crate) async fn plan_expr_inner(
 	Planner::with_txn(ctx, txn, ns, db).plan(expr).await
 }
 
-/// Convert an expression to a physical expression.
+/// Convert an expression to a physical expression via a **txn-less**
+/// [`Planner::new`].
 ///
-/// Thin wrapper that constructs a `Planner` and calls `physical_expr`. External
-/// callers that plan multiple expressions should construct a `Planner` directly.
+/// # Why this exists
+///
+/// Most plan-time compilation goes through a [`Planner::with_txn`] so that
+/// nested `Expr::Select` subqueries inherit the transaction and can do
+/// catalog reads (index analysis, sort elimination, table-context
+/// resolution). This shim is the deliberate exception: it constructs a
+/// planner with `Option<Transaction> = None`, which causes
+/// [`crate::exec::planner::select::Planner::try_resolve_table_ctx`] and the
+/// COUNT-fast-path helpers to short-circuit, falling back to runtime
+/// resolution.
+///
+/// # When it is correct to use
+///
+/// One of:
+///
+/// 1. **Cycle hazard.** The expression is a stored permission predicate or a SCHEMAFUL `COMPUTED
+///    <expr>` body that may reference back into the same table whose context is currently being
+///    resolved. Threading a planner with txn through these would re-enter `resolve_table_context`
+///    infinitely. The runtime path tolerates the cycle via lazy `FieldState` building plus
+///    `skip_fetch_perms`; see
+///    `language-tests/tests/reproductions/skip_fetch_perms_subquery_dereference.surql`. Approved
+///    callers: [`crate::exec::permission::convert_permission_to_physical`],
+///    [`crate::exec::operators::scan::pipeline::build_field_state_raw`].
+///
+/// 2. **Dynamic / runtime-only context.** The expression is being compiled at scan/operator
+///    execution time (not at SELECT planning time). At that point any inherited transaction is the
+///    running operator's, not the outer planner's, and routing it through a plan-time
+///    index-resolution pass is meaningless. Approved callers:
+///    [`crate::exec::operators::scan::dynamic`] (dynamic source resolution),
+///    [`crate::exec::physical_expr::block`] (LET evaluation inside BLOCK runtime),
+///    [`crate::exec::physical_expr::function::helpers`] (closure-call body compilation),
+///    [`crate::exec::physical_expr::literal`] (DEFINE PARAM resolution).
+///
+/// **Adding a new caller** that doesn't match (1) or (2) above almost
+/// certainly silently degrades the optimisation surface — prefer
+/// constructing a [`Planner::with_txn`] from the relevant context
+/// instead. If you genuinely need this shim, document the reason at the
+/// call site.
 pub(crate) async fn expr_to_physical_expr(
 	expr: Expr,
 	ctx: &FrozenContext,

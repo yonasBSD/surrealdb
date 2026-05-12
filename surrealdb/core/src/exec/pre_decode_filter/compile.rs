@@ -86,14 +86,18 @@ fn collect_referenced_root_segments(node: &PredNode, out: &mut BTreeSet<String>)
 				}
 			}
 			// When `at_record_root == false`, this fused node is nested under a
-			// `NavigatePrefix` whose segment was already added to `refs` by the
-			// arm below. The clauses' names are nested-path leaves (e.g.
-			// `outer.a`) and would need to be checked against `field_state`
-			// keyed by the full dotted path. The streaming executor does not
-			// currently enforce nested-path SELECT permissions
-			// (`filter_fields_by_permission` walks only top-level keys — see
-			// `operators/scan/pipeline.rs`), so the pre-decode filter mirrors
-			// that limitation rather than diverging from it. Tracked in #83.
+			// `NavigatePrefix` whose top-level segment was already added to
+			// `refs` by the arm below. Adding the full dotted leaves
+			// (`outer.a`, `outer.b`, …) here would be redundant: the
+			// disqualification check (`field_permission_covers`) keys on the
+			// top-level segment, and any `DEFINE FIELD outer.* PERMISSIONS …`
+			// permission's idiom starts with `Part::Field("outer")` — so the
+			// outer `NavigatePrefix(outer)` already triggers the bail-out.
+			// (`filter_fields_by_permission` now enforces nested-path SELECT
+			// permissions correctly at decode time — see issue #83 — but the
+			// pre-decode filter operates on raw bytes and can't do a
+			// per-subpath cut, so disqualifying conservatively at the
+			// top-level segment is the right shape.)
 		}
 		PredNode::NavigatePrefix {
 			segment,
@@ -129,14 +133,39 @@ pub(crate) fn finalize_pre_decode_filter(
 		if field_state.computed_fields.iter().any(|c| c.field_name() == name.as_str()) {
 			return Err(PreDecodeFilterReason::ComputedFields);
 		}
-		if check_perms
-			&& let Some(perm) = field_state.field_permissions.get(name.as_str())
-			&& !matches!(perm, PhysicalPermission::Allow)
-		{
+		if check_perms && field_permission_covers(field_state, name.as_str()) {
 			return Err(PreDecodeFilterReason::FieldPermissions);
 		}
 	}
 	Ok(Arc::new(PreDecodeFilter::new(root.clone())))
+}
+
+/// Returns `true` if any non-`Allow` field permission could affect a value
+/// reached via top-level field `name`.
+///
+/// Conservative for nested-path permissions (`DEFINE FIELD outer.a …
+/// PERMISSIONS …` — see issue #83): the pre-decode filter operates on
+/// raw bytes and can't enforce a per-subpath cut, so any reference to a
+/// top-level segment that has nested permissions defined under it
+/// disqualifies pre-decode filtering.
+fn field_permission_covers(field_state: &FieldState, name: &str) -> bool {
+	use crate::expr::part::Part;
+	field_state.field_permissions.iter().any(|(idiom, perm)| {
+		if matches!(perm, PhysicalPermission::Allow) {
+			return false;
+		}
+		// Today the parser produces `Part::Field` as the first part of every
+		// `DEFINE FIELD` idiom, so the only interesting comparison is the
+		// name match. Any other shape (wildcard / index root, or an empty
+		// idiom) is treated as covering by default so a future parser
+		// change can't silently let a non-`Allow` permission slip past
+		// pre-decode filtering — the post-decode filter still catches it,
+		// but we'd rather not pretend the field is safe to read raw.
+		match idiom.0.first() {
+			Some(Part::Field(f)) => f.as_str() == name,
+			_ => true,
+		}
+	})
 }
 
 /// Resolve pre-decode filter status at plan time, given an optional plan-time [`FieldState`].

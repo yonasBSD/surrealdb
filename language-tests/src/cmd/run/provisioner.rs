@@ -56,7 +56,20 @@ impl CreateInfo {
 
 		let allows_live = cap.allows_live_query_notifications();
 
-		let builder = Datastore::builder().with_capabilities(cap).with_auth(true);
+		// Enable a temporary directory so TEMPFILES queries route to the
+		// ExternalSort operator. For backends that already provision a
+		// per-run scratch dir we reuse it (cleaned up in `shutdown`); the
+		// Memory backend has none, so fall back to the system temp dir —
+		// `ext_sort` namespaces each invocation under its own `TempDir`
+		// which cleans up on drop, so no leak there either.
+		let sort_temp_dir = match self.dir.as_deref() {
+			Some(d) => std::path::PathBuf::from(d),
+			None => std::env::temp_dir(),
+		};
+		let builder = Datastore::builder()
+			.with_capabilities(cap)
+			.with_auth(true)
+			.with_temporary_directory(Some(sort_temp_dir));
 
 		let builder = if allows_live {
 			let (send, _) = channel::bounded(15_000);

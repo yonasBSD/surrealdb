@@ -22,7 +22,7 @@ use crate::exec::field_path::FieldPath;
 use crate::exec::operators::SortDirection;
 use crate::exec::ordering::{OutputOrdering, SortProperty};
 use crate::exec::permission::{
-	PhysicalPermission, convert_permission_to_physical, should_check_perms,
+	PhysicalPermission, convert_permission_to_physical_runtime, should_check_perms,
 	validate_record_user_access,
 };
 use crate::exec::{
@@ -221,7 +221,8 @@ impl ExecOperator for UnionIndexScan {
 						Some(def) => def.permissions.select.clone(),
 						None => crate::catalog::Permission::None,
 					};
-					convert_permission_to_physical(&catalog_perm, ctx.ctx()).await
+					convert_permission_to_physical_runtime(&catalog_perm, ctx.ctx())
+						.await
 						.context("Failed to convert permission")?
 				} else {
 					PhysicalPermission::Allow

@@ -5,7 +5,7 @@ use futures::StreamExt;
 
 use crate::catalog::providers::TableProvider;
 use crate::exec::permission::{
-	PhysicalPermission, check_permission_for_value, convert_permission_to_physical,
+	PhysicalPermission, check_permission_for_value, convert_permission_to_physical_runtime,
 	resolve_select_permission, should_check_perms,
 };
 use crate::exec::{
@@ -299,7 +299,7 @@ pub(crate) async fn process_fetched_record(
 			.await
 			.context("Failed to get table definition")?;
 		let catalog_perm = resolve_select_permission(table_def.as_deref());
-		let select_perm = convert_permission_to_physical(catalog_perm, ctx.ctx())
+		let select_perm = convert_permission_to_physical_runtime(catalog_perm, ctx.ctx())
 			.await
 			.context("Failed to convert permission")?;
 
@@ -307,7 +307,7 @@ pub(crate) async fn process_fetched_record(
 			PhysicalPermission::Deny => return Ok(false),
 			PhysicalPermission::Allow => {}
 			PhysicalPermission::Conditional(_) => {
-				let allowed = check_permission_for_value(&select_perm, val, ctx)
+				let allowed = check_permission_for_value(&select_perm, val, None, ctx)
 					.await
 					.context("Permission check failed")?;
 				if !allowed {

@@ -170,8 +170,14 @@ async fn execute_block_with_context(
 				}
 			}
 			Err(e @ (Error::PlannerUnsupported(_) | Error::PlannerUnimplemented(_))) => {
-				if let Error::PlannerUnimplemented(msg) = &e {
-					tracing::warn!("PlannerUnimplemented fallback in sequence: {msg}");
+				match &e {
+					Error::PlannerUnimplemented(msg) => {
+						tracing::warn!("PlannerUnimplemented fallback in sequence: {msg}");
+					}
+					Error::PlannerUnsupported(msg) => {
+						tracing::debug!("PlannerUnsupported fallback in sequence: {msg}",);
+					}
+					_ => {}
 				}
 				// Fallback to legacy compute path
 				let (opt, frozen) = legacy_context_for_fallback(&current_ctx)

@@ -19,7 +19,7 @@ use crate::exec::index::iterator::{
 	IndexEqualIterator, IndexRangeIterator, UniqueEqualIterator, UniqueRangeIterator,
 };
 use crate::exec::permission::{
-	PhysicalPermission, convert_permission_to_physical, should_check_perms,
+	PhysicalPermission, convert_permission_to_physical_runtime, should_check_perms,
 	validate_record_user_access,
 };
 use crate::exec::{
@@ -173,9 +173,10 @@ impl ExecOperator for IndexScan {
 			} => {
 				let prefix_str = prefix.iter().map(|v| v.to_sql()).collect::<Vec<_>>().join(", ");
 				if let Some((op, val)) = range {
-					format!("[{}] {:?} {}", prefix_str, op, val.to_sql())
+					let val_sql = val.to_sql();
+					format!("[{prefix_str}] {op:?} {val_sql}")
 				} else {
-					format!("[{}]", prefix_str)
+					format!("[{prefix_str}]")
 				}
 			}
 			// FullText and KNN should use dedicated operators
@@ -407,7 +408,8 @@ impl ExecOperator for IndexScan {
 					.context("Failed to get table")?;
 
 				if let Some(def) = &table_def {
-					convert_permission_to_physical(&def.permissions.select, ctx.ctx()).await
+					convert_permission_to_physical_runtime(&def.permissions.select, ctx.ctx())
+						.await
 						.context("Failed to convert permission")?
 				} else {
 					Err(ControlFlow::Err(anyhow::Error::new(Error::TbNotFound {

@@ -49,6 +49,10 @@ impl ExecOperator for Union {
 		"Union"
 	}
 
+	fn attrs(&self) -> Vec<(String, String)> {
+		vec![("inputs".to_string(), self.inputs.len().to_string())]
+	}
+
 	fn required_context(&self) -> ContextLevel {
 		// Union requires the maximum context level of all its inputs
 		self.inputs.iter().map(|input| input.required_context()).max().unwrap_or(ContextLevel::Root)

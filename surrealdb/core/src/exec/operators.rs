@@ -56,7 +56,7 @@ pub use scan::{
 pub use sequence::SequencePlan;
 pub use sleep::SleepPlan;
 #[cfg(all(storage, not(target_family = "wasm")))]
-pub use sort::ExternalSort;
+pub use sort::{ExternalSort, ExternalSortByKey};
 pub use sort::{
 	OrderByField, RandomShuffle, Sort, SortByKey, SortDirection, SortKey, SortTopK, SortTopKByKey,
 };

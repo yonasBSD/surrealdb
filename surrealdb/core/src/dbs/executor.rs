@@ -710,15 +710,40 @@ impl Executor {
 			}
 
 			TopLevelExpr::Expr(Expr::Let(stm)) => {
-				// Avoid moving in and out of the context via Arc::get_mut
-				ctx_mut!().set_transaction(txn);
+				// Reject protected names first, before any work: avoids planning
+				// or computing a value we'll throw away.
+				if stm.is_protected_set() {
+					return Err(ControlFlow::from(anyhow::Error::new(Error::InvalidParam {
+						name: stm.name.to_string(),
+					})));
+				}
+				ctx_mut!().set_transaction(Arc::clone(&txn));
 
-				// Run the statement
-				let res = self
-					.stack
-					.enter(|stk| stm.what.compute(stk, &self.ctx, &self.opt, None))
-					.finish()
-					.await;
+				// Plan the RHS through the streaming pipeline first; fall back
+				// to the legacy `compute()` path on PlannerUnsupported /
+				// PlannerUnimplemented. The streaming pipeline is the same
+				// one a bare `SELECT * FROM t` uses, so a `LET $x = SELECT * FROM t`
+				// no longer pays the legacy recursive evaluator's cost.
+				//
+				// We plan `stm.what` (the RHS), not the LET itself: routing
+				// through `plan_let_statement` would build a `LetPlan` whose
+				// binding lives in `output_context`, which produces a new
+				// `ExecutionContext` local to `execute_operator_plan` that
+				// never reaches `self.ctx`. Planning the RHS directly keeps
+				// the bind-into-session logic in one place — here.
+				let res = match try_plan_expr!(&stm.what, &self.ctx, Arc::clone(&txn)) {
+					Ok(plan) => self.execute_operator_plan(plan, Arc::clone(&txn)).await,
+					Err(err @ (Error::PlannerUnsupported(_) | Error::PlannerUnimplemented(_))) => {
+						if let Error::PlannerUnimplemented(msg) = &err {
+							tracing::warn!("PlannerUnimplemented fallback in top-level LET: {msg}");
+						}
+						self.stack
+							.enter(|stk| stm.what.compute(stk, &self.ctx, &self.opt, None))
+							.finish()
+							.await
+					}
+					Err(e) => Err(ControlFlow::Err(anyhow::Error::new(e))),
+				};
 
 				let res = res?;
 				let result = match &stm.kind {
@@ -732,11 +757,6 @@ impl Executor {
 					None => res,
 				};
 
-				if stm.is_protected_set() {
-					return Err(ControlFlow::from(anyhow::Error::new(Error::InvalidParam {
-						name: stm.name.to_string(),
-					})));
-				}
 				// Set the parameter
 				ctx_mut!().add_value(stm.name.clone(), result.into());
 

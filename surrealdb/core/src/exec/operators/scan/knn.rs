@@ -17,7 +17,7 @@ use crate::catalog::Index;
 use crate::err::Error;
 use crate::exec::index::access_path::IndexRef;
 use crate::exec::permission::{
-	PhysicalPermission, convert_permission_to_physical, should_check_perms,
+	PhysicalPermission, convert_permission_to_physical_runtime, should_check_perms,
 	validate_record_user_access,
 };
 use crate::exec::{
@@ -200,8 +200,12 @@ impl ExecOperator for KnnScan {
 				};
 
 				let select_permission = if check_perms {
-					convert_permission_to_physical(&table_def.permissions.select, ctx.ctx()).await
-						.context("Failed to convert permission")?
+					convert_permission_to_physical_runtime(
+						&table_def.permissions.select,
+						ctx.ctx(),
+					)
+					.await
+					.context("Failed to convert permission")?
 				} else {
 					PhysicalPermission::Allow
 				};

@@ -51,7 +51,7 @@ pub struct Session {
 	pub redact_volatile_explain_attrs: bool,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub enum NewPlannerStrategy {
 	/// Try the new planner for read-only statements, fall back to compute on Unimplemented.
 	#[default]

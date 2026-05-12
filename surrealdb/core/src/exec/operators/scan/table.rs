@@ -13,7 +13,7 @@ use tracing::instrument;
 use super::pipeline::{ScanPipeline, build_field_state, eval_limit_expr, kv_scan_stream};
 use super::resolved::ResolvedTableContext;
 use crate::exec::permission::{
-	PhysicalPermission, convert_permission_to_physical, should_check_perms,
+	PhysicalPermission, convert_permission_to_physical_runtime, should_check_perms,
 	validate_record_user_access,
 };
 use crate::exec::pre_decode_filter::{PreDecodeFilterStatus, pre_decode_filter_for_execute};
@@ -229,7 +229,8 @@ impl ExecOperator for TableScan {
 						Some(def) => def.permissions.select.clone(),
 						None => crate::catalog::Permission::None,
 					};
-					convert_permission_to_physical(&catalog_perm, ctx.ctx()).await
+					convert_permission_to_physical_runtime(&catalog_perm, ctx.ctx())
+						.await
 						.context("Failed to convert permission")?
 				} else {
 					PhysicalPermission::Allow

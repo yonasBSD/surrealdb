@@ -16,6 +16,7 @@ use crate::exec::{
 	AccessMode, CardinalityHint, ExecOperator, FlowResult, OperatorMetrics, ValueBatchStream,
 	buffer_stream,
 };
+use crate::expr::Kind;
 use crate::val::{Array, Value};
 
 /// LET operator - binds a value to a parameter.
@@ -31,6 +32,10 @@ use crate::val::{Array, Value};
 pub struct LetPlan {
 	/// Parameter name to bind (without $)
 	pub name: Strand,
+	/// Optional declared type for the binding — when present, the computed
+	/// value is coerced to this kind before binding (mirrors
+	/// `SetStatement::compute`).
+	pub kind: Option<Kind>,
 	/// Metrics for EXPLAIN ANALYZE
 	pub(crate) metrics: Arc<OperatorMetrics>,
 	/// Value to bind - either an ExprPlan for scalars or a query plan
@@ -38,11 +43,22 @@ pub struct LetPlan {
 }
 
 impl LetPlan {
-	pub(crate) fn new(name: Strand, value: Arc<dyn ExecOperator>) -> Self {
+	pub(crate) fn new(name: Strand, kind: Option<Kind>, value: Arc<dyn ExecOperator>) -> Self {
 		Self {
 			name,
+			kind,
 			value,
 			metrics: Arc::new(OperatorMetrics::new()),
+		}
+	}
+
+	fn coerce(&self, value: Value) -> Result<Value, Error> {
+		match &self.kind {
+			Some(kind) => value.coerce_to_kind(kind).map_err(|e| Error::SetCoerce {
+				name: self.name.to_string(),
+				error: Box::new(e),
+			}),
+			None => Ok(value),
 		}
 	}
 }
@@ -95,7 +111,8 @@ impl ExecOperator for LetPlan {
 			),
 			Err(crate::expr::ControlFlow::Return(v)) => {
 				// If value expression returns early, use that value
-				return Ok(input.with_param(self.name.clone(), v));
+				let coerced = self.coerce(v)?;
+				return Ok(input.with_param(self.name.clone(), coerced));
 			}
 			Err(crate::expr::ControlFlow::Break | crate::expr::ControlFlow::Continue) => {
 				return Err(Error::InvalidControlFlow);
@@ -116,8 +133,9 @@ impl ExecOperator for LetPlan {
 			Value::Array(Array(results))
 		};
 
-		// Add the parameter to the context
-		Ok(input.with_param(self.name.clone(), computed_value))
+		// Apply declared type coercion (mirrors `SetStatement::compute`).
+		let coerced = self.coerce(computed_value)?;
+		Ok(input.with_param(self.name.clone(), coerced))
 	}
 
 	fn children(&self) -> Vec<&Arc<dyn ExecOperator>> {

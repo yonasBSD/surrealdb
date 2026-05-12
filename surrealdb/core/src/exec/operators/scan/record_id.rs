@@ -17,7 +17,7 @@ use super::pipeline::{
 };
 use super::resolved::ResolvedTableContext;
 use crate::exec::permission::{
-	PhysicalPermission, convert_permission_to_physical, should_check_perms,
+	PhysicalPermission, convert_permission_to_physical_runtime, should_check_perms,
 	validate_record_user_access,
 };
 use crate::exec::pre_decode_filter::{PreDecodeFilterStatus, pre_decode_filter_for_execute};
@@ -289,7 +289,7 @@ pub(crate) async fn execute_record_lookup(
 				Some(def) => def.permissions.select.clone(),
 				None => crate::catalog::Permission::None,
 			};
-			convert_permission_to_physical(&catalog_perm, ctx.ctx())
+			convert_permission_to_physical_runtime(&catalog_perm, ctx.ctx())
 				.await
 				.context("Failed to convert permission")?
 		} else {

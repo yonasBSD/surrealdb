@@ -1011,6 +1011,13 @@ impl Iterator {
 			for split in splits.iter() {
 				// Get the query result
 				let res = self.results.take().await?;
+				// Re-initialise the collector before pushing split-expanded
+				// values back. Some collectors (notably `FileCollector` under
+				// TEMPFILES) consume their writer in `take()` and can't be
+				// re-pushed; `prepare()` returns a fresh collector of the
+				// same shape so subsequent splits and the final `take()`
+				// still see the same on-disk vs in-memory configuration.
+				self.results = self.results.prepare(ctx, stm, self.start, self.limit)?;
 				// Loop over each value
 				for obj in &res {
 					// Get the value at the path

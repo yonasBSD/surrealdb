@@ -31,7 +31,7 @@ use crate::catalog::{DatabaseId, Index, NamespaceId, Permission};
 use crate::err::Error;
 use crate::exec::index::access_path::{BTreeAccess, IndexRef};
 use crate::exec::permission::{
-	PhysicalPermission, convert_permission_to_physical, should_check_perms,
+	PhysicalPermission, convert_permission_to_physical_runtime, should_check_perms,
 	validate_record_user_access,
 };
 use crate::exec::{
@@ -205,7 +205,8 @@ impl ExecOperator for IndexCountScan {
 					Some(def) => def.permissions.select.clone(),
 					None => Permission::None,
 				};
-				convert_permission_to_physical(&catalog_perm, ctx.ctx()).await
+				convert_permission_to_physical_runtime(&catalog_perm, ctx.ctx())
+					.await
 					.context("Failed to convert permission")?
 			} else {
 				PhysicalPermission::Allow

@@ -161,6 +161,10 @@ const IGNORE_TESTS: &[&str] = &[
 	"language/control_flow/transaction/commit_behaviour.surql",
 	"language/graph/edge_clauses.surql",
 	"reproductions/7169_from_only_in_graph_lookup.surql",
+	// The new parser doesn't yet support `INFO FOR NAMESPACE VERSION …`
+	// (only `INFO FOR DATABASE VERSION …`); the legacy parser used by the
+	// language-test harness does.
+	"language/statements/info/version_clause.surql",
 ];
 
 #[test]

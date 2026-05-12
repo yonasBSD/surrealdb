@@ -173,6 +173,7 @@ pub(crate) async fn fetch_and_filter_records_batch(
 			let allowed = crate::exec::permission::check_permission_for_value(
 				select_permission,
 				&record.data,
+				None,
 				ctx,
 			)
 			.await
