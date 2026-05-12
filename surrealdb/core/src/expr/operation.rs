@@ -51,6 +51,20 @@ pub(crate) enum Operation {
 	},
 }
 
+/// Reject a root `from` pointer for `copy` / `move`. Without this guard, an
+/// empty `from` makes `Value::pick` return the entire current document, which
+/// can copy field values past their SELECT permissions into an attacker-chosen
+/// destination path.
+fn reject_root_from(op: &str, from: Vec<Strand>) -> Result<Vec<Strand>, PatchError> {
+	if from.is_empty() {
+		Err(PatchError {
+			message: format!("'{op}' operation requires a non-root 'from' pointer"),
+		})
+	} else {
+		Ok(from)
+	}
+}
+
 impl Operation {
 	/// Converts a value to a JSON path.
 	fn value_to_jsonpath(val: &Value) -> Vec<Strand> {
@@ -201,14 +215,20 @@ impl Operation {
 				path,
 				value: value()?,
 			}),
-			"copy" => Ok(Operation::Copy {
-				path,
-				from: from()?,
-			}),
-			"move" => Ok(Operation::Move {
-				path,
-				from: from()?,
-			}),
+			"copy" => {
+				let from = reject_root_from("copy", from()?)?;
+				Ok(Operation::Copy {
+					path,
+					from,
+				})
+			}
+			"move" => {
+				let from = reject_root_from("move", from()?)?;
+				Ok(Operation::Move {
+					path,
+					from,
+				})
+			}
 			"test" => Ok(Operation::Test {
 				path,
 				value: value()?,
