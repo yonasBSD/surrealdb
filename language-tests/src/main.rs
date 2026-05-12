@@ -54,6 +54,14 @@ async fn async_main() -> Result<()> {
 		}
 		#[cfg(feature = "upgrade")]
 		"upgrade" => cmd::upgrade::run(color, args).await,
+		#[cfg(not(feature = "bench"))]
+		"bench" => {
+			anyhow::bail!(
+				"Bench subcommand is only implemented when the 'bench' feature is enabled"
+			)
+		}
+		#[cfg(feature = "bench")]
+		"bench" => cmd::bench::run(color, args).await,
 		"list" => cmd::list::run(args).await,
 		_ => unreachable!(),
 	}

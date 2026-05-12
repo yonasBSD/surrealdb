@@ -56,8 +56,8 @@ pub use consts::{
 pub(crate) use ds::TransactionFactory;
 pub use ds::requirements::{TransactionBuilderFactoryRequirements, TransactionBuilderRequirements};
 pub use ds::{
-	Datastore, DatastoreFlavor, Metric, Metrics, TransactionBuilder, TransactionBuilderFactory,
-	TransactionBuilderParts,
+	Builder, Datastore, DatastoreFlavor, Metric, Metrics, TransactionBuilder,
+	TransactionBuilderFactory, TransactionBuilderParts,
 };
 pub use err::{Error, Result};
 pub use into::IntoBytes;

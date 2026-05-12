@@ -2838,6 +2838,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "oorandom"
+version = "11.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
+
+[[package]]
 name = "p256"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4582,12 +4588,14 @@ dependencies = [
  "cfg-if",
  "clap",
  "futures",
+ "oorandom",
  "reblessive",
  "revision 0.19.0",
  "rust_decimal",
  "semver",
  "serde",
  "serde_json",
+ "sha2",
  "similar",
  "surrealdb-core",
  "surrealdb-types",
