@@ -49,6 +49,32 @@ fn singular(value: &PublicValue) -> bool {
 	}
 }
 
+// SECURITY: LIVE queries capture the session's auth principal at registration
+// time (see `surrealdb/core/src/dbs/session.rs`). When an auth-lifecycle RPC
+// changes the principal on the same WebSocket, those captured snapshots would
+// continue to dispatch notifications under the prior context, bypassing the
+// access controls that should now apply (GHSA-2xrp-m9c6-75rj). Callers
+// snapshot the principal before the operation and tear LIVE subscriptions
+// down when it changes. Token refresh against the same identity leaves the
+// principal unchanged and preserves the subscriptions.
+struct AuthPrincipalSnapshot {
+	id: String,
+	level: crate::iam::Level,
+}
+
+impl AuthPrincipalSnapshot {
+	fn capture(session: &Session) -> Self {
+		Self {
+			id: session.au.id().to_string(),
+			level: session.au.level().clone(),
+		}
+	}
+
+	fn differs_from(&self, session: &Session) -> bool {
+		session.au.id() != self.id || session.au.level() != &self.level
+	}
+}
+
 /// Map an RPC [`Method`] to an [`AuthAction`] when it represents an auth
 /// lifecycle operation. Returns `None` for non-auth methods so the caller can
 /// skip emitting an [`AuthEvent`] without branching on every variant.
@@ -504,11 +530,17 @@ pub trait RpcProtocol {
 		// Get a write lock on the session
 		let session_lock = self.get_session(&session_id)?;
 		let mut session = session_lock.write().await;
+		let snapshot = AuthPrincipalSnapshot::capture(&session);
 		// Attempt signup, mutating the session
 		let out: Result<PublicValue> =
 			crate::iam::signup::signup(self.kvs(), &mut session, params.into())
 				.await
 				.map(SurrealValue::into_value);
+		let principal_changed = snapshot.differs_from(&session);
+		drop(session);
+		if principal_changed {
+			self.cleanup_lqs(&session_id).await;
+		}
 		// Return the signup result
 		out.map(DbResult::Other).map_err(types_error_from_anyhow)
 	}
@@ -532,11 +564,17 @@ pub trait RpcProtocol {
 		// Get a write lock on the session
 		let session_lock = self.get_session(&session_id)?;
 		let mut session = session_lock.write().await;
+		let snapshot = AuthPrincipalSnapshot::capture(&session);
 		// Attempt signin, mutating the session
 		let out: Result<PublicValue> =
 			crate::iam::signin::signin(self.kvs(), &mut session, params.into())
 				.await
 				.map(SurrealValue::into_value);
+		let principal_changed = snapshot.differs_from(&session);
+		drop(session);
+		if principal_changed {
+			self.cleanup_lqs(&session_id).await;
+		}
 		// Return the signin result
 		out.map(DbResult::Other).map_err(types_error_from_anyhow)
 	}
@@ -560,6 +598,7 @@ pub trait RpcProtocol {
 		// Get a write lock on the session
 		let session_lock = self.get_session(&session_id)?;
 		let mut session = session_lock.write().await;
+		let snapshot = AuthPrincipalSnapshot::capture(&session);
 		// Log before authentication
 		trace!(
 			"Authenticate RPC: session_id={:?}, before: ns={:?}, db={:?}",
@@ -575,6 +614,11 @@ pub trait RpcProtocol {
 			"Authenticate RPC: session_id={:?}, after: ns={:?}, db={:?}",
 			session_id, session.ns, session.db
 		);
+		let principal_changed = snapshot.differs_from(&session);
+		drop(session);
+		if principal_changed {
+			self.cleanup_lqs(&session_id).await;
+		}
 		// Return nothing on success
 		out.map(DbResult::Other).map_err(types_error_from_anyhow)
 	}
@@ -621,6 +665,7 @@ pub trait RpcProtocol {
 		// Get a write lock on the session
 		let session_lock = self.get_session(&session_id)?;
 		let mut session = session_lock.write().await;
+		let snapshot = AuthPrincipalSnapshot::capture(&session);
 		// Attempt token refresh, which will:
 		// - Validate the refresh token
 		// - Revoke the old refresh token
@@ -628,6 +673,11 @@ pub trait RpcProtocol {
 		// - Update the session with the new authentication state
 		let out: Result<PublicValue> =
 			token.refresh(self.kvs(), &mut session).await.map(Token::into_value);
+		let principal_changed = snapshot.differs_from(&session);
+		drop(session);
+		if principal_changed {
+			self.cleanup_lqs(&session_id).await;
+		}
 		// Return the new token pair
 		out.map(DbResult::Other).map_err(types_error_from_anyhow)
 	}

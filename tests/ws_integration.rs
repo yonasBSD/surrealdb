@@ -2469,6 +2469,202 @@ pub async fn rpc_capability(cfg_server: Option<Format>, cfg_format: Format) {
 	}
 }
 
+// ============================================================================
+// LIVE queries owned by a session must be torn down when the session's auth principal changes
+// (signin/signup/ authenticate/refresh that alters `Auth::id()` or `Auth::level()`). Token
+// refresh against the same identity must NOT tear LIVE queries down.
+// ============================================================================
+
+/// Registering a LIVE query as root and then signing up as a record user on
+/// the same connection must tear the LIVE down: subsequent writes from a
+/// different connection must not produce a notification on the (now
+/// re-authenticated) socket.
+pub async fn live_query_cleared_on_principal_change(
+	cfg_server: Option<Format>,
+	cfg_format: Format,
+) {
+	// Setup database server
+	let (addr, mut server) = common::start_server_with_defaults().await.unwrap();
+
+	// Permanent writer socket — stays authenticated as root for the duration
+	let mut writer = Socket::connect(&addr, cfg_server, cfg_format).await.unwrap();
+	writer.send_message_signin(USER, PASS, None, None, None).await.unwrap();
+	ensure_namespace_and_database(&mut writer, NS, DB).await.unwrap();
+	writer.send_message_use(Some(NS), Some(DB)).await.unwrap();
+	writer.send_message_query("DEFINE TABLE tester").await.unwrap();
+	// Define a record access method so we have a non-root identity to sign in as.
+	writer
+		.send_message_query(
+			r#"
+			DEFINE ACCESS user ON DATABASE TYPE RECORD
+				SIGNUP ( CREATE user SET email = $email, pass = crypto::argon2::generate($pass) )
+				SIGNIN ( SELECT * FROM user WHERE email = $email AND crypto::argon2::compare(pass, $pass) )
+				DURATION FOR SESSION 1d, FOR TOKEN 1d
+			;"#,
+		)
+		.await
+		.unwrap();
+
+	// Reader socket — signs in as root, registers LIVE, then signs in as a
+	// record user (principal change).
+	let mut reader = Socket::connect(&addr, cfg_server, cfg_format).await.unwrap();
+	reader.send_message_signin(USER, PASS, None, None, None).await.unwrap();
+	reader.send_message_use(Some(NS), Some(DB)).await.unwrap();
+	let res = reader.send_request("query", json!(["LIVE SELECT * FROM tester"])).await.unwrap();
+	assert!(res["result"].is_array(), "result: {res:?}");
+	let live_id =
+		res["result"][0]["result"].as_str().expect("LIVE id should be a string").to_string();
+
+	// Sign up as a record user on the SAME reader socket. This changes the
+	// auth principal from Level::Root to Level::Record, which must trigger
+	// cleanup_lqs for the reader's session.
+	let res = reader
+		.send_request(
+			"signup",
+			json!([{
+				"ns": NS,
+				"db": DB,
+				"ac": "user",
+				"email": "victim@example.com",
+				"pass": "pass",
+			}]),
+		)
+		.await
+		.unwrap();
+	assert!(res.get("error").is_none(), "signup error: {res:?}");
+
+	// Write a record on the permanent writer (still root).
+	let res =
+		writer.send_request("query", json!(["CREATE tester:id SET name = 'foo'"])).await.unwrap();
+	assert!(res["result"].is_array(), "result: {res:?}");
+
+	// Verify the reader receives NO notification for the LIVE id registered
+	// prior to the signup. The LIVE was registered under the root principal
+	// and must have been torn down when the reader's session principal
+	// changed to Level::Record.
+	let got_notif =
+		reader.wait_for_notification_from_lq(&live_id, Duration::from_millis(500)).await;
+	assert!(!got_notif, "LIVE registered before signup must be torn down on principal change",);
+
+	server.finish().unwrap();
+}
+
+/// Re-signing in with the same root credentials on a connection that has a
+/// registered LIVE query must preserve the LIVE: a subsequent write must
+/// still produce a notification.
+pub async fn live_query_preserved_on_same_identity_resignin(
+	cfg_server: Option<Format>,
+	cfg_format: Format,
+) {
+	// Setup database server
+	let (addr, mut server) = common::start_server_with_defaults().await.unwrap();
+	// Single socket — signin twice as the same root identity.
+	let mut socket = Socket::connect(&addr, cfg_server, cfg_format).await.unwrap();
+	socket.send_message_signin(USER, PASS, None, None, None).await.unwrap();
+	ensure_namespace_and_database(&mut socket, NS, DB).await.unwrap();
+	socket.send_message_use(Some(NS), Some(DB)).await.unwrap();
+	socket.send_message_query("DEFINE TABLE tester").await.unwrap();
+	let res = socket.send_request("query", json!(["LIVE SELECT * FROM tester"])).await.unwrap();
+	let live_id =
+		res["result"][0]["result"].as_str().expect("LIVE id should be a string").to_string();
+
+	// Re-signin with the SAME credentials. Auth principal stays Level::Root
+	// with the same actor id, so cleanup_lqs must NOT fire.
+	socket.send_message_signin(USER, PASS, None, None, None).await.unwrap();
+
+	// Create a record — the LIVE registered before the re-signin must still
+	// deliver a notification.
+	let res =
+		socket.send_request("query", json!(["CREATE tester:id SET name = 'foo'"])).await.unwrap();
+	assert!(res["result"].is_array(), "result: {res:?}");
+
+	let got_notif = socket.wait_for_notification_from_lq(&live_id, Duration::from_secs(2)).await;
+	assert!(got_notif, "LIVE registered before same-identity resignin must be preserved",);
+
+	server.finish().unwrap();
+}
+
+/// A LIVE query registered as one record user must be torn down when the
+/// connection signs in as a different record user (principal change at
+/// Level::Record). This covers the typical multi-tenant record-user re-auth
+/// scenario.
+pub async fn live_query_cleared_on_record_identity_change(
+	cfg_server: Option<Format>,
+	cfg_format: Format,
+) {
+	// Setup database server
+	let (addr, mut server) = common::start_server_with_defaults().await.unwrap();
+
+	// Permanent writer
+	let mut writer = Socket::connect(&addr, cfg_server, cfg_format).await.unwrap();
+	writer.send_message_signin(USER, PASS, None, None, None).await.unwrap();
+	ensure_namespace_and_database(&mut writer, NS, DB).await.unwrap();
+	writer.send_message_use(Some(NS), Some(DB)).await.unwrap();
+	writer
+		.send_message_query(
+			"DEFINE TABLE tester PERMISSIONS FOR select, create, update, delete FULL",
+		)
+		.await
+		.unwrap();
+	writer
+		.send_message_query(
+			r#"
+			DEFINE ACCESS user ON DATABASE TYPE RECORD
+				SIGNUP ( CREATE user SET email = $email, pass = crypto::argon2::generate($pass) )
+				SIGNIN ( SELECT * FROM user WHERE email = $email AND crypto::argon2::compare(pass, $pass) )
+				DURATION FOR SESSION 1d, FOR TOKEN 1d
+			;"#,
+		)
+		.await
+		.unwrap();
+
+	// Reader signs up as user A, registers LIVE, then signs up as user B
+	// (different record identity at the same Level::Record).
+	let mut reader = Socket::connect(&addr, cfg_server, cfg_format).await.unwrap();
+	reader
+		.send_request(
+			"signup",
+			json!([{
+				"ns": NS,
+				"db": DB,
+				"ac": "user",
+				"email": "alice@example.com",
+				"pass": "pass",
+			}]),
+		)
+		.await
+		.unwrap();
+	let res = reader.send_request("query", json!(["LIVE SELECT * FROM tester"])).await.unwrap();
+	let live_id =
+		res["result"][0]["result"].as_str().expect("LIVE id should be a string").to_string();
+
+	// Sign up as user B on the same socket — principal changes (different
+	// record id at Level::Record).
+	reader
+		.send_request(
+			"signup",
+			json!([{
+				"ns": NS,
+				"db": DB,
+				"ac": "user",
+				"email": "bob@example.com",
+				"pass": "pass",
+			}]),
+		)
+		.await
+		.unwrap();
+
+	// Write a record.
+	writer.send_request("query", json!(["CREATE tester:id SET name = 'foo'"])).await.unwrap();
+
+	// Reader must not see a notification for Alice's LIVE.
+	let got_notif =
+		reader.wait_for_notification_from_lq(&live_id, Duration::from_millis(500)).await;
+	assert!(!got_notif, "LIVE registered as Alice must be torn down after signup as Bob",);
+
+	server.finish().unwrap();
+}
+
 /// A macro which defines a macro which can be used to define tests running the
 /// above functions with a set of given paramenters.
 macro_rules! define_include_tests {
@@ -2871,6 +3067,12 @@ define_include_tests! {
 	live_second_connection,
 	#[test_log::test(tokio::test)]
 	variable_auth_live_query,
+	#[test_log::test(tokio::test)]
+	live_query_cleared_on_principal_change,
+	#[test_log::test(tokio::test)]
+	live_query_preserved_on_same_identity_resignin,
+	#[test_log::test(tokio::test)]
+	live_query_cleared_on_record_identity_change,
 	#[test_log::test(tokio::test)]
 	session_expiration,
 	#[test_log::test(tokio::test)]
