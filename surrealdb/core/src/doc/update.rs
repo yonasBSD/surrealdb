@@ -26,9 +26,9 @@ impl Document {
 		self.store_record_data(ctx, opt, stm).await?;
 		self.store_index_data(stk, ctx, opt).await?;
 		self.process_table_views(stk, ctx, opt, stm).await?;
-		self.process_table_lives(stk, ctx, opt, stm).await?;
+		self.process_table_lives(stk, ctx, opt, Self::action_for(stm, self.is_new())).await?;
 		self.process_table_events(stk, ctx, opt, stm).await?;
-		self.process_changefeeds(ctx, opt, stm).await?;
+		self.process_changefeeds(ctx, opt).await?;
 		self.pluck_generic(stk, ctx, opt, stm).await
 	}
 }

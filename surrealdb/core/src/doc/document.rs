@@ -314,6 +314,22 @@ impl Document {
 		self.initial.doc.as_ref().is_none()
 	}
 
+	/// Convert a `(Statement, is_new)` pair to the `Action` value used by
+	/// [`process_table_lives`](crate::doc::Document::process_table_lives),
+	/// [`process_events`](crate::doc::Document::process_events) and view
+	/// triggers. Centralises the CRUD-action classification so call sites
+	/// don't reinvent it.
+	pub(crate) fn action_for(stm: &crate::dbs::Statement<'_>, is_new: bool) -> crate::doc::Action {
+		use crate::doc::Action;
+		if stm.is_delete() {
+			Action::Delete
+		} else if is_new {
+			Action::Create
+		} else {
+			Action::Update
+		}
+	}
+
 	/// Check if this is the first iteration. When
 	/// running an UPSERT or INSERT statement we don't
 	/// first fetch the value from the storage engine.

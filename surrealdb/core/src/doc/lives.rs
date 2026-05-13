@@ -12,8 +12,8 @@ use reblessive::tree::Stk;
 use super::IgnoreError;
 use crate::catalog::{Permission, SubscriptionDefinition, SubscriptionFields};
 use crate::ctx::{Context, FrozenContext};
-use crate::dbs::{MessageBroker, Options, Statement};
-use crate::doc::{CursorDoc, Document};
+use crate::dbs::{MessageBroker, Options};
+use crate::doc::{Action, CursorDoc, Document};
 use crate::err::Error;
 use crate::expr::FlowResultExt as _;
 use crate::expr::paths::{AC, ID, RD, TK};
@@ -32,7 +32,7 @@ impl Document {
 		_stk: &mut Stk,
 		ctx: &FrozenContext,
 		opt: &Options,
-		stm: &Statement<'_>,
+		action: Action,
 	) -> Result<()> {
 		// Check import
 		if opt.import {
@@ -59,9 +59,9 @@ impl Document {
 		}
 
 		// Get the event action
-		let (met, is_delete): (Arc<Value>, _) = if stm.is_delete() {
+		let (met, is_delete): (Arc<Value>, _) = if matches!(action, Action::Delete) {
 			(Value::from("DELETE").into(), true)
-		} else if self.is_new() {
+		} else if matches!(action, Action::Create) || self.is_new() {
 			(Value::from("CREATE").into(), false)
 		} else {
 			(Value::from("UPDATE").into(), false)

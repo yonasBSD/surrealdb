@@ -1,16 +1,11 @@
 use anyhow::Result;
 
 use crate::ctx::FrozenContext;
-use crate::dbs::{Options, Statement};
+use crate::dbs::Options;
 use crate::doc::Document;
 
 impl Document {
-	pub async fn process_changefeeds(
-		&self,
-		ctx: &FrozenContext,
-		opt: &Options,
-		_stm: &Statement<'_>,
-	) -> Result<()> {
+	pub async fn process_changefeeds(&self, ctx: &FrozenContext, opt: &Options) -> Result<()> {
 		// Check import
 		if opt.import {
 			return Ok(());

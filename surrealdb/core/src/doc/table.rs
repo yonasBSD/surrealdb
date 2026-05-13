@@ -1212,13 +1212,18 @@ impl Document {
 		initial: Option<Arc<Record>>,
 		current: Option<Arc<Record>>,
 	) -> Result<()> {
-		// HACK: We can't insert data the normal way as we have to set the metadata which we can't
-		// do via statements. So instead we create a document and pretend to run be the right
-		// statement query and just run events immediatly.
-		// Updating views prevents premissions from being run anyway so there shouldn't be a
-		// problem.
-		//
-		// Generate a document so that we can run the events.
+		// We can't insert view data via UpsertStatement/DeleteStatement
+		// directly because the view record's metadata (aggregation stats)
+		// can't be expressed in those statements — `tx.set_record` is
+		// called separately at the call site. After the raw KV write
+		// lands, run the same document-lifecycle hooks that the regular
+		// pipeline would so secondary indexes, dependent views, change
+		// feeds, live-query notifications, and events stay consistent
+		// with the stored view record. Field / table validation is intentionally skipped: the data
+		// was computed by the planner from the aggregation, so there is no
+		// user-supplied content to validate, and re-running validation
+		// would force every aggregation expression through the field
+		// pipeline a second time.
 
 		let mut document = Document {
 			doc_ctx,
@@ -1242,7 +1247,9 @@ impl Document {
 
 		stk.run(|stk| document.store_index_data(stk, ctx, opt)).await?;
 		stk.run(|stk| document.process_views(stk, ctx, opt, action)).await?;
+		stk.run(|stk| document.process_table_lives(stk, ctx, opt, action)).await?;
 		stk.run(|stk| document.process_events(stk, ctx, opt, action, None)).await?;
+		document.process_changefeeds(ctx, opt).await?;
 
 		Ok(())
 	}
