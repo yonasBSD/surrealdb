@@ -105,6 +105,7 @@ pub fn compare_keys(keys_a: &[Value], keys_b: &[Value], order_by: &[OrderByField
 /// Mirrors [`compare_keys`] for the `SortKey`-keyed sort path. Used by
 /// `ExternalSortByKey`, which serialises pre-extracted keys to disk alongside
 /// each row, then merges them back.
+#[cfg(all(storage, not(target_family = "wasm")))]
 pub fn compare_keys_by_sort_key(
 	keys_a: &[Value],
 	keys_b: &[Value],

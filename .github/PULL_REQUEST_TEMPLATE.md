@@ -1,10 +1,10 @@
 Thank you for submitting this pull request. We really appreciate you spending the time to work on SurrealDB. 🚀 🎉
 
-Before proceeding, please add any of the following labels that apply:
+<!-- Before proceeding, please add any of the following labels that apply:
 
 * `breaking-change` if this PR includes a breaking change. This label is not needed for bug fixes, which change output in line with a user's original expectations.
 * `needs-documentation` if documentation is needed to explain the change made in the PR.
-* `Modifies env vars or commands` if any changes are made to environment variables or command flags.
+* `Modifies env vars or commands` if any changes are made to environment variables or command flags. -->
 
 ## What is the motivation?
 

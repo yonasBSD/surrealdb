@@ -7,10 +7,11 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+#[cfg(not(target_family = "wasm"))]
+use crate::catalog::DiskAnnParams;
 use crate::catalog::providers::{DatabaseProvider, TableProvider};
 use crate::catalog::{
-	DatabaseId, DiskAnnParams, HnswParams, Index, IndexDefinition, NamespaceId, TableDefinition,
-	TableId,
+	DatabaseId, HnswParams, Index, IndexDefinition, NamespaceId, TableDefinition, TableId,
 };
 use crate::ctx::FrozenContext;
 use crate::idx::IndexKeyBase;

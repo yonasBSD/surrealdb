@@ -357,7 +357,7 @@ impl<'ctx> Planner<'ctx> {
 		fields: &Fields,
 		start: &Option<crate::expr::start::Start>,
 		limit: &Option<crate::expr::limit::Limit>,
-		tempfiles: bool,
+		#[allow(unused)] tempfiles: bool,
 		registry: &mut ExpressionRegistry,
 	) -> Result<(Arc<dyn ExecOperator>, Vec<String>), Error> {
 		use crate::expr::order::Ordering;

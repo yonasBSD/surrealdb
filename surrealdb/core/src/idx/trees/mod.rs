@@ -1,3 +1,4 @@
+#[cfg(not(target_family = "wasm"))]
 pub(crate) mod diskann;
 pub mod dynamicset;
 mod graph;
