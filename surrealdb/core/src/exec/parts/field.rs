@@ -93,6 +93,24 @@ pub(crate) async fn evaluate_field(
 		Value::Object(obj) => Ok(obj.get(name).cloned().unwrap_or(Value::None)),
 
 		Value::RecordId(rid) => {
+			// SECURITY: when the record-id key is an Object and the field
+			// name resolves to one of its components, return the immutable
+			// key component directly. Falling through to `fetch_record`
+			// runs `SELECT *` with permissions disabled and re-binds
+			// `id.tenant` to the row's `tenant` document field — letting
+			// permission predicates like
+			// `WHERE id.tenant = $token.tenant` be spoofed (Codex finding
+			// c67c7232), and during UPDATE the same self-fetch returns the
+			// already-stored new value for both `o` and `n` in
+			// `store_index_data`, leaving stale indexes (Codex finding
+			// 9c442c96). When the requested name is not a key component,
+			// keep the existing remote-fetch semantics (`record:foo.id`
+			// returns the rid itself via the standard `id` projection).
+			if let crate::val::RecordIdKey::Object(obj) = &rid.key
+				&& obj.contains_key(name)
+			{
+				return Ok(obj.get(name).cloned().unwrap_or(Value::None));
+			}
 			// When we are already computing fields for this record, fetch the
 			// raw stored data without re-evaluating computed fields. Otherwise
 			// a computed field like `{ return $this.id.prop }` would re-enter

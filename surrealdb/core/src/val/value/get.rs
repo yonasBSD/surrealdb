@@ -541,12 +541,60 @@ impl Value {
 						Part::Optional => {
 							stk.run(|stk| self.get(stk, ctx, opt, doc, path.next())).await
 						}
-						// This is a remote field expression with one exception
-						// If the RecordId is array-based, and we try to access an index,
-						// then we return that index of the RecordId's array.
+						// This is a remote field expression with two exceptions
+						// covering composite RecordId keys. SECURITY: without these
+						// special cases, `id.<field>` on a complex record id falls
+						// through to `select_document`, which:
+						//   - runs `SELECT *` with permissions disabled, exposing mutable document
+						//     fields where an immutable id component was intended (Codex finding
+						//     c67c7232 — `PERMISSIONS WHERE id.tenant = $token.tenant`); and
+						//   - during UPDATE returns the same already-stored value for both
+						//     `self.initial` and `self.current`, so `store_index_data`'s `o != n`
+						//     guard suppresses index maintenance and leaves stale entries (Codex
+						//     finding 9c442c96).
+						// Resolve the path against the RecordId key directly when it
+						// is an Object/Array so the semantics match the immutable
+						// key component the user actually wrote.
 						p => {
 							// Discover what the path is that we need to continue with
 							let next = match (p, &val.key) {
+								// `id.field` on an Object-keyed record id reads
+								// the key component directly when that name is
+								// present in the key, without going through a
+								// `SELECT *`. Names that aren't key components
+								// (e.g. `record:foo.id`) keep the remote-fetch
+								// semantics below.
+								(Part::Field(name), RecordIdKey::Object(obj))
+									if obj.contains_key(name.as_str()) =>
+								{
+									let v = obj.get(name.as_str()).cloned().unwrap_or(Value::None);
+									return stk
+										.run(|stk| v.get(stk, ctx, opt, doc, path.next()))
+										.await;
+								}
+								// `id["name"]` on an Object-keyed record id is the
+								// same thing — `Part::Value` of a string literal
+								// is the bracket-access form of a field.
+								(Part::Value(x), RecordIdKey::Object(obj)) => {
+									match stk
+										.run(|stk| x.compute(stk, ctx, opt, doc))
+										.await
+										.catch_return()?
+									{
+										Value::String(s) if obj.contains_key(s.as_str()) => {
+											let v =
+												obj.get(s.as_str()).cloned().unwrap_or(Value::None);
+											return stk
+												.run(|stk| v.get(stk, ctx, opt, doc, path.next()))
+												.await;
+										}
+										// Other key types fall through to the
+										// remote-fetch path with the computed
+										// value re-substituted into the path.
+										x => &[&[Part::Value(x.into_literal())], path.next()]
+											.concat(),
+									}
+								}
 								// If the computed value is a number, and the RecordIdKey is an
 								// array, then we return the value at the index of the
 								// array. Otherwise, we return the computed value and the
