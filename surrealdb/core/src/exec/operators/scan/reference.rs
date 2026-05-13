@@ -14,12 +14,14 @@ use super::common::{
 	BATCH_SIZE, evaluate_bound_key, extract_record_ids_into, resolve_record_batch,
 };
 use crate::catalog::{DatabaseId, NamespaceId};
+use crate::exec::permission::{PhysicalPermission, should_check_perms};
 use crate::exec::{
 	AccessMode, ContextLevel, ControlFlowExt, EvalContext, ExecOperator, ExecutionContext,
 	FlowResult, OperatorMetrics, PhysicalExpr, ValueBatch, ValueBatchStream, buffer_stream,
 	monitor_stream,
 };
 use crate::expr::ControlFlow;
+use crate::iam::Action;
 use crate::idx::planner::ScanDirection;
 use crate::kvs::CachePolicy;
 use crate::val::{RecordId, TableName};
@@ -150,6 +152,10 @@ impl ExecOperator for ReferenceScan {
 
 	fn execute(&self, ctx: &ExecutionContext) -> FlowResult<ValueBatchStream> {
 		let db_ctx = ctx.database()?.clone();
+		// SECURITY: reference scan results bypass `Document::pluck_select`, so
+		// the referencing table's SELECT permission must be enforced here
+		// (same family as the graph scan check).
+		let check_perms = should_check_perms(&db_ctx, Action::View)?;
 		let input_stream = buffer_stream(
 			self.input.execute(ctx)?,
 			self.input.access_mode(),
@@ -169,6 +175,10 @@ impl ExecOperator for ReferenceScan {
 			let txn = ctx.txn();
 			let ns_id = db_ctx.ns_ctx.ns.namespace_id;
 			let db_id = db_ctx.db.database_id;
+			let mut perm_cache: std::collections::HashMap<
+				crate::val::TableName,
+				PhysicalPermission,
+			> = std::collections::HashMap::new();
 
 			let version: Option<u64> = match &version_expr {
 				Some(expr) => {
@@ -225,8 +235,8 @@ impl ExecOperator for ReferenceScan {
 
 							if rid_batch.len() >= BATCH_SIZE {
 								let values = resolve_record_batch(
-									&txn, ns_id, db_id, &rid_batch, fetch_full, version,
-									CachePolicy::ReadWrite,
+									&ctx, &txn, ns_id, db_id, &rid_batch, fetch_full, check_perms,
+									version, CachePolicy::ReadWrite, &mut perm_cache,
 								).await?;
 								yield ValueBatch { values };
 								rid_batch.clear();
@@ -239,8 +249,8 @@ impl ExecOperator for ReferenceScan {
 			// Yield remaining batch
 			if !rid_batch.is_empty() {
 				let values = resolve_record_batch(
-					&txn, ns_id, db_id, &rid_batch, fetch_full, version,
-					CachePolicy::ReadWrite,
+					&ctx, &txn, ns_id, db_id, &rid_batch, fetch_full, check_perms, version,
+					CachePolicy::ReadWrite, &mut perm_cache,
 				).await?;
 				yield ValueBatch { values };
 			}

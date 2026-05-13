@@ -211,7 +211,7 @@ impl Document {
 		omit: &[Idiom],
 	) -> Result<Value, IgnoreError> {
 		let omit_exprs: Vec<Expr> = omit.iter().cloned().map(Expr::Idiom).collect();
-		let needed_roots = Planner::extract_needed_fields(
+		let mut needed_roots = Planner::extract_needed_fields(
 			&stmt.fields,
 			&omit_exprs,
 			stmt.cond.as_ref(),
@@ -220,6 +220,35 @@ impl Document {
 			stmt.split.as_ref(),
 		);
 
+		// SECURITY: when a `PERMISSIONS FOR select WHERE …` expression on this
+		// table references a computed field, that field must be evaluated even
+		// when the user's projection didn't list it. Otherwise the permission
+		// decision is made against a row missing the computed value, which can
+		// either leak data or wrongly redact it. Mirrors the streaming
+		// pipeline's `FieldState::permission_field_deps` handling.
+		if let Some(ref mut roots) = needed_roots
+			&& self.id.is_some()
+			&& ctx.check_perms(opt, Action::View).map_err(IgnoreError::from)?
+		{
+			let table_fields = self.doc_ctx.fd().map_err(IgnoreError::from)?;
+			let mut opaque = false;
+			for fd in table_fields.iter() {
+				if let catalog::Permission::Specific(ref e) = fd.select_permission {
+					let deps = crate::expr::computed_deps::extract_computed_deps(e);
+					if !deps.is_complete {
+						opaque = true;
+						break;
+					}
+					roots.extend(deps.fields);
+				}
+			}
+			if opaque {
+				// A permission expression had opaque deps; we can't safely
+				// limit the computed-field set. Fall back to evaluating all.
+				needed_roots = None;
+			}
+		}
+
 		// Process the desired output
 		let mut out = {
 			// FAST PATH: For COUNT operations, skip all field computation and permissions
@@ -227,6 +256,16 @@ impl Document {
 			if matches!(self.record_strategy, RecordStrategy::Count) {
 				Ok(self.current.doc.as_ref().clone())
 			} else {
+				// SECURITY: compute fields on `self.current` BEFORE reducing.
+				// `Document::compute_reduced_target` evaluates each
+				// `PERMISSIONS FOR select WHERE …` expression against the
+				// pre-reduction document; if computed fields aren't applied
+				// yet, those expressions see missing values and the
+				// permission decision is wrong. The augmented `needed_roots`
+				// above guarantees any computed fields referenced by a
+				// permission expression are included.
+				self.computed_fields(stk, ctx, opt, DocKind::Current, needed_roots.as_ref())
+					.await?;
 				// Process the permitted documents
 				let current = if self.reduced(stk, ctx, opt, Current).await? {
 					self.computed_fields(
@@ -239,8 +278,6 @@ impl Document {
 					.await?;
 					&self.current_reduced
 				} else {
-					self.computed_fields(stk, ctx, opt, DocKind::Current, needed_roots.as_ref())
-						.await?;
 					&self.current
 				};
 

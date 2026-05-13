@@ -67,66 +67,101 @@ pub(crate) async fn evaluate_bound_key(
 	Ok(value_to_record_id_key(val))
 }
 
-/// Fetch full records for a batch of [`RecordId`]s in one batch.
+/// Resolve a batch of [`RecordId`]s into output values, applying each
+/// record's table-level SELECT permission.
 ///
-/// Uses the transaction's batch multi-get (`getm_records`), which is cache-aware
-/// and uses the store's native batch read (e.g. RocksDB `multi_get_opt`) for
-/// cache misses.
+/// Records whose table permission denies them are skipped, so neither the
+/// existence of the record nor its contents leak to a caller without view
+/// access. Compiled permissions are cached in `perm_cache` keyed by table
+/// name so that a single graph/reference scan over many edges only resolves
+/// each table's permission once.
 ///
-/// The record ID is already injected into the data by `getm_records`, so no
-/// additional `def()` call is needed here.  When the `Arc<Record>` has a
-/// reference count of 1 (e.g. uncached / versioned reads), the data is moved
-/// out without cloning.
-///
-/// Records that don't exist in the datastore are returned as [`Value::None`].
-pub(crate) async fn fetch_records_batch(
+/// When `fetch_full` is `false` and `check_perms` is `false`, this avoids
+/// fetching records and just wraps each id as `Value::RecordId`. Any other
+/// combination requires reading the record so the permission predicate (if
+/// any) can be evaluated against the actual data.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn resolve_record_batch(
+	ctx: &ExecutionContext,
 	txn: &Transaction,
 	ns_id: NamespaceId,
 	db_id: DatabaseId,
 	rids: &[RecordId],
+	fetch_full: bool,
+	check_perms: bool,
 	version: Option<u64>,
 	cache_policy: CachePolicy,
+	perm_cache: &mut std::collections::HashMap<
+		crate::val::TableName,
+		crate::exec::permission::PhysicalPermission,
+	>,
 ) -> Result<Vec<Value>, ControlFlow> {
+	use crate::exec::permission::{PhysicalPermission, check_permission_for_value};
+
+	if !check_perms && !fetch_full {
+		// Fast path: no permissions to check and no data to fetch. Wrap each
+		// id as `Value::RecordId` directly.
+		return Ok(rids.iter().map(|rid| Value::RecordId(rid.clone())).collect());
+	}
+
+	// Compile the SELECT permission for each distinct table referenced in
+	// this batch. The cache survives across batches so we only resolve a
+	// given table's permission once per scan.
+	if check_perms {
+		let db_ctx = ctx.database().context("permission resolution requires database context")?;
+		for rid in rids {
+			if perm_cache.contains_key(&rid.table) {
+				continue;
+			}
+			let table_def = db_ctx
+				.get_table_def(&rid.table, version)
+				.await
+				.context("Failed to get table definition")?;
+			let catalog_perm =
+				crate::exec::permission::resolve_select_permission(table_def.as_deref());
+			let perm = crate::exec::permission::convert_permission_to_physical_runtime(
+				catalog_perm,
+				ctx.ctx(),
+			)
+			.await
+			.context("Failed to convert permission")?;
+			perm_cache.insert(rid.table.clone(), perm);
+		}
+	}
+
 	let records = txn
 		.getm_records(ns_id, db_id, rids, version, cache_policy)
 		.await
 		.context("Failed to fetch records")?;
 
 	let mut values = Vec::with_capacity(rids.len());
-	for record in records {
+	for (rid, record) in rids.iter().zip(records) {
+		// Missing records cannot disclose information.
 		if record.data.is_none() {
-			values.push(Value::None);
-		} else {
-			// Move data out of the Arc when possible (refcount == 1),
-			// otherwise fall back to cloning.
+			continue;
+		}
+
+		if check_perms {
+			let perm = perm_cache.get(&rid.table).map_or(&PhysicalPermission::Deny, |p| p);
+			let allowed = check_permission_for_value(perm, &record.data, None, ctx)
+				.await
+				.context("Failed to check permission")?;
+			if !allowed {
+				continue;
+			}
+		}
+
+		if fetch_full {
 			let value = match Arc::try_unwrap(record) {
 				Ok(rec) => rec.data,
 				Err(arc) => arc.data.clone(),
 			};
 			values.push(value);
+		} else {
+			values.push(Value::RecordId(rid.clone()));
 		}
 	}
 	Ok(values)
-}
-
-/// Resolve a batch of [`RecordId`]s into output values.
-///
-/// When `fetch_full` is false, wraps each ID as `Value::RecordId`.
-/// When true, fetches all records concurrently via [`fetch_records_batch`].
-pub(crate) async fn resolve_record_batch(
-	txn: &Transaction,
-	ns_id: NamespaceId,
-	db_id: DatabaseId,
-	rids: &[RecordId],
-	fetch_full: bool,
-	version: Option<u64>,
-	cache_policy: CachePolicy,
-) -> Result<Vec<Value>, ControlFlow> {
-	if fetch_full {
-		fetch_records_batch(txn, ns_id, db_id, rids, version, cache_policy).await
-	} else {
-		Ok(rids.iter().map(|rid| Value::RecordId(rid.clone())).collect())
-	}
 }
 
 /// Fetch full records for a batch of [`RecordId`]s in one batch, applying

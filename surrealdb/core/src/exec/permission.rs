@@ -7,11 +7,16 @@
 
 use std::sync::Arc;
 
+use reblessive::tree::Stk;
+
 use crate::catalog::{Permission, TableDefinition};
 use crate::ctx::FrozenContext;
+use crate::dbs::Options;
+use crate::doc::CursorDoc;
 use crate::err::Error;
 use crate::exec::planner::Planner;
 use crate::exec::{DatabaseContext, EvalContext, ExecutionContext, PhysicalExpr};
+use crate::expr::FlowResultExt as _;
 use crate::iam::Action;
 use crate::val::Value;
 
@@ -184,4 +189,102 @@ pub(crate) async fn check_permission_for_value(
 			Ok(result.is_truthy())
 		}
 	}
+}
+
+/// Evaluate a catalog SELECT [`Permission`] against a [`CursorDoc`] using the
+/// legacy compute path. Returns `true` when access is allowed.
+///
+/// Used by KNN truthy-document filters (HNSW, DiskANN) where the table's
+/// SELECT permission must be checked per candidate before the
+/// caller-supplied WHERE condition runs. Without this gate, a caller can
+/// probe restricted fields by crafting a WHERE on them and observing the
+/// resulting count / order / timing.
+///
+/// `Specific` expressions are evaluated with `opt.new_with_perms(false)` so
+/// the permission expression itself doesn't recurse into permission checks
+/// against its own table.
+pub(crate) async fn evaluate_table_select_for_doc(
+	stk: &mut Stk,
+	ctx: &FrozenContext,
+	opt: &Options,
+	permission: &Permission,
+	cursor_doc: &CursorDoc,
+) -> anyhow::Result<bool> {
+	match permission {
+		Permission::None => Ok(false),
+		Permission::Full => Ok(true),
+		Permission::Specific(e) => {
+			let opt_no_perms = opt.new_with_perms(false);
+			Ok(stk
+				.run(|stk| e.compute(stk, ctx, &opt_no_perms, Some(cursor_doc)))
+				.await
+				.catch_return()?
+				.is_truthy())
+		}
+	}
+}
+
+/// Cached resolution of a table's SELECT permission check, for callers that
+/// need to evaluate the permission per candidate row (e.g. KNN truthy-doc
+/// filters). Resolve once per filter via [`resolve_cached_table_select`],
+/// then check each candidate via [`check_cached_table_select_for_doc`].
+#[derive(Clone)]
+pub(crate) enum CachedTableSelect {
+	/// Permission checks are bypassed (auth disabled / privileged session).
+	Skip,
+	/// Permission must be evaluated against each candidate document.
+	Apply(Permission),
+}
+
+/// Resolve a table's SELECT permission for caching across per-row checks in
+/// an ANN truthy-doc filter. Returns `Skip` when [`crate::ctx::Context::check_perms`]
+/// reports `false`; otherwise returns `Apply(p)` with the table's SELECT
+/// permission (or `Permission::None` if the table is missing — which denies
+/// access by design).
+pub(crate) async fn resolve_cached_table_select(
+	ctx: &FrozenContext,
+	opt: &Options,
+	table_def: Option<&TableDefinition>,
+) -> anyhow::Result<CachedTableSelect> {
+	if !ctx.check_perms(opt, Action::View)? {
+		return Ok(CachedTableSelect::Skip);
+	}
+	Ok(CachedTableSelect::Apply(resolve_select_permission(table_def).clone()))
+}
+
+/// Check a previously-resolved [`CachedTableSelect`] against a [`CursorDoc`].
+/// Companion to [`resolve_cached_table_select`].
+pub(crate) async fn check_cached_table_select_for_doc(
+	stk: &mut Stk,
+	ctx: &FrozenContext,
+	opt: &Options,
+	cached: &CachedTableSelect,
+	cursor_doc: &CursorDoc,
+) -> anyhow::Result<bool> {
+	match cached {
+		CachedTableSelect::Skip => Ok(true),
+		CachedTableSelect::Apply(p) => {
+			evaluate_table_select_for_doc(stk, ctx, opt, p, cursor_doc).await
+		}
+	}
+}
+
+/// Populate `slot` with the table's cached SELECT permission on first call,
+/// then return a reference to it. Subsequent calls reuse the cached value
+/// without re-fetching the table definition. Shared between the HNSW and
+/// DiskANN truthy-doc filters, both of which resolve the permission once per
+/// filter and reuse it for every candidate.
+pub(crate) async fn ensure_cached_table_select<'a>(
+	ctx: &FrozenContext,
+	opt: &Options,
+	txn: &crate::kvs::Transaction,
+	ikb: &crate::idx::IndexKeyBase,
+	slot: &'a mut Option<CachedTableSelect>,
+) -> anyhow::Result<&'a CachedTableSelect> {
+	use crate::catalog::providers::TableProvider;
+	if slot.is_none() {
+		let table = txn.get_tb(ikb.ns(), ikb.db(), ikb.table(), None).await?;
+		*slot = Some(resolve_cached_table_select(ctx, opt, table.as_deref()).await?);
+	}
+	Ok(slot.as_ref().expect("just populated above"))
 }

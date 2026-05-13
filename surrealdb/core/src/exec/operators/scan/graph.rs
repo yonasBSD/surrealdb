@@ -15,12 +15,14 @@ use super::common::{
 };
 use crate::catalog::{DatabaseId, NamespaceId};
 use crate::exec::parts::LookupDirection;
+use crate::exec::permission::{PhysicalPermission, should_check_perms};
 use crate::exec::{
 	AccessMode, ContextLevel, ControlFlowExt, EvalContext, ExecOperator, ExecutionContext,
 	FlowResult, OperatorMetrics, PhysicalExpr, ValueBatch, ValueBatchStream, buffer_stream,
 	monitor_stream,
 };
 use crate::expr::{ControlFlow, Dir};
+use crate::iam::Action;
 use crate::idx::planner::ScanDirection;
 use crate::kvs::{CachePolicy, KVKey};
 use crate::val::{RecordId, TableName};
@@ -167,6 +169,13 @@ impl ExecOperator for GraphEdgeScan {
 
 	fn execute(&self, ctx: &ExecutionContext) -> FlowResult<ValueBatchStream> {
 		let db_ctx = ctx.database()?.clone();
+		// SECURITY: graph edge results bypass `Document::pluck_select`, so we
+		// must enforce the edge/target table's SELECT permission here. Without
+		// this check a low-privileged user could traverse `->edge` to
+		// enumerate otherwise-hidden relationships, and the `FullEdge` output
+		// mode would additionally return raw record data for tables they
+		// cannot SELECT.
+		let check_perms = should_check_perms(&db_ctx, Action::View)?;
 		let input_stream = buffer_stream(
 			self.input.execute(ctx)?,
 			self.input.access_mode(),
@@ -185,6 +194,13 @@ impl ExecOperator for GraphEdgeScan {
 			let txn = ctx.txn();
 			let ns_id = db_ctx.ns_ctx.ns.namespace_id;
 			let db_id = db_ctx.db.database_id;
+			// Compiled SELECT permissions, cached by table. Different edge
+			// tables may have different permission policies, so we resolve
+			// lazily per table on first use.
+			let mut perm_cache: std::collections::HashMap<
+				crate::val::TableName,
+				PhysicalPermission,
+			> = std::collections::HashMap::new();
 
 			let version: Option<u64> = match &version_expr {
 				Some(expr) => {
@@ -252,8 +268,9 @@ impl ExecOperator for GraphEdgeScan {
 
 									if rid_batch.len() >= BATCH_SIZE {
 										let values = resolve_record_batch(
-											&txn, ns_id, db_id, &rid_batch, fetch_full, version,
-											CachePolicy::ReadWrite,
+											&ctx, &txn, ns_id, db_id, &rid_batch, fetch_full,
+											check_perms, version, CachePolicy::ReadWrite,
+											&mut perm_cache,
 										).await?;
 										yield ValueBatch { values };
 										rid_batch.clear();
@@ -272,8 +289,8 @@ impl ExecOperator for GraphEdgeScan {
 			// Yield remaining batch
 			if !rid_batch.is_empty() {
 				let values = resolve_record_batch(
-					&txn, ns_id, db_id, &rid_batch, fetch_full, version,
-					CachePolicy::ReadWrite,
+					&ctx, &txn, ns_id, db_id, &rid_batch, fetch_full, check_perms, version,
+					CachePolicy::ReadWrite, &mut perm_cache,
 				).await?;
 				yield ValueBatch { values };
 			}

@@ -58,6 +58,15 @@ pub struct KnnScan {
 	/// search. When present, the ANN search will only consider candidates that
 	/// satisfy this condition, preventing non-matching rows from consuming
 	/// top-K slots.
+	///
+	/// SECURITY: the cond is evaluated against raw stored records inside the
+	/// ANN search (`idx/trees/{hnsw,diskann}/filter.rs::is_record_truthy`),
+	/// before any SELECT pipeline filtering. The permission gate that keeps
+	/// this safe lives at that chokepoint, which applies the table's SELECT
+	/// permission to each candidate BEFORE invoking the cond — so hidden
+	/// rows are skipped pre-cond and a record user cannot use the cond to
+	/// probe their field values. Preserve that ordering when touching
+	/// `is_record_truthy`; see the SECURITY note there for the threat model.
 	pub(crate) residual_cond: Option<Cond>,
 	/// Projection-aware field set for computed-field materialization.
 	/// Outer `None` = sub-operator mode (parent handles fields).

@@ -5,7 +5,6 @@
 //! to records, caches condition results while the lookup is running, and shares the DiskANN
 //! doc-id-to-record-id cache for compact document IDs.
 
-use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
 use ahash::HashMap;
@@ -16,6 +15,9 @@ use crate::catalog::providers::TableProvider;
 use crate::catalog::{Record, TableId};
 use crate::dbs::Options;
 use crate::doc::CursorDoc;
+use crate::exec::permission::{
+	CachedTableSelect, check_cached_table_select_for_doc, ensure_cached_table_select,
+};
 use crate::expr::{Cond, FlowResultExt as _};
 use crate::idx::IndexKeyBase;
 use crate::idx::trees::diskann::cache::DiskAnnCache;
@@ -43,6 +45,10 @@ pub(super) struct DiskAnnTruthyDocumentFilter<'a> {
 	cond: Arc<Cond>,
 	/// Query-local truthy/missing cache keyed by vector owner.
 	cache: FilterCache,
+	/// Table SELECT permission, resolved lazily on first candidate. All
+	/// candidates from this filter share the indexed table, so this caches
+	/// once for the lifetime of the filter and is reused across candidates.
+	permission: Option<CachedTableSelect>,
 }
 
 impl<'a> DiskAnnTruthyDocumentFilter<'a> {
@@ -63,6 +69,7 @@ impl<'a> DiskAnnTruthyDocumentFilter<'a> {
 			pending_generation,
 			cond,
 			cache: Default::default(),
+			permission: None,
 		}
 	}
 
@@ -73,43 +80,45 @@ impl<'a> DiskAnnTruthyDocumentFilter<'a> {
 		stk: &mut Stk,
 		id: VectorId,
 	) -> Result<bool> {
-		match self.cache.entry(id) {
-			Entry::Occupied(e) => Ok(e.get().is_some()),
-			Entry::Vacant(e) => {
-				let rid = match e.key() {
-					VectorId::DocId(doc_id) => {
-						let Some(rid) = DiskAnnDocs::get_thing_cached(
-							&self.ikb,
-							self.table_id,
-							&self.diskann_cache,
-							&ctx.tx,
-							*doc_id,
-							self.pending_generation,
-						)
-						.await?
-						else {
-							e.insert(None);
-							return Ok(false);
-						};
-						rid
-					}
-					VectorId::RecordKey(key) => {
-						Arc::new(RecordId::new(self.ikb.table().clone(), key.as_ref().clone()))
-					}
-				};
-				let record = Self::is_record_truthy(
-					ctx,
-					self.opt,
-					stk,
-					Arc::clone(&self.cond),
-					Arc::clone(&rid),
-				)
-				.await?;
-				let truthy = record.is_some();
-				e.insert(record.map(|record| (rid, record)));
-				Ok(truthy)
-			}
+		if let Some(cached) = self.cache.get(&id) {
+			return Ok(cached.is_some());
 		}
+		let rid = match &id {
+			VectorId::DocId(doc_id) => {
+				let Some(rid) = DiskAnnDocs::get_thing_cached(
+					&self.ikb,
+					self.table_id,
+					&self.diskann_cache,
+					&ctx.tx,
+					*doc_id,
+					self.pending_generation,
+				)
+				.await?
+				else {
+					self.cache.insert(id, None);
+					return Ok(false);
+				};
+				rid
+			}
+			VectorId::RecordKey(key) => {
+				Arc::new(RecordId::new(self.ikb.table().clone(), key.as_ref().clone()))
+			}
+		};
+		let permission =
+			ensure_cached_table_select(ctx.ctx, self.opt, &ctx.tx, &self.ikb, &mut self.permission)
+				.await?;
+		let record = Self::is_record_truthy(
+			ctx,
+			self.opt,
+			stk,
+			Arc::clone(&self.cond),
+			Arc::clone(&rid),
+			permission,
+		)
+		.await?;
+		let truthy = record.is_some();
+		self.cache.insert(id, record.map(|record| (rid, record)));
+		Ok(truthy)
 	}
 
 	/// Evaluates the SQL condition against a fetched record and returns the record on success.
@@ -119,6 +128,7 @@ impl<'a> DiskAnnTruthyDocumentFilter<'a> {
 		stk: &mut Stk,
 		cond: Arc<Cond>,
 		rid: Arc<RecordId>,
+		permission: &CachedTableSelect,
 	) -> Result<Option<Arc<Record>>> {
 		let val = ctx.tx.get_record(ctx.ikb.ns(), ctx.ikb.db(), &rid.table, &rid.key, None).await?;
 		if val.data.is_nullish() {
@@ -130,6 +140,15 @@ impl<'a> DiskAnnTruthyDocumentFilter<'a> {
 			doc: val.into(),
 			fields_computed: false,
 		};
+		// SECURITY: apply the table's SELECT permission BEFORE evaluating the
+		// caller-controlled WHERE condition. The cond pre-filter runs inside
+		// the ANN search and influences which candidates are admitted to the
+		// topK; without this guard a caller can probe restricted fields by
+		// crafting a WHERE on them and observing the resulting count / order /
+		// timing.
+		if !check_cached_table_select_for_doc(stk, ctx.ctx, opt, permission, &cursor_doc).await? {
+			return Ok(None);
+		}
 		let truthy = stk
 			.run(|stk| cond.0.compute(stk, ctx.ctx, opt, Some(&cursor_doc)))
 			.await

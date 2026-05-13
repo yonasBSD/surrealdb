@@ -1,4 +1,3 @@
-use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
 use ahash::HashMap;
@@ -9,6 +8,9 @@ use crate::catalog::providers::TableProvider;
 use crate::catalog::{Record, TableId};
 use crate::dbs::Options;
 use crate::doc::CursorDoc;
+use crate::exec::permission::{
+	CachedTableSelect, check_cached_table_select_for_doc, ensure_cached_table_select,
+};
 use crate::expr::{Cond, FlowResultExt as _};
 use crate::idx::IndexKeyBase;
 use crate::idx::trees::hnsw::VectorId;
@@ -43,6 +45,10 @@ pub(super) struct HnswTruthyDocumentFilter<'a> {
 	pending_generation: Option<u64>,
 	/// Cache of previously evaluated filter results.
 	cache: FilterCache,
+	/// Table SELECT permission, resolved lazily on first candidate. All
+	/// candidates from this filter share the indexed table, so this caches
+	/// once for the lifetime of the filter and is reused across candidates.
+	permission: Option<CachedTableSelect>,
 }
 
 impl<'a> HnswTruthyDocumentFilter<'a> {
@@ -62,6 +68,7 @@ impl<'a> HnswTruthyDocumentFilter<'a> {
 			cond,
 			pending_generation,
 			cache: Default::default(),
+			permission: None,
 		}
 	}
 
@@ -89,49 +96,47 @@ impl<'a> HnswTruthyDocumentFilter<'a> {
 		stk: &mut Stk,
 		id: VectorId,
 	) -> Result<bool> {
-		match self.cache.entry(id) {
-			Entry::Occupied(e) => Ok(e.get().is_some()),
-			Entry::Vacant(e) => {
-				// Collect the RecordId
-				let rid = match e.key() {
-					VectorId::DocId(doc_id) => {
-						let Some(rid) = HnswDocs::get_thing_cached(
-							&self.ikb,
-							self.table_id,
-							&self.vector_cache,
-							&ctx.tx,
-							*doc_id,
-							self.pending_generation,
-						)
-						.await?
-						else {
-							e.insert(None);
-							// No record ID ? It is not truthy
-							return Ok(false);
-						};
-						rid
-					}
-					VectorId::RecordKey(key) => {
-						Arc::new(RecordId::new(self.ikb.table().clone(), key.as_ref().clone()))
-					}
-				};
-				// Is the record truthy?
-				let record = Self::is_record_truthy(
-					ctx,
-					self.opt,
-					stk,
-					Arc::clone(&self.cond),
-					Arc::clone(&rid),
-				)
-				.await?;
-				let truthy = record.is_some();
-				// Store the result in the cache
-				let entry = record.map(|r| (rid, r));
-				e.insert(entry);
-				// Return the result
-				Ok(truthy)
-			}
+		if let Some(cached) = self.cache.get(&id) {
+			return Ok(cached.is_some());
 		}
+		// Resolve the RecordId
+		let rid = match &id {
+			VectorId::DocId(doc_id) => {
+				let Some(rid) = HnswDocs::get_thing_cached(
+					&self.ikb,
+					self.table_id,
+					&self.vector_cache,
+					&ctx.tx,
+					*doc_id,
+					self.pending_generation,
+				)
+				.await?
+				else {
+					self.cache.insert(id, None);
+					// No record ID ? It is not truthy
+					return Ok(false);
+				};
+				rid
+			}
+			VectorId::RecordKey(key) => {
+				Arc::new(RecordId::new(self.ikb.table().clone(), key.as_ref().clone()))
+			}
+		};
+		let permission =
+			ensure_cached_table_select(ctx.ctx, self.opt, &ctx.tx, &self.ikb, &mut self.permission)
+				.await?;
+		let record = Self::is_record_truthy(
+			ctx,
+			self.opt,
+			stk,
+			Arc::clone(&self.cond),
+			Arc::clone(&rid),
+			permission,
+		)
+		.await?;
+		let truthy = record.is_some();
+		self.cache.insert(id, record.map(|r| (rid, r)));
+		Ok(truthy)
 	}
 
 	/// Fetches a record and evaluates the filter condition against it.
@@ -142,8 +147,9 @@ impl<'a> HnswTruthyDocumentFilter<'a> {
 		stk: &mut Stk,
 		cond: Arc<Cond>,
 		rid: Arc<RecordId>,
+		permission: &CachedTableSelect,
 	) -> Result<Option<Arc<Record>>> {
-		let val = ctx.tx.get_record(ctx.ikb.0.ns, ctx.ikb.0.db, &rid.table, &rid.key, None).await?;
+		let val = ctx.tx.get_record(ctx.ikb.ns(), ctx.ikb.db(), &rid.table, &rid.key, None).await?;
 		if val.data.is_nullish() {
 			return Ok(None);
 		}
@@ -153,6 +159,14 @@ impl<'a> HnswTruthyDocumentFilter<'a> {
 			doc: val.into(),
 			fields_computed: false,
 		};
+		// SECURITY: apply the table's SELECT permission BEFORE evaluating the
+		// caller-controlled WHERE condition. Without this guard the cond is
+		// evaluated against records the caller cannot see, so result counts /
+		// ordering / pre-decode hits can leak field values from restricted
+		// rows.
+		if !check_cached_table_select_for_doc(stk, ctx.ctx, opt, permission, &cursor_doc).await? {
+			return Ok(None);
+		}
 		let truthy = stk
 			.run(|stk| cond.0.compute(stk, ctx.ctx, opt, Some(&cursor_doc)))
 			.await

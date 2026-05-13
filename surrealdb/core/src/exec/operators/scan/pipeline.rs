@@ -12,7 +12,7 @@
 //! - [`eval_limit_expr`] — LIMIT/START expression evaluation
 //! - [`determine_scan_direction`] — ORDER BY → scan direction
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Bound;
 use std::sync::Arc;
 
@@ -476,6 +476,20 @@ pub(crate) struct FieldState {
 	/// Stored alongside the cached state so that projected queries can
 	/// cheaply determine the subset of computed fields they need.
 	dep_map: Arc<HashMap<String, crate::expr::computed_deps::ComputedDeps>>,
+	/// Fields referenced by any conditional `PERMISSIONS FOR select WHERE …`
+	/// expression on this table. These root field names must be added to the
+	/// projection-driven "needed" set before deciding which computed fields
+	/// to evaluate — otherwise a `SELECT a` could skip computing field `b`
+	/// while still applying a field permission whose expression references
+	/// `b`, producing a permission decision against an incomplete row.
+	/// `is_complete = false` (opaque expression) collapses into
+	/// `permission_deps_complete = false`, which forces evaluation of all
+	/// computed fields.
+	permission_field_deps: Arc<HashSet<String>>,
+	/// Whether `permission_field_deps` is exhaustive. False when any field
+	/// permission expression contains opaque constructs (subqueries, params,
+	/// etc.) that could reference fields outside of `permission_field_deps`.
+	permission_deps_complete: bool,
 }
 
 impl FieldState {
@@ -485,6 +499,8 @@ impl FieldState {
 			computed_fields: Vec::new(),
 			field_permissions: Arc::new(Vec::new()),
 			dep_map: Arc::new(HashMap::new()),
+			permission_field_deps: Arc::new(HashSet::new()),
+			permission_deps_complete: true,
 		}
 	}
 }
@@ -596,11 +612,37 @@ pub(crate) async fn build_field_state_raw(
 	// `filter_fields_by_permission` can expand wildcards via `Value::each`.
 	// `Permission::Full` entries are skipped — they're "always allow" and
 	// don't need a runtime check.
+	//
+	// While walking conditional permissions, accumulate the set of fields
+	// the expression references. `filter_field_state_for_projection` adds
+	// these to the projection-driven "needed" set so that any computed
+	// field referenced by a permission expression is evaluated even when
+	// the user's SELECT didn't list it — otherwise a permission decision
+	// would be made against an incomplete row.
 	let mut field_permissions: Vec<(crate::expr::Idiom, PhysicalPermission)> = Vec::new();
+	let mut permission_field_deps: HashSet<String> = HashSet::new();
+	let mut permission_deps_complete = true;
 	if check_perms {
 		for fd in field_defs.iter() {
 			if matches!(fd.select_permission, crate::catalog::Permission::Full) {
 				continue;
+			}
+			if let crate::catalog::Permission::Specific(ref expr) = fd.select_permission {
+				let deps = crate::expr::computed_deps::extract_computed_deps(expr);
+				if !deps.is_complete {
+					// Read the flag *before* flipping it below so we only emit
+					// on the first opaque field — one log line per table
+					// build. `FieldState` is cached per `(table, check_perms)`,
+					// so this fires once per distinct table per cache lifetime.
+					if permission_deps_complete {
+						crate::expr::computed_deps::warn_incomplete_perm_deps(
+							table_name.as_str(),
+							fd.name.to_raw_string().as_str(),
+						);
+					}
+					permission_deps_complete = false;
+				}
+				permission_field_deps.extend(deps.fields);
 			}
 			let physical_perm = convert_permission_to_physical(&fd.select_permission, planner)
 				.await
@@ -613,6 +655,8 @@ pub(crate) async fn build_field_state_raw(
 		computed_fields,
 		field_permissions: Arc::new(field_permissions),
 		dep_map: Arc::new(dep_map),
+		permission_field_deps: Arc::new(permission_field_deps),
+		permission_deps_complete,
 	})
 }
 
@@ -671,6 +715,15 @@ pub(crate) async fn build_field_state(
 /// the given projection. When `needed_fields` is None (SELECT *), returns
 /// a clone of the full state. This is a cheap CPU-only operation with no
 /// KV lookups.
+///
+/// SECURITY: even when the projection is selective, computed fields
+/// referenced by any conditional `PERMISSIONS FOR select WHERE …`
+/// expression on this table are always evaluated. Otherwise a
+/// `SELECT a` could skip computing `b` while still applying a permission
+/// on field `c` whose expression references `b`, producing a permission
+/// decision against an incomplete row. If a permission expression had
+/// opaque dependencies (subqueries, params), all computed fields are
+/// evaluated.
 pub(crate) fn filter_field_state_for_projection(
 	full_state: &FieldState,
 	needed_fields: Option<&std::collections::HashSet<String>>,
@@ -679,9 +732,22 @@ pub(crate) fn filter_field_state_for_projection(
 		return full_state.clone();
 	};
 
-	// Determine which computed fields are required by the projection
-	let required =
-		crate::expr::computed_deps::resolve_required_computed_fields(needed, &full_state.dep_map);
+	if !full_state.permission_deps_complete {
+		// A permission expression contains opaque constructs, so we cannot
+		// statically determine which computed fields it might reference.
+		// Evaluate them all.
+		return full_state.clone();
+	}
+
+	// Union the projection's needed fields with the set of fields referenced
+	// by any conditional field-permission expression.
+	let mut needed_with_perms: std::collections::HashSet<String> = needed.clone();
+	needed_with_perms.extend(full_state.permission_field_deps.iter().cloned());
+
+	let required = crate::expr::computed_deps::resolve_required_computed_fields(
+		&needed_with_perms,
+		&full_state.dep_map,
+	);
 
 	let computed_fields = if let Some(ref required_set) = required {
 		full_state
@@ -698,6 +764,8 @@ pub(crate) fn filter_field_state_for_projection(
 		computed_fields,
 		field_permissions: Arc::clone(&full_state.field_permissions),
 		dep_map: Arc::clone(&full_state.dep_map),
+		permission_field_deps: Arc::clone(&full_state.permission_field_deps),
+		permission_deps_complete: full_state.permission_deps_complete,
 	}
 }
 
