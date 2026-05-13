@@ -25,6 +25,18 @@ use crate::{audit, completions, prompts, resources};
 
 const LOG: &str = "surrealdb::mcp";
 
+/// Transport label that opts an [`McpService`] out of the strict
+/// per-request subject check in [`McpService::verify_request_subject`].
+///
+/// Stdio is a single trusted process pipe — there is no per-request
+/// credential channel and no session-hijack vector. Any other label
+/// (set via [`McpService::with_transport_label`] /
+/// [`McpServiceConfig::with_transport_label`]) is treated as a
+/// networked transport and runs the strict check. Defaulting to
+/// `"stdio"` matches the legacy in-process embedders; the HTTP factory
+/// in [`http`] explicitly overrides this with `"http"`.
+const STDIO_TRANSPORT_LABEL: &str = "stdio";
+
 /// The MCP server handler for SurrealDB.
 #[derive(Clone)]
 pub struct McpService {
@@ -130,7 +142,7 @@ impl McpServiceConfig {
 			metrics_recorder: None,
 			// Default transport label for in-process / stdio embedders.
 			// HTTP embedders override via [`Self::with_transport_label`].
-			transport_label: "stdio",
+			transport_label: STDIO_TRANSPORT_LABEL,
 		}
 	}
 
@@ -142,9 +154,20 @@ impl McpServiceConfig {
 		self
 	}
 
-	/// Override the static transport label recorded as the `transport`
-	/// metric attribute. Defaults to `"stdio"`. HTTP embedders should
-	/// pass `"http"`; custom transports may pass any other static label.
+	/// Override the static transport label.
+	///
+	/// The label has two roles:
+	///
+	/// 1. It is recorded as the `transport` attribute on every emitted metric so operators can
+	///    split stdio vs HTTP MCP traffic.
+	/// 2. It is the discriminator consulted by [`McpService::verify_request_subject`] to decide
+	///    whether to run the strict per-request subject check. Only the literal value `"stdio"`
+	///    opts out of that check; any other label (HTTP, or a future custom networked transport)
+	///    runs it.
+	///
+	/// Defaults to `"stdio"`. HTTP embedders MUST pass `"http"` (or any
+	/// other non-`"stdio"` label) so the strict check fires; the
+	/// in-tree HTTP factory does this automatically.
 	pub fn with_transport_label(mut self, label: &'static str) -> Self {
 		self.transport_label = label;
 		self
@@ -254,10 +277,10 @@ impl McpService {
 			config,
 			tool_router,
 			metrics_recorder: None,
-			transport_label: "stdio",
+			transport_label: STDIO_TRANSPORT_LABEL,
 			session_gauge: Arc::new(SessionGaugeGuard {
 				recorder: None,
-				transport: "stdio",
+				transport: STDIO_TRANSPORT_LABEL,
 				incremented: AtomicBool::new(false),
 			}),
 		}
@@ -276,9 +299,19 @@ impl McpService {
 		self
 	}
 
-	/// Override the static transport label recorded as the `transport`
-	/// metric attribute. Defaults to `"stdio"`. HTTP embedders should
-	/// pass `"http"`.
+	/// Override the static transport label.
+	///
+	/// The label has two roles:
+	///
+	/// 1. It is recorded as the `transport` attribute on every emitted metric so operators can
+	///    split stdio vs HTTP MCP traffic.
+	/// 2. It is the discriminator consulted by [`Self::verify_request_subject`] to decide whether
+	///    to run the strict per-request subject check. Only the literal value `"stdio"` opts out of
+	///    that check; any other label (HTTP, or a future custom networked transport) runs it.
+	///
+	/// Defaults to `"stdio"`. HTTP embedders MUST pass `"http"` (or any
+	/// other non-`"stdio"` label) so the strict check fires; the
+	/// in-tree HTTP factory does this automatically.
 	///
 	/// Must be called before [`Self::init_session`]: rebuilds the
 	/// internal session-gauge drop-guard so the transport label seen at
@@ -349,15 +382,43 @@ impl McpService {
 		Ok(())
 	}
 
-	/// Reject an inbound request that presents authenticated credentials
-	/// disagreeing with the subject bound at `initialize` time.
+	/// Whether this service runs over the stdio transport.
 	///
-	/// Three outcomes (see [`crate::auth::check_subject`]):
+	/// Stdio is a single trusted process pipe — there is no per-request
+	/// credential channel to verify against and no session-hijack vector
+	/// of the kind described in the MCP security best-practices document.
+	/// Networked transports (HTTP, custom embedders) MUST run the strict
+	/// subject check in [`Self::verify_request_subject`].
+	fn is_stdio_transport(&self) -> bool {
+		self.transport_label == STDIO_TRANSPORT_LABEL
+	}
+
+	/// Reject an inbound request that presents missing, anonymous, or
+	/// disagreeing credentials when the MCP session was bound to an
+	/// authenticated subject at `initialize` time.
 	///
-	/// - No credentials on the request (stdio, or HTTP without auth): allowed; the bound session
-	///   continues to serve the call.
-	/// - Same authenticated subject as binding: allowed.
-	/// - Different authenticated subject than binding: rejected with `invalid_params`.
+	/// The strict subject-match rule closes the session-hijack vector
+	/// described in the MCP security best-practices document: possession
+	/// of an `mcp-session-id` alone must not let an attacker drop
+	/// credentials (or present anonymous ones) and have the underlying
+	/// authenticated session keep serving the call.
+	///
+	/// The check is networked-transport only. Stdio transports do not
+	/// have a per-request credential channel and have no session-hijack
+	/// vector — there is a single trusted process driving the pipe and
+	/// the bound subject captured at handshake is authoritative. The
+	/// discriminator is [`Self::is_stdio_transport`], driven by the
+	/// `transport_label` set by the embedder at construction time
+	/// (HTTP factories call [`Self::with_transport_label`] with
+	/// `"http"`; the stdio default is `"stdio"`).
+	///
+	/// Outcomes (see [`crate::auth::check_subject`]):
+	///
+	/// - Stdio transport: allowed without re-checking incoming credentials.
+	/// - HTTP, no or anonymous credentials on a non-anonymous bound session: rejected with
+	///   `invalid_params`.
+	/// - HTTP, same authenticated subject as binding: allowed.
+	/// - HTTP, different authenticated subject than binding: rejected with `invalid_params`.
 	fn verify_request_subject(&self, ctx: &RequestContext<RoleServer>) -> Result<(), McpError> {
 		let Some(bound) = self.bound_subject.get() else {
 			// If `init_session` was never called, `bound_subject` is
@@ -368,6 +429,14 @@ impl McpService {
 				None,
 			));
 		};
+		// Stdio is single-tenant: no per-request credential channel and
+		// no session-hijack vector. The bound subject captured at
+		// handshake is authoritative. Networked transports MUST run the
+		// strict check; see [`Self::is_stdio_transport`] for the
+		// discriminator contract.
+		if self.is_stdio_transport() {
+			return Ok(());
+		}
 		let incoming = auth::incoming_subject(ctx);
 		auth::check_subject(bound, incoming)
 	}
@@ -877,5 +946,62 @@ mod http_service {
 			Arc::new(LocalSessionManager::default()),
 			config,
 		)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	async fn fresh_datastore() -> Arc<Datastore> {
+		Arc::new(Datastore::new("memory").await.expect("memory datastore"))
+	}
+
+	/// Locks in the construction-time invariant that
+	/// [`McpService::verify_request_subject`]'s stdio bypass depends on:
+	/// new services default to the stdio transport label and report
+	/// themselves as stdio.
+	#[tokio::test]
+	async fn new_service_defaults_to_stdio_transport() {
+		let ds = fresh_datastore().await;
+		let svc = McpService::new(ds, None, None, Session::default());
+		assert!(svc.is_stdio_transport(), "default transport must be stdio");
+		assert_eq!(svc.transport_label, STDIO_TRANSPORT_LABEL);
+	}
+
+	/// Locks in the contract that any non-`"stdio"` label opts out of
+	/// the stdio bypass and into the strict subject check. This is the
+	/// invariant the HTTP factory relies on.
+	#[tokio::test]
+	async fn with_transport_label_http_opts_into_strict_check() {
+		let ds = fresh_datastore().await;
+		let svc = McpService::new(ds, None, None, Session::default()).with_transport_label("http");
+		assert!(!svc.is_stdio_transport(), "http transport must NOT bypass the strict check");
+		assert_eq!(svc.transport_label, "http");
+	}
+
+	/// Same contract via the [`McpServiceConfig`] builder, exercised by
+	/// the in-tree HTTP factory.
+	#[tokio::test]
+	async fn config_with_transport_label_http_opts_into_strict_check() {
+		let ds = fresh_datastore().await;
+		let svc = McpServiceConfig::new(ds).with_transport_label("http").build();
+		assert!(!svc.is_stdio_transport());
+		assert_eq!(svc.transport_label, "http");
+	}
+
+	/// Defensive: an unknown / custom label must default to "treat as
+	/// networked transport" so a future embedder that forgets to wire
+	/// the strict check is secure-by-default, not silently bypassed.
+	#[tokio::test]
+	async fn custom_transport_label_is_not_treated_as_stdio() {
+		let ds = fresh_datastore().await;
+		let svc =
+			McpService::new(ds, None, None, Session::default()).with_transport_label("custom-bus");
+		assert!(!svc.is_stdio_transport());
 	}
 }

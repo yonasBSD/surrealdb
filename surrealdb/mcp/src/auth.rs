@@ -33,10 +33,12 @@ pub(crate) fn extract_session_from_parts(parts: &http::request::Parts) -> Option
 /// Captured once at `initialize` time and re-checked on every subsequent
 /// MCP request. Two `BoundSubject`s compare equal iff they describe the
 /// same authentication level *and* the same actor identity. Anonymous
-/// (`Level::No`) subjects are treated specially by the verifier — they are
-/// allowed on follow-up requests so existing clients that send credentials
-/// only on the handshake keep working, but they cannot upgrade an
-/// authenticated session.
+/// (`Level::No`) bound subjects are treated specially by [`check_subject`]:
+/// when the handshake bound an anonymous caller, follow-up requests may
+/// remain anonymous (an anonymous handshake stays anonymous). When the
+/// handshake bound an authenticated caller, follow-up requests on
+/// networked transports must present the same authenticated subject —
+/// missing, anonymous, or different credentials are rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BoundSubject {
 	level: Level,
@@ -81,14 +83,26 @@ pub(crate) fn incoming_subject(ctx: &RequestContext<RoleServer>) -> Option<Bound
 }
 
 /// Compare an incoming request's subject against a previously bound
-/// subject and reject the request if they disagree.
+/// subject and reject the request when they disagree, or when the
+/// caller has dropped credentials on a session that was bound to an
+/// authenticated subject.
 ///
-/// Three outcomes:
+/// This is the strict per-request check used on networked transports.
+/// It is called from [`crate::service::McpService::verify_request_subject`]
+/// only for non-stdio transports; stdio short-circuits before reaching
+/// here because it has no per-request credential channel and no
+/// session-hijack vector. See `verify_request_subject` for the
+/// transport discriminator.
 ///
-/// - No incoming credentials (stdio, or HTTP request without auth headers): accept and let the
-///   bound session continue serving the call.
-/// - Incoming credentials match the bound subject: accept.
-/// - Incoming credentials disagree (different user / different level): reject with
+/// Outcomes:
+///
+/// - Bound subject is anonymous: any incoming subject is accepted (anonymous handshake stays
+///   anonymous).
+/// - Bound subject is authenticated, incoming is missing or anonymous: reject with
+///   [`McpError::invalid_params`]. Possession of the session id alone must not let a caller drop
+///   credentials and keep running under the bound subject.
+/// - Bound subject is authenticated, incoming is authenticated and matches: accept.
+/// - Bound subject is authenticated, incoming is authenticated but different: reject with
 ///   [`McpError::invalid_params`] so the caller sees a protocol-level failure rather than a leaked
 ///   tool result.
 ///
@@ -102,6 +116,12 @@ pub(crate) fn check_subject(
 	incoming: Option<BoundSubject>,
 ) -> Result<(), McpError> {
 	match incoming {
+		None if !bound.is_anonymous() => {
+			Err(McpError::invalid_params("Credentials required for this MCP session", None))
+		}
+		Some(new) if new.is_anonymous() && !bound.is_anonymous() => {
+			Err(McpError::invalid_params("Credentials required for this MCP session", None))
+		}
 		Some(new) if !new.is_anonymous() && new != *bound => {
 			tracing::warn!(
 				target: "surrealdb::mcp",
@@ -149,7 +169,7 @@ mod tests {
 	}
 
 	#[test]
-	fn anonymous_passes_through() {
+	fn missing_or_anonymous_is_rejected_for_authenticated_bound_subject() {
 		let session = Session {
 			au: std::sync::Arc::new(Auth::for_db(Role::Editor, "ns", "db")),
 			ns: Some("ns".into()),
@@ -157,9 +177,15 @@ mod tests {
 			..Session::default()
 		};
 		let bound = BoundSubject::from_session(&session);
-		// Same identity → no rejection.
+		assert!(check_subject(&bound, None).is_err());
+		let anon = BoundSubject::from_session(&Session::default());
+		assert!(check_subject(&bound, Some(anon)).is_err());
+	}
+
+	#[test]
+	fn anonymous_bound_subject_accepts_missing_or_anonymous() {
+		let bound = BoundSubject::from_session(&Session::default());
 		assert!(check_subject(&bound, None).is_ok());
-		// Anonymous incoming → preserved bound subject continues.
 		let anon = BoundSubject::from_session(&Session::default());
 		assert!(check_subject(&bound, Some(anon)).is_ok());
 	}

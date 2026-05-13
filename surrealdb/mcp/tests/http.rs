@@ -177,17 +177,22 @@ async fn auth_plumbing_picks_up_injected_session() {
 	// service uses it instead of the anonymous default session by issuing
 	// a `tools/call` that requires NS/DB context which only the injected
 	// session carries.
+	//
+	// On the HTTP transport, the strict subject check in
+	// `verify_request_subject` requires every follow-up request to present
+	// credentials matching the subject bound at handshake; we therefore
+	// inject the same `Session` on the notification and on the query.
 	let ds = test_datastore().await;
 	let service = setup_service(ds);
 	let session = Session::owner().with_ns("test").with_db("test");
-	let (session_id, _) = initialize(&service, Some(session)).await;
+	let (session_id, _) = initialize(&service, Some(session.clone())).await;
 
-	// Complete the handshake.
+	// Complete the handshake (re-present the bound credentials).
 	let notif = json!({
 		"jsonrpc": "2.0",
 		"method": "notifications/initialized",
 	});
-	let resp = service.handle(post_request(&notif, Some(&session_id), None)).await;
+	let resp = service.handle(post_request(&notif, Some(&session_id), Some(session.clone()))).await;
 	assert_eq!(resp.status(), StatusCode::ACCEPTED);
 
 	// Issue a simple `query` that relies on the session carrying NS/DB.
@@ -197,7 +202,7 @@ async fn auth_plumbing_picks_up_injected_session() {
 		"method": "tools/call",
 		"params": { "name": "query", "arguments": { "query": "RETURN 1" } },
 	});
-	let resp = service.handle(post_request(&req, Some(&session_id), None)).await;
+	let resp = service.handle(post_request(&req, Some(&session_id), Some(session))).await;
 	assert_eq!(resp.status(), StatusCode::OK);
 	let raw = body_to_string(resp).await;
 	let parsed = parse_sse_json(&raw);
@@ -350,12 +355,10 @@ async fn credential_mismatch_on_existing_session_is_rejected() {
 }
 
 #[tokio::test]
-async fn missing_credentials_on_existing_session_runs_as_bound_user() {
-	// Regression guard for the bind-then-verify model: a follow-up
-	// request that omits credentials entirely must continue to run under
-	// the subject bound at initialize. This mirrors how typical MCP
-	// clients behave (auth headers only on the handshake) and must not
-	// be broken by H1 hardening.
+async fn missing_credentials_on_existing_session_is_rejected() {
+	// Follow-up requests on an authenticated MCP session must continue to
+	// present credentials for the bound subject; possession of only the
+	// session id is insufficient.
 	let ds = test_datastore().await;
 	let service = setup_service(ds);
 	let (session_id, _) = initialize(&service, Some(owner_session())).await;
@@ -371,14 +374,14 @@ async fn missing_credentials_on_existing_session_runs_as_bound_user() {
 	assert_eq!(resp.status(), StatusCode::OK);
 	let body = body_to_string(resp).await;
 	let parsed = parse_sse_json(&body);
+	let err = parsed.get("error").unwrap_or_else(|| {
+		panic!("missing-credential request must surface a JSON-RPC error; body: {body}")
+	});
+	let message = err.get("message").and_then(|v| v.as_str()).unwrap_or("");
 	assert!(
-		parsed.get("error").is_none(),
-		"request without credentials on a bound session must succeed; body: {body}"
+		message.contains("Credentials required"),
+		"error message must mention missing credentials, got: {message}"
 	);
-	let result = parsed
-		.get("result")
-		.unwrap_or_else(|| panic!("missing-creds request must return a result; body: {body}"));
-	assert!(result.get("content").is_some(), "result must include content");
 }
 
 #[tokio::test]

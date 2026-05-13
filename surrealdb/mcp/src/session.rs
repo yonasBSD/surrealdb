@@ -99,6 +99,14 @@ impl McpSession {
 		query: &str,
 		vars: Option<Variables>,
 	) -> Result<Vec<QueryResult>, Error> {
+		if !self.ds.allows_query_by_subject(session.au.as_ref()) {
+			let err = surrealdb_types::Error::query(
+				"Capabilities denied this query for the current subject".to_string(),
+				None,
+			);
+			return Ok(vec![QueryResultBuilder::started_now().finish_with_result(Err(err))]);
+		}
+
 		let fut = self.ds.execute(query, session, vars);
 		let outcome = match self.config.query_timeout {
 			Some(dur) => match tokio::time::timeout(dur, fut).await {
