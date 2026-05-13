@@ -1,20 +1,32 @@
-use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use super::AlterKind;
-use crate::fmt::{EscapeKwFreeIdent, QuoteStr};
-use crate::sql::Permission;
+use crate::fmt::{CoverStmts, QuoteStr};
+use crate::sql::{Expr, Literal, Permission};
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 /// AST node for `ALTER BUCKET`.
 pub struct AlterBucketStatement {
-	pub name: Strand,
+	pub name: Expr,
 	pub if_exists: bool,
 	pub backend: AlterKind<String>,
 	pub permissions: Option<Permission>,
 	pub readonly: AlterKind<()>,
 	pub comment: AlterKind<String>,
+}
+
+impl Default for AlterBucketStatement {
+	fn default() -> Self {
+		Self {
+			name: Expr::Literal(Literal::None),
+			if_exists: false,
+			backend: AlterKind::None,
+			permissions: None,
+			readonly: AlterKind::None,
+			comment: AlterKind::None,
+		}
+	}
 }
 
 impl ToSql for AlterBucketStatement {
@@ -23,7 +35,7 @@ impl ToSql for AlterBucketStatement {
 		if self.if_exists {
 			write_sql!(f, fmt, " IF EXISTS");
 		}
-		write_sql!(f, fmt, " {}", EscapeKwFreeIdent(self.name.as_str()));
+		write_sql!(f, fmt, " {}", CoverStmts(&self.name));
 
 		match self.readonly {
 			AlterKind::Set(_) => write_sql!(f, fmt, " READONLY"),
@@ -52,7 +64,7 @@ impl ToSql for AlterBucketStatement {
 impl From<AlterBucketStatement> for crate::expr::statements::alter::AlterBucketStatement {
 	fn from(v: AlterBucketStatement) -> Self {
 		crate::expr::statements::alter::AlterBucketStatement {
-			name: v.name,
+			name: v.name.into(),
 			if_exists: v.if_exists,
 			backend: v.backend.into(),
 			permissions: v.permissions.map(Into::into),
@@ -65,7 +77,7 @@ impl From<AlterBucketStatement> for crate::expr::statements::alter::AlterBucketS
 impl From<crate::expr::statements::alter::AlterBucketStatement> for AlterBucketStatement {
 	fn from(v: crate::expr::statements::alter::AlterBucketStatement) -> Self {
 		AlterBucketStatement {
-			name: v.name,
+			name: v.name.into(),
 			if_exists: v.if_exists,
 			backend: v.backend.into(),
 			permissions: v.permissions.map(Into::into),

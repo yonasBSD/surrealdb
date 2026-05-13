@@ -9,7 +9,6 @@ use crate::sql::lookup::LookupKind;
 use crate::sql::part::{DestructurePart, Recurse, RecurseInstruction};
 use crate::sql::{Dir, Expr, Field, Fields, Idiom, Literal, Lookup, Param, Part};
 use crate::syn::error::bail;
-use crate::syn::lexer::compound::{self, Numeric};
 use crate::syn::token::{Span, TokenKind, t};
 
 impl Parser<'_> {
@@ -560,76 +559,6 @@ impl Parser<'_> {
 			};
 			parts.push(part);
 		}
-		Ok(Idiom(parts))
-	}
-
-	/// Parse a local idiom.
-	///
-	/// Basic idioms differ from local idioms in that they are more restrictive.
-	/// Only field, all and number indexing is allowed. Flatten is also allowed
-	/// but only at the end.
-	pub(super) fn parse_local_idiom(&mut self) -> ParseResult<Idiom> {
-		let start: Strand = self.parse_ident_str()?.into();
-		let mut parts = vec![Part::Field(start)];
-		loop {
-			let token = self.peek();
-			let part = match token.kind {
-				t!(".") => {
-					self.pop_peek();
-					self.parse_basic_dot_part()?
-				}
-				t!("[") => {
-					self.pop_peek();
-					let token = self.peek();
-					let res = match token.kind {
-						t!("*") => {
-							self.pop_peek();
-							Part::All
-						}
-						TokenKind::Digits | t!("+") => {
-							let next = self.next();
-							let number = self.lex_compound(next, compound::numeric)?;
-							let number = match number.value {
-								Numeric::Duration(_) => {
-									bail!("Unexpected token `duration` expected a number", @number.span );
-								}
-								Numeric::Integer(x) => {
-									Expr::Literal(Literal::Integer(x.into_int(number.span)?))
-								}
-								Numeric::Float(x) => Expr::Literal(Literal::Float(x)),
-								Numeric::Decimal(x) => Expr::Literal(Literal::Decimal(x)),
-							};
-							Part::Value(number)
-						}
-						t!("-") => {
-							if let Some(peek_digit) = self.peek_whitespace1()
-								&& let TokenKind::Digits = peek_digit.kind
-							{
-								let span = self.recent_span().covers(peek_digit.span);
-								bail!("Unexpected token `-` expected $, *, or a number", @span => "index in a local idiom can't be negative");
-							}
-							unexpected!(self, token, "$, * or a number");
-						}
-						_ => unexpected!(self, token, "$, * or a number"),
-					};
-					self.expect_closing_delimiter(t!("]"), token.span)?;
-					res
-				}
-				_ => break,
-			};
-
-			parts.push(part);
-		}
-
-		if self.eat(t!("...")) {
-			let token = self.peek();
-			if let t!(".") | t!("[") = token.kind {
-				bail!("Unexpected token `...` expected a local idiom to end.",
-					@token.span => "Flattening can only be done at the end of a local idiom")
-			}
-			parts.push(Part::Flatten);
-		}
-
 		Ok(Idiom(parts))
 	}
 

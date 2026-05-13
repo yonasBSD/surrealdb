@@ -1419,7 +1419,7 @@ ast_type! {
 ast_type! {
 	pub struct AlterTable{
 		pub if_exists: bool,
-		pub name: NodeId<Ident>,
+		pub name: NodeId<Expr>,
 		pub comment: Option<AlterKind<NodeId<Expr>>>,
 		pub changefeed: Option<AlterKind<ChangeFeed>>,
 		pub schema: Option<Schema>,
@@ -1432,8 +1432,8 @@ ast_type! {
 ast_type! {
 	pub struct AlterEvent{
 		pub if_exists: bool,
-		pub name: NodeId<Ident>,
-		pub table: NodeId<Ident>,
+		pub name: NodeId<Expr>,
+		pub table: NodeId<Expr>,
 		pub condition: Option<AlterKind<NodeId<Expr>>>,
 		pub then: Option<AlterKind<NodeListId<Expr>>>,
 		pub comment: Option<AlterKind<NodeId<Expr>>>,
@@ -1473,7 +1473,7 @@ ast_type! {
 ast_type! {
 	pub struct AlterBucket{
 		pub if_exists: bool,
-		pub name: NodeId<Ident>,
+		pub name: NodeId<Expr>,
 		pub backend: Option<AlterKind<NodeId<StringLit>>>,
 		pub readonly: Option<AlterKind<()>>,
 		pub permissions: Option<Permission>,
@@ -1484,7 +1484,7 @@ ast_type! {
 ast_type! {
 	pub struct AlterAnalyzer{
 		pub if_exists: bool,
-		pub name: NodeId<Ident>,
+		pub name: NodeId<Expr>,
 		pub function: Option<AlterKind<NodeId<Path>>>,
 		pub tokenizer: Option<AlterKind<NodeListId<Ident>>>,
 		pub filter: Option<AlterKind<NodeListId<Filter>>>,
@@ -1525,7 +1525,7 @@ ast_type! {
 ast_type! {
 	pub struct AlterUser{
 		pub if_exists: bool,
-		pub name: NodeId<Ident>,
+		pub name: NodeId<Expr>,
 		pub base: Base,
 		pub secret: Option<UserSecret>,
 		pub roles: Option<NodeListId<Ident>>,
@@ -1538,7 +1538,7 @@ ast_type! {
 ast_type! {
 	pub struct AlterAccess{
 		pub if_exists: bool,
-		pub name: NodeId<Ident>,
+		pub name: NodeId<Expr>,
 		pub base: Base,
 		pub authenticate: Option<AlterKind<NodeId<Expr>>>,
 		pub grant_duration: Option<AlterKind<NodeId<Spanned<Duration>>>>,

@@ -182,8 +182,11 @@ impl DefineFieldStatement {
 
 		let tb = txn.get_or_add_tb(Some(ctx), ns_name, db_name, &definition.table, None).await?;
 
-		// Get the name of the field
-		let fd = self.name.to_raw_string();
+		// Get the name of the field. Use the resolved name (with parameterized
+		// indices substituted) so duplicate detection matches what `put_tb_field`
+		// will store; otherwise a second DEFINE FIELD with the same resolved
+		// path silently overwrites the first.
+		let fd = definition.name.to_raw_string();
 		// Check if the definition exists
 		if let Some(fd) = txn.get_tb_field(ns, db, &tb.name, &fd, None).await? {
 			match self.kind {

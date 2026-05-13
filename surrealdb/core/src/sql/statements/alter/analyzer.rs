@@ -1,16 +1,16 @@
-use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use super::AlterKind;
-use crate::fmt::{EscapeKwFreeIdent, Fmt, QuoteStr};
+use crate::fmt::{CoverStmts, Fmt, QuoteStr};
 use crate::sql::filter::Filter;
 use crate::sql::tokenizer::{Tokenizer, write_tokenizers_sql};
+use crate::sql::{Expr, Literal};
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 /// AST node for `ALTER ANALYZER`.
 pub struct AlterAnalyzerStatement {
-	pub name: Strand,
+	pub name: Expr,
 	pub if_exists: bool,
 	pub function: AlterKind<String>,
 	pub tokenizers: AlterKind<Vec<Tokenizer>>,
@@ -18,13 +18,27 @@ pub struct AlterAnalyzerStatement {
 	pub comment: AlterKind<String>,
 }
 
+impl Default for AlterAnalyzerStatement {
+	fn default() -> Self {
+		Self {
+			name: Expr::Literal(Literal::None),
+			if_exists: false,
+			function: AlterKind::None,
+			tokenizers: AlterKind::None,
+			filters: AlterKind::None,
+			comment: AlterKind::None,
+		}
+	}
+}
+
 impl ToSql for AlterAnalyzerStatement {
 	fn fmt_sql(&self, f: &mut String, fmt: SqlFormat) {
+		use crate::fmt::EscapeKwFreeIdent;
 		write_sql!(f, fmt, "ALTER ANALYZER");
 		if self.if_exists {
 			write_sql!(f, fmt, " IF EXISTS");
 		}
-		write_sql!(f, fmt, " {}", EscapeKwFreeIdent(self.name.as_str()));
+		write_sql!(f, fmt, " {}", CoverStmts(&self.name));
 
 		match self.function {
 			AlterKind::Set(ref v) => {
@@ -66,7 +80,7 @@ impl ToSql for AlterAnalyzerStatement {
 impl From<AlterAnalyzerStatement> for crate::expr::statements::alter::AlterAnalyzerStatement {
 	fn from(v: AlterAnalyzerStatement) -> Self {
 		crate::expr::statements::alter::AlterAnalyzerStatement {
-			name: v.name,
+			name: v.name.into(),
 			if_exists: v.if_exists,
 			function: v.function.into(),
 			tokenizers: match v.tokenizers {
@@ -91,7 +105,7 @@ impl From<AlterAnalyzerStatement> for crate::expr::statements::alter::AlterAnaly
 impl From<crate::expr::statements::alter::AlterAnalyzerStatement> for AlterAnalyzerStatement {
 	fn from(v: crate::expr::statements::alter::AlterAnalyzerStatement) -> Self {
 		AlterAnalyzerStatement {
-			name: v.name,
+			name: v.name.into(),
 			if_exists: v.if_exists,
 			function: v.function.into(),
 			tokenizers: match v.tokenizers {

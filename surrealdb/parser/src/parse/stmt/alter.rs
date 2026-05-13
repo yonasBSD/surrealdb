@@ -113,7 +113,7 @@ impl Parse for ast::AlterTable {
 
 		let if_exists = parse_if_exists(parser)?;
 
-		let name = parser.parse_sync()?;
+		let name = parser.parse_enter().await?;
 
 		let mut changefeed = None;
 		let mut comment = None;
@@ -217,10 +217,10 @@ impl Parse for ast::AlterEvent {
 
 		let if_exists = parse_if_exists(parser)?;
 
-		let name = parser.parse_sync()?;
+		let name = parser.parse_enter().await?;
 		let _ = parser.expect(T![ON])?;
 		let _ = parser.eat(T![TABLE])?;
-		let table = parser.parse_sync()?;
+		let table = parser.parse_enter().await?;
 
 		let mut condition = None;
 		let mut then = None;
@@ -384,7 +384,7 @@ impl Parse for ast::AlterBucket {
 
 		let if_exists = parse_if_exists(parser)?;
 
-		let name = parser.parse_sync()?;
+		let name = parser.parse_enter().await?;
 
 		let mut backend = None;
 		let mut readonly = None;
@@ -474,7 +474,7 @@ impl Parse for ast::AlterAnalyzer {
 
 		let if_exists = parse_if_exists(parser)?;
 
-		let name = parser.parse_sync()?;
+		let name = parser.parse_enter().await?;
 
 		let mut function = None;
 		let mut tokenizer = None;
@@ -972,7 +972,7 @@ impl Parse for ast::AlterUser {
 
 		let if_exists = parse_if_exists(parser)?;
 
-		let name = parser.parse_sync()?;
+		let name = parser.parse_enter().await?;
 		let _ = parser.expect(T![ON])?;
 		let base = parser.parse_sync()?;
 
@@ -1106,7 +1106,7 @@ impl Parse for ast::AlterAccess {
 
 		let if_exists = parse_if_exists(parser)?;
 
-		let name = parser.parse_sync()?;
+		let name = parser.parse_enter().await?;
 		let _ = parser.expect(T![ON])?;
 		let base = parser.parse_sync()?;
 

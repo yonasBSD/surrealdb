@@ -15,8 +15,9 @@ use crate::doc::CursorDoc;
 use crate::expr::part::{Next, NextMethod};
 use crate::expr::paths::{ID, IN, OUT};
 use crate::expr::statements::info::InfoStructure;
-use crate::expr::{FlowResult, Part, Value};
+use crate::expr::{Expr, FlowResult, FlowResultExt, Literal, Part, Value};
 use crate::fmt::EscapeKwFreeIdent;
+use crate::val::Number;
 
 pub mod recursion;
 
@@ -130,6 +131,78 @@ impl Idiom {
 	pub(crate) fn read_only(&self) -> bool {
 		self.0.iter().all(|v| v.read_only())
 	}
+
+	/// Validate that this idiom is a valid "local" field path. Returns an
+	/// error describing the offending part otherwise. The `into` argument is
+	/// used in the error message to identify the kind of path being checked
+	/// (e.g. "field name").
+	pub(crate) fn validate_local(&self, into: &str) -> anyhow::Result<()> {
+		for part in self.iter() {
+			match part {
+				Part::Field(_) | Part::All | Part::Flatten | Part::First | Part::Last => {}
+				Part::Value(Expr::Literal(lit)) => match lit {
+					Literal::Integer(_) | Literal::String(_) => {}
+					_ => {
+						return Err(anyhow::anyhow!(
+							"Invalid {into}: Field path index must evaluate to an integer or string"
+						));
+					}
+				},
+				_ => {
+					return Err(anyhow::anyhow!(
+						"Invalid {into}: contains a part that is not allowed in a field path"
+					));
+				}
+			}
+		}
+		Ok(())
+	}
+
+	/// Walk this idiom and substitute any [`Part::Value`] containing a
+	/// non-literal expression by computing it and replacing it with a literal.
+	/// Used to resolve parameterized indices such as `foo[$n]` to a static
+	/// `foo[4]` form before storing the idiom as a schema key.
+	///
+	/// String substitutions are canonicalised to [`Part::Field`] so that
+	/// `addr[$key]` with `$key = "city"` stores as `addr.city` rather than
+	/// `addr['city']`.
+	///
+	/// Returns an error if a substituted index does not evaluate to an
+	/// integer (array index) or string (object key).
+	pub(crate) async fn substitute_indices(
+		self,
+		stk: &mut Stk,
+		ctx: &FrozenContext,
+		opt: &Options,
+		doc: Option<&CursorDoc>,
+	) -> anyhow::Result<Idiom> {
+		let mut out = Vec::with_capacity(self.0.len());
+		for part in self.0 {
+			let part = match part {
+				Part::Value(Expr::Literal(Literal::String(s))) => Part::Field(s),
+				Part::Value(Expr::Literal(lit)) => Part::Value(Expr::Literal(lit)),
+				Part::Value(expr) => {
+					let value =
+						stk.run(|stk| expr.compute(stk, ctx, opt, doc)).await.catch_return()?;
+					match value {
+						Value::Number(Number::Int(i)) => {
+							Part::Value(Expr::Literal(Literal::Integer(i)))
+						}
+						Value::String(s) => Part::Field(s),
+						other => {
+							return Err(anyhow::anyhow!(
+								"Field path index must evaluate to an integer or string, found {}",
+								other.kind_of()
+							));
+						}
+					}
+				}
+				other => other,
+			};
+			out.push(part);
+		}
+		Ok(Idiom(out))
+	}
 	/// Process this type returning a computed simple Value
 	pub(crate) async fn compute(
 		&self,
@@ -208,6 +281,12 @@ impl FromStr for Idiom {
 			.enter(|stk| parser.parse_expr(stk))
 			.finish()
 			.map_err(|err| revision::Error::Conversion(format!("{err:?}")))?;
+		// The Pratt parser exits as soon as it hits a token with no continuation
+		// binding power. Without this check, trailing content after a valid
+		// idiom prefix would be silently dropped (e.g. "foo bogus" would parse
+		// to just "foo"), which is a footgun for any caller that resolves a
+		// string at runtime and re-parses it as an idiom.
+		parser.assert_finished().map_err(|err| revision::Error::Conversion(format!("{err:?}")))?;
 
 		match expr {
 			crate::sql::Expr::Idiom(idiom) => Ok(idiom.into()),
@@ -433,6 +512,74 @@ mod tests {
 		assert_eq!(idioms, expected);
 	}
 
+	// Tests for Idiom::validate_local
+
+	fn field(name: &'static str) -> Part {
+		Part::Field(Strand::new_static(name))
+	}
+	fn lit_int(n: i64) -> Part {
+		Part::Value(Expr::Literal(Literal::Integer(n)))
+	}
+	fn lit_str(s: &'static str) -> Part {
+		Part::Value(Expr::Literal(Literal::String(Strand::new_static(s))))
+	}
+	fn lit_bool(b: bool) -> Part {
+		Part::Value(Expr::Literal(Literal::Bool(b)))
+	}
+
+	fn lit_float(f: f64) -> Part {
+		Part::Value(Expr::Literal(Literal::Float(f)))
+	}
+
+	#[rstest]
+	// Plain field
+	#[case(Idiom::from(vec![field("foo")]), true)]
+	// Nested fields
+	#[case(Idiom::from(vec![field("foo"), field("bar")]), true)]
+	// Integer index
+	#[case(Idiom::from(vec![field("foo"), lit_int(0)]), true)]
+	// String index
+	#[case(Idiom::from(vec![field("foo"), lit_str("city")]), true)]
+	// Wildcard
+	#[case(Idiom::from(vec![field("foo"), Part::All]), true)]
+	// Flatten / First / Last markers
+	#[case(Idiom::from(vec![field("foo"), Part::Flatten]), true)]
+	#[case(Idiom::from(vec![field("foo"), Part::First]), true)]
+	#[case(Idiom::from(vec![field("foo"), Part::Last]), true)]
+	// Optional is not a static schema-key concept
+	#[case(Idiom::from(vec![field("foo"), Part::Optional]), false)]
+	// Float / decimal indices are not meaningful as array indices or object keys
+	#[case(Idiom::from(vec![field("foo"), lit_float(1.5)]), false)]
+	// Bool index is not a valid local idiom
+	#[case(Idiom::from(vec![field("foo"), lit_bool(true)]), false)]
+	// Non-literal Part::Value (un-substituted) is not a valid local idiom
+	#[case(Idiom::from(vec![field("foo"), Part::Value(Expr::Param(crate::expr::Param::from("n".to_owned())))]), false)]
+	// Where clause is not allowed in a field path
+	#[case(Idiom::from(vec![field("foo"), Part::Where(Expr::Literal(Literal::Bool(true)))]), false)]
+	// Method call is not allowed in a field path
+	#[case(Idiom::from(vec![field("foo"), Part::Method(Strand::new_static("bar"), vec![])]), false)]
+	fn test_idiom_validate_local(#[case] idiom: Idiom, #[case] expected: bool) {
+		assert_eq!(idiom.validate_local("field name").is_ok(), expected);
+	}
+
+	#[test]
+	fn test_validate_local_error_message_for_bracket() {
+		let idiom = Idiom::from(vec![field("foo"), lit_bool(true)]);
+		let err = idiom.validate_local("field name").unwrap_err().to_string();
+		assert!(
+			err.contains("Field path index must evaluate to an integer"),
+			"unexpected error: {err}"
+		);
+	}
+
+	#[test]
+	fn test_validate_local_error_message_for_disallowed_part() {
+		let idiom =
+			Idiom::from(vec![field("foo"), Part::Method(Strand::new_static("bar"), vec![])]);
+		let err = idiom.validate_local("field name").unwrap_err().to_string();
+		assert!(err.contains("not allowed in a field path"), "unexpected error: {err}");
+	}
+
 	#[test]
 	fn idiom_with_bytes_matches_serialize() {
 		use revision::{SerializeRevisioned, WalkRevisioned};
@@ -446,5 +593,35 @@ mod tests {
 		let observed = walker.with_bytes(|raw| raw.to_vec()).unwrap();
 		assert_eq!(observed.as_slice(), expected_raw.as_bytes());
 		assert!(r.is_empty());
+	}
+
+	// Round-trip via SerializeRevisioned -> DeserializeRevisioned exercises the
+	// `Idiom::from_str` path used to read stored idioms back from the catalog.
+	// Covers every parser-producible part kind that can be persisted (via
+	// DEFINE FIELD, DEFINE INDEX FIELDS, etc.) so the strict `assert_finished`
+	// check in `from_str` can't silently regress on a part whose
+	// `to_raw_string` round-trip drifts. `Part::First` is omitted because the
+	// parser produces `Part::Value(Literal::Integer(0))` for `[0]` instead.
+	#[rstest]
+	#[case::field(Idiom::from(vec![field("foo")]))]
+	#[case::nested_field(Idiom::from(vec![field("foo"), field("bar")]))]
+	#[case::int_index(Idiom::from(vec![field("data"), lit_int(0)]))]
+	#[case::all(Idiom::from(vec![field("foo"), Part::All]))]
+	#[case::last(Idiom::from(vec![field("foo"), Part::Last]))]
+	#[case::flatten(Idiom::from(vec![field("foo"), Part::Flatten]))]
+	#[case::method(Idiom::from(vec![field("id"), Part::Method(Strand::new_static("id"), vec![]), field("val")]))]
+	#[case::destructure(Idiom::from(vec![
+		field("addr"),
+		Part::Destructure(vec![
+			crate::expr::part::DestructurePart::Field(Strand::new_static("city")),
+			crate::expr::part::DestructurePart::Field(Strand::new_static("zip")),
+		]),
+	]))]
+	fn idiom_revisioned_roundtrip(#[case] idiom: Idiom) {
+		let mut bytes = Vec::new();
+		idiom.serialize_revisioned(&mut bytes).unwrap();
+		let parsed = Idiom::deserialize_revisioned(&mut bytes.as_slice())
+			.unwrap_or_else(|e| panic!("round-trip failed for {idiom:?}: {e}"));
+		assert_eq!(idiom, parsed, "round-trip mismatch for {idiom:?}");
 	}
 }

@@ -28,7 +28,7 @@ impl Parser<'_> {
 			t!("DATABASE") => self.parse_alter_database().await.map(AlterStatement::Database),
 			t!("TABLE") => self.parse_alter_table(stk).await.map(AlterStatement::Table),
 			t!("EVENT") => self.parse_alter_event(stk).await.map(AlterStatement::Event),
-			t!("INDEX") => self.parse_alter_index().await.map(AlterStatement::Index),
+			t!("INDEX") => self.parse_alter_index(stk).await.map(AlterStatement::Index),
 			t!("FIELD") => self.parse_alter_field(stk).await.map(AlterStatement::Field),
 			t!("PARAM") => self.parse_alter_param(stk).await.map(AlterStatement::Param),
 			t!("SEQUENCE") => self.parse_alter_sequence(stk).await.map(AlterStatement::Sequence),
@@ -123,7 +123,7 @@ impl Parser<'_> {
 		} else {
 			false
 		};
-		let name = self.parse_ident()?.into();
+		let name = stk.run(|ctx| self.parse_expr_table(ctx)).await?;
 		let mut res = AlterTableStatement {
 			name,
 			if_exists,
@@ -209,10 +209,10 @@ impl Parser<'_> {
 		} else {
 			false
 		};
-		let name = self.parse_ident()?;
+		let name = stk.run(|ctx| self.parse_expr_field(ctx)).await?;
 		expected!(self, t!("ON"));
 		self.eat(t!("TABLE"));
-		let what: crate::val::TableName = self.parse_ident_str()?.into();
+		let what = stk.run(|ctx| self.parse_expr_table(ctx)).await?;
 		let mut res = AlterEventStatement {
 			name,
 			what,
@@ -301,17 +301,20 @@ impl Parser<'_> {
 		Ok(res)
 	}
 
-	pub(crate) async fn parse_alter_index(&mut self) -> ParseResult<AlterIndexStatement> {
+	pub(crate) async fn parse_alter_index(
+		&mut self,
+		stk: &mut Stk,
+	) -> ParseResult<AlterIndexStatement> {
 		let if_exists = if self.eat(t!("IF")) {
 			expected!(self, t!("EXISTS"));
 			true
 		} else {
 			false
 		};
-		let name = self.parse_ident()?;
+		let name = stk.run(|ctx| self.parse_expr_field(ctx)).await?;
 		expected!(self, t!("ON"));
 		self.eat(t!("TABLE"));
-		let table: crate::val::TableName = self.parse_ident_str()?.into();
+		let table = stk.run(|ctx| self.parse_expr_table(ctx)).await?;
 
 		let mut res = AlterIndexStatement {
 			name,
@@ -364,10 +367,10 @@ impl Parser<'_> {
 		} else {
 			false
 		};
-		let name = self.parse_local_idiom()?;
+		let name = stk.run(|ctx| self.parse_expr_field(ctx)).await?;
 		expected!(self, t!("ON"));
 		self.eat(t!("TABLE"));
-		let what: crate::val::TableName = self.parse_ident_str()?.into();
+		let what = stk.run(|ctx| self.parse_expr_table(ctx)).await?;
 		let mut res = AlterFieldStatement {
 			name,
 			what,
@@ -535,7 +538,7 @@ impl Parser<'_> {
 		} else {
 			false
 		};
-		let name = self.parse_ident()?;
+		let name = stk.run(|ctx| self.parse_expr_field(ctx)).await?;
 		let mut res = AlterBucketStatement {
 			name,
 			if_exists,
@@ -590,7 +593,7 @@ impl Parser<'_> {
 
 	pub(crate) async fn parse_alter_analyzer(
 		&mut self,
-		_stk: &mut Stk,
+		stk: &mut Stk,
 	) -> ParseResult<AlterAnalyzerStatement> {
 		let if_exists = if self.eat(t!("IF")) {
 			expected!(self, t!("EXISTS"));
@@ -598,7 +601,7 @@ impl Parser<'_> {
 		} else {
 			false
 		};
-		let name = self.parse_ident()?;
+		let name = stk.run(|ctx| self.parse_expr_field(ctx)).await?;
 		let mut res = AlterAnalyzerStatement {
 			name,
 			if_exists,
@@ -797,7 +800,7 @@ impl Parser<'_> {
 
 	pub(crate) async fn parse_alter_user(
 		&mut self,
-		_stk: &mut Stk,
+		stk: &mut Stk,
 	) -> ParseResult<AlterUserStatement> {
 		let if_exists = if self.eat(t!("IF")) {
 			expected!(self, t!("EXISTS"));
@@ -805,7 +808,7 @@ impl Parser<'_> {
 		} else {
 			false
 		};
-		let name = self.parse_ident()?;
+		let name = stk.run(|ctx| self.parse_expr_field(ctx)).await?;
 		expected!(self, t!("ON"));
 		let base = self.parse_base()?;
 		let mut res = AlterUserStatement {
@@ -898,7 +901,7 @@ impl Parser<'_> {
 		} else {
 			false
 		};
-		let name = self.parse_ident()?;
+		let name = stk.run(|ctx| self.parse_expr_field(ctx)).await?;
 		expected!(self, t!("ON"));
 		let base = self.parse_base()?;
 		let mut res = AlterAccessStatement {
@@ -1227,7 +1230,7 @@ impl Parser<'_> {
 		} else {
 			false
 		};
-		let name = self.parse_ident()?;
+		let name = stk.run(|ctx| self.parse_expr_field(ctx)).await?;
 		let mut res = AlterSequenceStatement {
 			name,
 			if_exists,

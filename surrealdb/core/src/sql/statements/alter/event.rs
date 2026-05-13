@@ -1,23 +1,35 @@
-use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use super::AlterKind;
 use crate::catalog::EventKind;
-use crate::fmt::{CoverStmts, EscapeKwFreeIdent, Fmt, QuoteStr};
-use crate::sql::Expr;
-use crate::val::TableName;
+use crate::fmt::{CoverStmts, Fmt, QuoteStr};
+use crate::sql::{Expr, Literal};
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 /// AST node for `ALTER EVENT`.
 pub struct AlterEventStatement {
-	pub name: Strand,
-	pub what: TableName,
+	pub name: Expr,
+	pub what: Expr,
 	pub if_exists: bool,
 	pub when: AlterKind<Expr>,
 	pub then: AlterKind<Vec<Expr>>,
 	pub comment: AlterKind<String>,
 	pub kind: AlterKind<EventKind>,
+}
+
+impl Default for AlterEventStatement {
+	fn default() -> Self {
+		Self {
+			name: Expr::Literal(Literal::None),
+			what: Expr::Literal(Literal::None),
+			if_exists: false,
+			when: AlterKind::None,
+			then: AlterKind::None,
+			comment: AlterKind::None,
+			kind: AlterKind::None,
+		}
+	}
 }
 
 impl ToSql for AlterEventStatement {
@@ -26,13 +38,7 @@ impl ToSql for AlterEventStatement {
 		if self.if_exists {
 			write_sql!(f, fmt, " IF EXISTS");
 		}
-		write_sql!(
-			f,
-			fmt,
-			" {} ON {}",
-			EscapeKwFreeIdent(self.name.as_str()),
-			EscapeKwFreeIdent(self.what.as_str())
-		);
+		write_sql!(f, fmt, " {} ON {}", CoverStmts(&self.name), CoverStmts(&self.what));
 
 		match self.kind {
 			AlterKind::Set(ref k) => match k {
@@ -73,8 +79,8 @@ impl ToSql for AlterEventStatement {
 impl From<AlterEventStatement> for crate::expr::statements::alter::AlterEventStatement {
 	fn from(v: AlterEventStatement) -> Self {
 		crate::expr::statements::alter::AlterEventStatement {
-			name: v.name,
-			what: v.what,
+			name: v.name.into(),
+			what: v.what.into(),
 			if_exists: v.if_exists,
 			when: v.when.into(),
 			then: match v.then {
@@ -93,8 +99,8 @@ impl From<AlterEventStatement> for crate::expr::statements::alter::AlterEventSta
 impl From<crate::expr::statements::alter::AlterEventStatement> for AlterEventStatement {
 	fn from(v: crate::expr::statements::alter::AlterEventStatement) -> Self {
 		AlterEventStatement {
-			name: v.name,
-			what: v.what,
+			name: v.name.into(),
+			what: v.what.into(),
 			if_exists: v.if_exists,
 			when: v.when.into(),
 			then: match v.then {
