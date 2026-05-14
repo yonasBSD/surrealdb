@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::mem::{self};
 use std::ops::Bound;
 
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use rand::seq::SliceRandom;
 use reblessive::tree::Stk;
 
@@ -714,16 +714,9 @@ pub fn remove((mut array, mut index): (Array, i64)) -> Result<Value> {
 }
 
 pub fn repeat((value, count): (Value, i64)) -> Result<Value> {
-	ensure!(
-		count >= 0,
-		Error::InvalidFunctionArguments {
-			name: "array::repeat".to_owned(),
-			message: "Expected argument 2 to be a positive number".to_owned()
-		}
-	);
-
-	// FIXME: Fix signed to unsigned casting here.
-	let count = count as usize;
+	let count = usize::try_from(count).map_err(|_| {
+		anyhow::Error::new(Error::ArithmeticNegativeOverflow(format!("array::repeat({count})")))
+	})?;
 	limit("array::repeat", mem::size_of::<Value>().saturating_mul(count))?;
 	Ok(Array(std::iter::repeat_n(value, count).collect()).into())
 }
