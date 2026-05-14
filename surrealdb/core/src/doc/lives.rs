@@ -231,6 +231,18 @@ impl Document {
 			{
 				return Ok(());
 			}
+			// SECURITY: `compute_reduced_target` runs before computed
+			// fields are populated, so it can't filter them; apply the
+			// computed-field `FOR select` permissions now so a subscriber
+			// without permission to read a computed field never receives
+			// its value in the LIVE notification.
+			if self
+				.filter_computed_field_permissions(stk, &ctx, &opt, fields.as_ref(), &mut doc)
+				.await
+				.is_err()
+			{
+				return Ok(());
+			}
 		};
 
 		// First of all, let's check to see if the WHERE
@@ -322,6 +334,22 @@ impl Document {
 						)
 						.await
 						.is_err()
+						{
+							return Ok(());
+						}
+						// SECURITY: filter computed-field permissions on the
+						// LHS of the DIFF so the subscriber doesn't receive
+						// patch ops revealing denied computed values.
+						if self
+							.filter_computed_field_permissions(
+								stk,
+								&ctx,
+								&opt,
+								fields.as_ref(),
+								&mut reduced_initial,
+							)
+							.await
+							.is_err()
 						{
 							return Ok(());
 						}
@@ -920,6 +948,268 @@ mod tests {
 				"DIFF UPDATE must not leak a Remove op for the restricted /secret field; ops: {ops:?}"
 			);
 		}
+	}
+
+	/// `compute_reduced_target` reduces the document *before* `computed_fields_inner`
+	/// populates COMPUTED fields, so a computed field marked
+	/// `PERMISSIONS FOR select NONE` would never be touched by the table-side
+	/// reduction. The CREATE notification delivered to a record subscriber must not
+	/// contain the computed field's value.
+	#[tokio::test]
+	async fn test_live_create_does_not_leak_restricted_computed_field() {
+		let (recv, ds) = new_ds_with_broker().await.unwrap();
+		let (ns, db) = ("test", "test");
+		let tx = ds.transaction(Write, Optimistic).await.unwrap();
+		tx.ensure_ns_db(None, ns, db).await.unwrap();
+		tx.commit().await.unwrap();
+
+		let owner_ses = Session::owner().with_ns(ns).with_db(db);
+		ds.execute(
+			"DEFINE TABLE person PERMISSIONS FOR select FULL; \
+			 DEFINE ACCESS user ON DATABASE TYPE RECORD; \
+			 DEFINE FIELD secret ON person TYPE string; \
+			 DEFINE FIELD derived ON person TYPE string \
+			     COMPUTED string::concat('derived_', secret) \
+			     PERMISSIONS FOR select NONE",
+			&owner_ses,
+			None,
+		)
+		.await
+		.unwrap();
+
+		// Register the LIVE subscriber as a record user; `compute_reduced_target`
+		// fires for non-owner sessions.
+		let live_ses = Session::for_record(
+			ns,
+			db,
+			"user",
+			PublicValue::RecordId(PublicRecordId {
+				table: "user".to_string().into(),
+				key: PublicRecordIdKey::String("alice".to_string()),
+			}),
+		)
+		.with_rt(true);
+		ds.execute("LIVE SELECT * FROM person", &live_ses, None).await.unwrap();
+		while recv.try_recv().is_ok() {}
+
+		// CREATE as owner — `derived` is computed at write time, so it exists in
+		// the stored record. The notification builder must strip it before
+		// shipping to the record subscriber.
+		ds.execute("CREATE person:1 SET secret = 'shh'", &owner_ses, None).await.unwrap();
+
+		let notif = tokio::time::timeout(tokio::time::Duration::from_millis(500), recv.recv())
+			.await
+			.expect("notification should arrive within timeout")
+			.expect("channel should not be closed");
+
+		assert_eq!(notif.action, PublicAction::Create);
+		let PublicValue::Object(obj) = notif.result else {
+			panic!("CREATE result should be an object, got: {:?}", notif.result);
+		};
+		assert!(
+			!obj.contains_key("derived"),
+			"CREATE notification must not include the restricted computed field; got: {obj:?}"
+		);
+	}
+
+	/// `lq_compute` runs the helper on `&self.initial` for DELETE events too;
+	/// without it, the DELETE notification would carry the unfiltered computed
+	/// field from the pre-delete state.
+	#[tokio::test]
+	async fn test_live_delete_does_not_leak_restricted_computed_field() {
+		let (recv, ds) = new_ds_with_broker().await.unwrap();
+		let (ns, db) = ("test", "test");
+		let tx = ds.transaction(Write, Optimistic).await.unwrap();
+		tx.ensure_ns_db(None, ns, db).await.unwrap();
+		tx.commit().await.unwrap();
+
+		let owner_ses = Session::owner().with_ns(ns).with_db(db);
+		ds.execute(
+			"DEFINE TABLE person PERMISSIONS FOR select FULL; \
+			 DEFINE ACCESS user ON DATABASE TYPE RECORD; \
+			 DEFINE FIELD secret ON person TYPE string; \
+			 DEFINE FIELD derived ON person TYPE string \
+			     COMPUTED string::concat('derived_', secret) \
+			     PERMISSIONS FOR select NONE",
+			&owner_ses,
+			None,
+		)
+		.await
+		.unwrap();
+		ds.execute("CREATE person:1 SET secret = 'shh'", &owner_ses, None).await.unwrap();
+
+		let live_ses = Session::for_record(
+			ns,
+			db,
+			"user",
+			PublicValue::RecordId(PublicRecordId {
+				table: "user".to_string().into(),
+				key: PublicRecordIdKey::String("alice".to_string()),
+			}),
+		)
+		.with_rt(true);
+		ds.execute("LIVE SELECT * FROM person", &live_ses, None).await.unwrap();
+		while recv.try_recv().is_ok() {}
+
+		ds.execute("DELETE person:1", &owner_ses, None).await.unwrap();
+
+		let notif = tokio::time::timeout(tokio::time::Duration::from_millis(500), recv.recv())
+			.await
+			.expect("notification should arrive within timeout")
+			.expect("channel should not be closed");
+
+		assert_eq!(notif.action, PublicAction::Delete);
+		let PublicValue::Object(obj) = notif.result else {
+			panic!("DELETE result should be an object, got: {:?}", notif.result);
+		};
+		assert!(
+			!obj.contains_key("derived"),
+			"DELETE notification must not include the restricted computed field; got: {obj:?}"
+		);
+	}
+
+	/// LIVE DIFF on an UPDATE evaluates the diff between `reduced_initial` and the
+	/// permission-reduced current document. The LHS must also have computed-field
+	/// permissions applied; otherwise a Remove op exposes the restricted computed
+	/// field name (and value, via the patch contents).
+	#[tokio::test]
+	async fn test_live_diff_does_not_leak_restricted_computed_field() {
+		let (recv, ds) = new_ds_with_broker().await.unwrap();
+		let (ns, db) = ("test", "test");
+		let tx = ds.transaction(Write, Optimistic).await.unwrap();
+		tx.ensure_ns_db(None, ns, db).await.unwrap();
+		tx.commit().await.unwrap();
+
+		let owner_ses = Session::owner().with_ns(ns).with_db(db);
+		ds.execute(
+			"DEFINE TABLE person PERMISSIONS FOR select FULL; \
+			 DEFINE ACCESS user ON DATABASE TYPE RECORD; \
+			 DEFINE FIELD name ON person TYPE string; \
+			 DEFINE FIELD derived ON person TYPE string \
+			     COMPUTED string::concat('derived_', name) \
+			     PERMISSIONS FOR select NONE",
+			&owner_ses,
+			None,
+		)
+		.await
+		.unwrap();
+
+		// Pre-create so the subsequent UPDATE produces an UPDATE notification
+		// (not a CREATE) and exercises the `reduced_initial` filtering path.
+		ds.execute("CREATE person:1 SET name = 'foo'", &owner_ses, None).await.unwrap();
+
+		let live_ses = Session::for_record(
+			ns,
+			db,
+			"user",
+			PublicValue::RecordId(PublicRecordId {
+				table: "user".to_string().into(),
+				key: PublicRecordIdKey::String("alice".to_string()),
+			}),
+		)
+		.with_rt(true);
+		ds.execute("LIVE SELECT DIFF FROM person", &live_ses, None).await.unwrap();
+		while recv.try_recv().is_ok() {}
+
+		ds.execute("UPDATE person:1 SET name = 'bar'", &owner_ses, None).await.unwrap();
+
+		let notif = tokio::time::timeout(tokio::time::Duration::from_millis(500), recv.recv())
+			.await
+			.expect("notification should arrive within timeout")
+			.expect("channel should not be closed");
+
+		let PublicValue::Array(ops) = notif.result else {
+			panic!(
+				"DIFF result should be a Value::Array of patch operations, got: {:?}",
+				notif.result
+			);
+		};
+		for op in ops.iter() {
+			let PublicValue::Object(obj) = op else {
+				continue;
+			};
+			// `Remove /derived` on the LHS would leak the field's existence; a
+			// `Replace /derived` would leak its old value via the patch payload.
+			let path = obj.get("path");
+			let targets_derived = path == Some(&PublicValue::String("/derived".to_string()));
+			assert!(
+				!targets_derived,
+				"DIFF UPDATE must not reference the restricted computed field; ops: {ops:?}"
+			);
+		}
+	}
+
+	/// Conditional (`Specific`) field permissions on computed fields must also be
+	/// enforced on LIVE delivery: a subscriber whose record does not satisfy the
+	/// permission expression must not receive the computed value, while a
+	/// subscriber whose record does satisfy it must.
+	#[tokio::test]
+	async fn test_live_conditional_permission_filters_computed_field() {
+		let (recv, ds) = new_ds_with_broker().await.unwrap();
+		let (ns, db) = ("test", "test");
+		let tx = ds.transaction(Write, Optimistic).await.unwrap();
+		tx.ensure_ns_db(None, ns, db).await.unwrap();
+		tx.commit().await.unwrap();
+
+		let owner_ses = Session::owner().with_ns(ns).with_db(db);
+		ds.execute(
+			"DEFINE TABLE doc PERMISSIONS FOR select FULL; \
+			 DEFINE ACCESS user ON DATABASE TYPE RECORD; \
+			 DEFINE FIELD owner ON doc TYPE record<user>; \
+			 DEFINE FIELD name ON doc TYPE string; \
+			 DEFINE FIELD mine ON doc TYPE string \
+			     COMPUTED string::concat('hi_', name) \
+			     PERMISSIONS FOR select WHERE owner = $auth",
+			&owner_ses,
+			None,
+		)
+		.await
+		.unwrap();
+
+		let live_ses = Session::for_record(
+			ns,
+			db,
+			"user",
+			PublicValue::RecordId(PublicRecordId {
+				table: "user".to_string().into(),
+				key: PublicRecordIdKey::String("alice".to_string()),
+			}),
+		)
+		.with_rt(true);
+		ds.execute("LIVE SELECT * FROM doc", &live_ses, None).await.unwrap();
+		while recv.try_recv().is_ok() {}
+
+		// First record is owned by the subscriber → `mine` is visible.
+		ds.execute("CREATE doc:1 SET owner = user:alice, name = 'one'", &owner_ses, None)
+			.await
+			.unwrap();
+		let notif = tokio::time::timeout(tokio::time::Duration::from_millis(500), recv.recv())
+			.await
+			.expect("notification should arrive within timeout")
+			.expect("channel should not be closed");
+		let PublicValue::Object(obj) = notif.result else {
+			panic!("CREATE result should be an object, got: {:?}", notif.result);
+		};
+		assert!(
+			obj.contains_key("mine"),
+			"CREATE notification for own record must include the conditional computed field; got: {obj:?}"
+		);
+
+		// Second record is owned by someone else → `mine` is hidden.
+		ds.execute("CREATE doc:2 SET owner = user:bob, name = 'two'", &owner_ses, None)
+			.await
+			.unwrap();
+		let notif = tokio::time::timeout(tokio::time::Duration::from_millis(500), recv.recv())
+			.await
+			.expect("notification should arrive within timeout")
+			.expect("channel should not be closed");
+		let PublicValue::Object(obj) = notif.result else {
+			panic!("CREATE result should be an object, got: {:?}", notif.result);
+		};
+		assert!(
+			!obj.contains_key("mine"),
+			"CREATE notification for someone else's record must NOT include the conditional computed field; got: {obj:?}"
+		);
 	}
 
 	/// Sanity check: a LIVE query with a non-expiring session receives notifications normally.

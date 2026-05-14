@@ -480,6 +480,83 @@ impl Document {
 		Ok(true)
 	}
 
+	/// Filter computed fields out of `doc` based on their
+	/// `PERMISSIONS FOR select` clauses.
+	///
+	/// `compute_reduced_target` filters stored fields **before** computed
+	/// fields are evaluated, so a computed field marked
+	/// `PERMISSIONS FOR select NONE` (or a `Specific` expression that
+	/// returns false for the current viewer) is never seen by it. This
+	/// helper runs **after** `computed_fields_inner` has populated the
+	/// computed values and removes any computed field the viewer
+	/// shouldn't see. Used by the LIVE-query path
+	/// ([`Document::lq_compute`]).
+	///
+	/// `Specific` predicates are evaluated against an immutable snapshot
+	/// taken before any cuts so cross-field permissions match
+	/// [`Document::compute_reduced_target`]'s semantics (predicates always
+	/// see the unmutated row).
+	#[cfg_attr(
+		feature = "trace-doc-ops",
+		instrument(
+			level = "trace",
+			name = "Document::filter_computed_field_permissions",
+			skip_all
+		)
+	)]
+	pub(crate) async fn filter_computed_field_permissions(
+		&self,
+		stk: &mut Stk,
+		ctx: &FrozenContext,
+		opt: &Options,
+		fields: &[FieldDefinition],
+		doc: &mut CursorDoc,
+	) -> Result<()> {
+		// If permissions are disabled, nothing to do.
+		if !ctx.check_perms(opt, Action::View)? {
+			return Ok(());
+		}
+		// Snapshot once; cuts accumulate on `doc`, but `each`, `pick` and the
+		// cursor passed to permission predicates all read from the snapshot.
+		let original = doc.clone();
+		for fd in fields.iter() {
+			// Only filter computed fields here; stored fields were
+			// already handled by `compute_reduced_target`.
+			if fd.computed.is_none() {
+				continue;
+			}
+			// Lower auth for fields that declare AUTH LIMIT, matching the
+			// stored-field path in `compute_reduced_target`.
+			let opt = AuthLimit::try_from(&fd.auth_limit)?.limit_opt(opt);
+			match &fd.select_permission {
+				Permission::Full => (),
+				Permission::None => {
+					for k in original.doc.as_ref().each(&fd.name).iter() {
+						doc.doc.to_mut().cut(k);
+					}
+				}
+				Permission::Specific(e) => {
+					for k in original.doc.as_ref().each(&fd.name).iter() {
+						let opt_no_perms = opt.new_with_perms(false);
+						let val = Arc::new(original.doc.as_ref().pick(k));
+						let mut child_ctx = Context::new_child(ctx);
+						child_ctx.add_value("value", val);
+						let child_ctx = child_ctx.freeze();
+						let allowed = stk
+							.run(|stk| e.compute(stk, &child_ctx, &opt_no_perms, Some(&original)))
+							.await
+							.catch_return()?
+							.is_truthy();
+						if !allowed {
+							doc.doc.to_mut().cut(k);
+						}
+					}
+				}
+			}
+		}
+		Ok(())
+	}
+
 	#[cfg_attr(
 		feature = "trace-doc-ops",
 		instrument(level = "trace", name = "Document::compute_reduced_target", skip_all)
