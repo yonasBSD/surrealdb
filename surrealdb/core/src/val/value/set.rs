@@ -13,8 +13,6 @@ use crate::val::{Object, Strand, Value};
 
 impl Value {
 	/// Asynchronous method for setting a field on a `Value`
-	///
-	/// Was marked recursive
 	pub(crate) async fn set(
 		&mut self,
 		stk: &mut Stk,

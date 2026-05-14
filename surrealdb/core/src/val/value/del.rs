@@ -13,9 +13,11 @@ use crate::val::Value;
 impl Value {
 	/// Asynchronous method for deleting a field from a `Value`
 	///
-	/// Was marked recursive
-	///
-	/// TODO: Document exact behavior with respect to this.
+	/// Walks `path` against `self`, descending into matching `Object`/`Array`
+	/// children. At the final `Part` the matched field, element, or filtered
+	/// subset is removed; `Part::All` clears the entire container. Missing keys,
+	/// out-of-range indices, and paths that descend into a non-container value
+	/// are all no-ops.
 	pub(crate) async fn del(
 		&mut self,
 		stk: &mut Stk,

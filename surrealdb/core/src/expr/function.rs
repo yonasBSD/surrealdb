@@ -244,8 +244,6 @@ impl ToSql for FunctionCall {
 
 impl FunctionCall {
 	/// Process this type returning a computed simple Value
-	///
-	/// Was marked recursive
 	#[instrument(level = "trace", name = "FunctionCall::compute", skip_all)]
 	pub(crate) async fn compute(
 		&self,

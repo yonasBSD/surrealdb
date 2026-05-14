@@ -53,7 +53,9 @@ impl Analyzer {
 		Ok(tks)
 	}
 
-	/// Was marked recursive
+	/// Tokenise a single `Value` into `tks`. Strings, numbers, and booleans
+	/// contribute their tokens directly; arrays and objects recurse into their
+	/// elements; other variants are ignored.
 	pub(super) async fn analyze_value(
 		&self,
 		stk: &mut Stk,

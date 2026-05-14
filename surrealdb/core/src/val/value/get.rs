@@ -60,8 +60,6 @@ fn expr_references_parent(expr: &Expr) -> bool {
 
 impl Value {
 	/// Asynchronous method for getting a local or remote field from a `Value`
-	///
-	/// Was marked recursive
 	pub(crate) async fn get(
 		&self,
 		stk: &mut Stk,
