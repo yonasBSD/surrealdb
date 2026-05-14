@@ -3024,3 +3024,52 @@ async fn concurrent_indexing_retries_initial_batch_stops_after_abort() -> Result
 	assert!(remaining > 0, "abort should stop retries before all conflicts are consumed");
 	Ok(())
 }
+
+/// Regression test for surrealdb/surrealdb#7304.
+///
+/// The background `Building` task's `FrozenContext` used to clone the
+/// owning `IndexBuilder` back into itself, forming an
+/// `Arc<RwLock<HashMap<.., Arc<Building>>>>` cycle that pinned the
+/// `Datastore` (and its storage handles, leaking ~7 fds per RocksDB and
+/// ~3 per SurrealKV instance) for the lifetime of the process.
+///
+/// After the fix, dropping the `Datastore` must let the inner
+/// `IndexBuilder::indexes` `Arc` reach zero strong references once any
+/// in-flight build task observes the drop.
+#[tokio::test(flavor = "multi_thread")]
+async fn datastore_drop_releases_index_builder_after_build() -> Result<()> {
+	let (ds, session) = new_index_test_ds().await?;
+	execute_all(
+		&ds,
+		&session,
+		"
+		DEFINE TABLE user SCHEMALESS;
+		DEFINE INDEX test ON user FIELDS email CONCURRENTLY;
+		",
+	)
+	.await?;
+	wait_for_index_ready(&ds, &session, "user", "test").await?;
+
+	let weak_indexes = Arc::downgrade(&ds.index_builder().indexes);
+	drop(ds);
+
+	// The build task captured an `Arc<Building>` for its lifetime; once
+	// `Datastore` drops, the `IndexBuilder::indexes` Arc should be
+	// released as soon as the spawn task finalises its `BuildingFinishGuard`.
+	timeout(Duration::from_secs(5), async {
+		loop {
+			if weak_indexes.upgrade().is_none() {
+				return;
+			}
+			sleep(Duration::from_millis(20)).await;
+		}
+	})
+	.await
+	.map_err(|_| {
+		anyhow::anyhow!(
+			"IndexBuilder::indexes Arc not released after Datastore drop — \
+			 index Building still pins the back-reference (regression of #7304)"
+		)
+	})?;
+	Ok(())
+}

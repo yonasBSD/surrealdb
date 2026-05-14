@@ -2810,6 +2810,11 @@ impl Datastore {
 	pub(crate) fn transaction_factory(&self) -> &TransactionFactory {
 		&self.transaction_factory
 	}
+
+	#[cfg(test)]
+	pub(crate) fn index_builder(&self) -> &IndexBuilder {
+		&self.index_builder
+	}
 	pub fn async_event_trigger(&self) -> &Arc<Notify> {
 		&self.async_event_trigger
 	}

@@ -361,6 +361,14 @@ impl Context {
 	/// Create a new context from a frozen parent context.
 	/// This context is not linked to the parent context,
 	/// and won't be cancelled if the parent is cancelled.
+	///
+	/// `index_builder` is intentionally cleared: the only caller is the
+	/// background index `Building` task, which lives inside the
+	/// `IndexBuilder`'s HashMap. Cloning the back-reference would form an
+	/// `Arc<RwLock<HashMap<.., Arc<Building>>>>` cycle that pins the
+	/// `Datastore` (and its storage handles, ~7 file descriptors per RocksDB
+	/// instance, ~3 per SurrealKV) until process exit — see issue
+	/// surrealdb/surrealdb#7304.
 	pub(crate) fn new_concurrent(from: &FrozenContext) -> Self {
 		Self {
 			values: HashMap::default(),
@@ -374,7 +382,7 @@ impl Context {
 			capabilities: Arc::clone(&from.capabilities),
 			index_stores: from.index_stores.clone(),
 			cache: from.cache.clone(),
-			index_builder: from.index_builder.clone(),
+			index_builder: None,
 			sequences: from.sequences.clone(),
 			#[cfg(storage)]
 			temporary_directory: from.temporary_directory.clone(),
