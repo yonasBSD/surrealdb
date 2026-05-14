@@ -108,10 +108,11 @@ pub fn lowercase((string,): (String,)) -> Result<Value> {
 }
 
 pub fn repeat((val, num): (String, i64)) -> Result<Value> {
-	//TODO: Deal with truncation of neg:
-	let num = num as usize;
-	limit("string::repeat", val.len().saturating_mul(num))?;
-	Ok(val.repeat(num).into())
+	let count = usize::try_from(num).map_err(|_| {
+		anyhow::Error::new(Error::ArithmeticNegativeOverflow(format!("string::repeat({num})")))
+	})?;
+	limit("string::repeat", val.len().saturating_mul(count))?;
+	Ok(val.repeat(count).into())
 }
 
 pub fn matches((val, Cast(regex)): (String, Cast<Regex>)) -> Result<Value> {
@@ -686,12 +687,18 @@ pub mod semver {
 	pub mod set {
 		use anyhow::Result;
 
+		use crate::err::Error;
 		use crate::fnc::string::semver::parse_version;
 		use crate::val::Value;
 
+		fn to_unsigned(name: &str, val: i64) -> Result<u64> {
+			u64::try_from(val).map_err(|_| {
+				anyhow::Error::new(Error::ArithmeticNegativeOverflow(format!("{name}({val})")))
+			})
+		}
+
 		pub fn major((version, value): (String, i64)) -> Result<Value> {
-			// TODO: Deal with negative trunc:
-			let value = value as u64;
+			let value = to_unsigned("string::semver::set::major", value)?;
 			parse_version(&version, "string::semver::set::major", "Invalid semantic version").map(
 				|mut version| {
 					version.major = value;
@@ -701,8 +708,7 @@ pub mod semver {
 		}
 
 		pub fn minor((version, value): (String, i64)) -> Result<Value> {
-			// TODO: Deal with negative trunc:
-			let value = value as u64;
+			let value = to_unsigned("string::semver::set::minor", value)?;
 			parse_version(&version, "string::semver::set::minor", "Invalid semantic version").map(
 				|mut version| {
 					version.minor = value;
@@ -712,9 +718,7 @@ pub mod semver {
 		}
 
 		pub fn patch((version, value): (String, i64)) -> Result<Value> {
-			// TODO: Deal with negative trunc:
-			let value = value as u64;
-
+			let value = to_unsigned("string::semver::set::patch", value)?;
 			parse_version(&version, "string::semver::set::patch", "Invalid semantic version").map(
 				|mut version| {
 					version.patch = value;
