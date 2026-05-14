@@ -20,6 +20,10 @@ pub const ID_CHARS: [char; 36] = [
 /// Specifies the names of parameters which can not be specified in a query
 pub const PROTECTED_PARAM_NAMES: &[&str] = &["access", "auth", "token", "session"];
 
+/// Default capacity for the bounded channel used to deliver live-query
+/// notifications from the datastore to subscribers.
+pub const NOTIFICATIONS_CHANNEL_SIZE: usize = 15_000;
+
 /// A map with a set of configuration values stored as pairs of strings.
 #[derive(Clone, Debug)]
 pub struct ConfigMap {

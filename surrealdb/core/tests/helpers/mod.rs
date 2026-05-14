@@ -7,6 +7,7 @@ use std::thread::Builder;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use regex::Regex;
 use surrealdb_core::channel::{self, Receiver as NotifyReceiver};
+use surrealdb_core::cnf::NOTIFICATIONS_CHANNEL_SIZE;
 use surrealdb_core::dbs::capabilities::Capabilities;
 use surrealdb_core::dbs::{QueryResult, Session};
 use surrealdb_core::iam::{Auth, Level, Role};
@@ -19,7 +20,7 @@ pub async fn new_ds(
 	db: &str,
 	auth: bool,
 ) -> Result<(NotifyReceiver<Notification>, Datastore)> {
-	let (send, recv) = channel::bounded(15_000);
+	let (send, recv) = channel::bounded(NOTIFICATIONS_CHANNEL_SIZE);
 
 	let ds = Datastore::builder()
 		.with_capabilities(Capabilities::all())
@@ -173,7 +174,7 @@ pub async fn iam_check_cases_impl(
 
 		// Auth enabled
 		{
-			let (send, _) = channel::bounded(15_000);
+			let (send, _) = channel::bounded(NOTIFICATIONS_CHANNEL_SIZE);
 			let ds = Datastore::builder()
 				.with_capabilities(Capabilities::all())
 				.with_notify(send)
@@ -198,7 +199,7 @@ pub async fn iam_check_cases_impl(
 
 		// Auth disabled
 		{
-			let (send, _) = channel::bounded(15_000);
+			let (send, _) = channel::bounded(NOTIFICATIONS_CHANNEL_SIZE);
 			let ds = Datastore::builder()
 				.with_capabilities(Capabilities::all())
 				.with_notify(send)
@@ -235,7 +236,7 @@ pub async fn iam_check_cases_impl(
 					"auth disabled"
 				}
 			);
-			let (send, _) = channel::bounded(15_000);
+			let (send, _) = channel::bounded(NOTIFICATIONS_CHANNEL_SIZE);
 			let ds = Datastore::builder()
 				.with_capabilities(Capabilities::all())
 				.with_notify(send)

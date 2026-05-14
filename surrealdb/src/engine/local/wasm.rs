@@ -78,8 +78,8 @@ pub(crate) async fn run_router(
 		.with_auth(configured_root.is_some());
 
 	let (notify, builder) = if address.config.capabilities.allows_live_query_notifications() {
-		// TODO: Move value to a global somewhere
-		let (send, recv) = surrealdb_core::channel::bounded(15_000);
+		let (send, recv) =
+			surrealdb_core::channel::bounded(surrealdb_core::cnf::NOTIFICATIONS_CHANNEL_SIZE);
 		(Some(recv), builder.with_notify(send))
 	} else {
 		(None, builder)

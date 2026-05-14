@@ -795,7 +795,8 @@ pub async fn init<C: TransactionBuilderFactory + BucketStoreProvider>(
 	// Log the specified server capabilities
 	debug!("Server capabilities: {capabilities}");
 
-	let (send, recv) = surrealdb_core::channel::bounded(15_000);
+	let (send, recv) =
+		surrealdb_core::channel::bounded(surrealdb_core::cnf::NOTIFICATIONS_CHANNEL_SIZE);
 
 	let config = ConfigMap::from_env();
 	// Parse and setup the desired kv datastore

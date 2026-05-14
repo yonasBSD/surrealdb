@@ -3841,8 +3841,7 @@ mod test {
 
 	#[tokio::test]
 	async fn cross_transaction_caching_uuids_updated() -> Result<()> {
-		// TODO: Put `15_000` in a global somewhere.
-		let (send, _recv) = crate::channel::bounded(15_000);
+		let (send, _recv) = crate::channel::bounded(crate::cnf::NOTIFICATIONS_CHANNEL_SIZE);
 		let ds = Datastore::builder()
 			.with_capabilities(Capabilities::all())
 			.with_notify(send)
