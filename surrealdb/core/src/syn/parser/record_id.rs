@@ -240,8 +240,9 @@ impl Parser<'_> {
 				if let Some(next) = self.peek_whitespace() {
 					match next.kind {
 						t!(".") => {
-							// TODO(delskayn) explain that record-id's cant have matissas,
-							// exponents or a number suffix
+							// Numeric record-id keys are stored as `i64`, so a fractional part
+							// (`.`), an exponent (`e`/`E`), or a numeric type suffix is not
+							// allowed here.
 							unexpected!(self, next, "an integer", => "Numeric Record-id keys can only be integers");
 						}
 						x if Self::kind_is_identifier(x) => {
