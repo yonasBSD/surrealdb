@@ -62,7 +62,11 @@ use crate::key::index::td::{Td, TdRoot};
 use crate::key::index::tt::Tt;
 use crate::key::index::tv::Tv;
 use crate::key::root::ic::IndexCompactionKey;
-use crate::kvs::index::{AppendingId, BatchId};
+use crate::key::table::bg::Bg;
+use crate::key::table::bp::Bp;
+use crate::key::table::br::Br;
+use crate::key::table::bs::Bs;
+use crate::kvs::index::{AppendingId, BatchId, BuildGeneration, BuildTicket};
 use crate::kvs::{Error as KvsError, KVKey, Key, Transaction};
 use crate::val::{RecordIdKey, TableName};
 
@@ -302,6 +306,67 @@ impl IndexKeyBase {
 
 	pub(crate) fn new_ip_key(&self, id: RecordIdKey) -> Ip<'_> {
 		Ip::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix, id)
+	}
+
+	/// Key storing durable build state for this table index.
+	pub(crate) fn new_bs_key(&self) -> Bs<'_> {
+		Bs::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix)
+	}
+
+	/// Key storing one durable writer reservation for a build generation.
+	pub(crate) fn new_br_key(&self, generation: BuildGeneration, ticket: BuildTicket) -> Br<'_> {
+		Br::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix, generation, ticket)
+	}
+
+	/// Range covering writer reservations for one build generation.
+	pub(crate) fn new_br_range(&self, generation: BuildGeneration) -> Result<Range<Key>> {
+		Br::range(self.0.ns, self.0.db, &self.0.tb, self.0.ix, generation)
+	}
+
+	/// Range covering writer reservations across all generations of this index.
+	pub(crate) fn new_br_all_generations_range(&self) -> Result<Range<Key>> {
+		Br::all_generations_range(self.0.ns, self.0.db, &self.0.tb, self.0.ix)
+	}
+
+	/// Key storing one durable queued mutation for a build generation.
+	pub(crate) fn new_bg_key(&self, generation: BuildGeneration, ticket: BuildTicket) -> Bg<'_> {
+		Bg::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix, generation, ticket)
+	}
+
+	/// Range covering durable queued mutations for one build generation.
+	pub(crate) fn new_bg_range(&self, generation: BuildGeneration) -> Result<Range<Key>> {
+		Bg::range(self.0.ns, self.0.db, &self.0.tb, self.0.ix, generation)
+	}
+
+	/// Range covering durable queued mutations across all generations of this index.
+	pub(crate) fn new_bg_all_generations_range(&self) -> Result<Range<Key>> {
+		Bg::all_generations_range(self.0.ns, self.0.db, &self.0.tb, self.0.ix)
+	}
+
+	/// Key mapping a record to its first queued mutation during the initial scan.
+	pub(crate) fn new_bp_key(&self, generation: BuildGeneration, id: RecordIdKey) -> Bp<'_> {
+		Bp::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix, generation, id)
+	}
+
+	#[cfg(test)]
+	/// Range covering primary-appending markers for one build generation.
+	pub(crate) fn new_bp_range(&self, generation: BuildGeneration) -> Result<Range<Key>> {
+		Bp::range(self.0.ns, self.0.db, &self.0.tb, self.0.ix, generation)
+	}
+
+	/// Range covering a primary-appending record-id span for one build generation.
+	pub(crate) fn new_bp_span_range(
+		&self,
+		generation: BuildGeneration,
+		after: Option<&RecordIdKey>,
+		through: Option<&RecordIdKey>,
+	) -> Result<Range<Key>> {
+		Bp::span_range(self.0.ns, self.0.db, &self.0.tb, self.0.ix, generation, after, through)
+	}
+
+	/// Range covering primary-appending markers across all generations of this index.
+	pub(crate) fn new_bp_all_generations_range(&self) -> Result<Range<Key>> {
+		Bp::all_generations_range(self.0.ns, self.0.db, &self.0.tb, self.0.ix)
 	}
 
 	pub(crate) fn new_ib_key(&self, start: i64) -> Ib<'_> {

@@ -797,7 +797,12 @@ impl Datastore {
 	) -> bool {
 		if is_retryable_transaction_conflict(err) {
 			let operation = operation.into();
-			warn!(target: TARGET, "{operation}: {err}");
+			debug!(
+				target: TARGET,
+				operation = %operation,
+				error = %err,
+				"retryable index operation conflict, retrying"
+			);
 			sleep(Duration::from_millis(100)).await;
 			true
 		} else {
@@ -913,6 +918,52 @@ impl Datastore {
 			http_client: self.http_client,
 			observer: self.observer,
 			config: self.config,
+		}
+	}
+
+	/// Create a test-only datastore facade that shares the same durable KV engine
+	/// while resetting process-local state.
+	///
+	/// This lets unit tests model two SurrealDB compute nodes connected to the
+	/// same storage backend without starting an external service. The cloned
+	/// facade deliberately reuses the transaction factory, but gets its own node
+	/// id, index builder, index stores, datastore cache, sequences, and other
+	/// process-local caches. Tests that exercise cluster liveness should call
+	/// [`Self::insert_node`] for both the original datastore and the fork.
+	#[cfg(test)]
+	pub(crate) fn fork_for_test_with_node_id(&self, id: Uuid) -> Self {
+		let transaction_factory = self.transaction_factory.clone();
+		Self {
+			id,
+			auth_enabled: self.auth_enabled,
+			dynamic_configuration: self.dynamic_configuration.clone(),
+			slow_log: self.slow_log.clone(),
+			transaction_timeout: self.transaction_timeout,
+			capabilities: Arc::clone(&self.capabilities),
+			notification_channel: self.notification_channel.clone(),
+			index_stores: IndexStores::new(
+				self.config.hnsw_cache_size,
+				self.config.diskann_cache_size,
+			),
+			index_builder: IndexBuilder::new(transaction_factory.clone()),
+			#[cfg(feature = "jwks")]
+			jwks_cache: Arc::new(RwLock::new(JwksCache::new())),
+			#[cfg(storage)]
+			temporary_directory: self.temporary_directory.clone(),
+			cache: Arc::new(DatastoreCache::new(self.config.datastore_cache_size)),
+			function_registry: Arc::new(FunctionRegistry::with_builtins()),
+			buckets: self.buckets.clone(),
+			sequences: Sequences::new(transaction_factory.clone(), id),
+			transaction_factory,
+			async_event_trigger: Arc::clone(&self.async_event_trigger),
+			#[cfg(feature = "surrealism")]
+			surrealism_cache: Arc::new(SurrealismCache::new(self.config.surrealism_cache_size)),
+			#[cfg(feature = "surrealism")]
+			lazy_surrealism: self.lazy_surrealism,
+			#[cfg(feature = "http")]
+			http_client: Arc::clone(&self.http_client),
+			observer: Arc::clone(&self.observer),
+			config: Arc::clone(&self.config),
 		}
 	}
 

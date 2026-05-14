@@ -15,6 +15,7 @@ use crate::err::Error;
 use crate::expr::parameterize::expr_to_ident;
 use crate::expr::{Base, Expr, FlowResultExt};
 use crate::iam::{Action, ResourceKind};
+use crate::kvs::index::index_building_info;
 use crate::sys::INFORMATION;
 use crate::val::{Datetime, Object, TableName, Value};
 
@@ -425,16 +426,10 @@ impl InfoStatement {
 				// Get the transaction
 				let txn = ctx.tx();
 
-				if let Some(ib) = ctx.get_index_builder() {
-					// Obtain the index
-					let (ns, db) = ctx.expect_ns_db_ids(opt).await?;
-					let ix = txn.expect_tb_index(ns, db, &table, &index).await?;
-					let status = ib.get_status(ns, db, &ix).await;
-					let mut out = Object::default();
-					out.insert("building", status.into());
-					return Ok(out.into());
-				}
-				Ok(Object::default().into())
+				// Obtain the index
+				let (ns, db) = ctx.expect_ns_db_ids(opt).await?;
+				let ix = txn.expect_tb_index(ns, db, &table, &index).await?;
+				index_building_info(&txn, ns, db, &ix).await
 			}
 		}
 	}

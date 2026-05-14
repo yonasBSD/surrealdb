@@ -102,17 +102,30 @@ pub(crate) mod testing {
 	pub(crate) enum RetryableConflictSite {
 		ConcurrentIndexInitialCleanup,
 		ConcurrentIndexInitialBatch,
+		ConcurrentIndexReservationRelease,
 		IndexCompactionQueueCleanup,
 		FullTextCompaction,
 		CountCompaction,
 		HnswCompaction,
 	}
 
+	#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+	pub(crate) enum NonRetryableErrorSite {
+		ConcurrentIndexAfterReservationRegistration,
+		ConcurrentIndexReservationRelease,
+	}
+
 	static RETRYABLE_CONFLICTS: OnceLock<Mutex<HashMap<(RetryableConflictSite, Uuid), usize>>> =
+		OnceLock::new();
+	static NON_RETRYABLE_ERRORS: OnceLock<Mutex<HashMap<(NonRetryableErrorSite, Uuid), usize>>> =
 		OnceLock::new();
 
 	fn retryable_conflicts() -> &'static Mutex<HashMap<(RetryableConflictSite, Uuid), usize>> {
 		RETRYABLE_CONFLICTS.get_or_init(|| Mutex::new(HashMap::new()))
+	}
+
+	fn non_retryable_errors() -> &'static Mutex<HashMap<(NonRetryableErrorSite, Uuid), usize>> {
+		NON_RETRYABLE_ERRORS.get_or_init(|| Mutex::new(HashMap::new()))
 	}
 
 	pub(crate) fn inject_retryable_conflict(
@@ -154,6 +167,41 @@ pub(crate) mod testing {
 		retryable_conflicts().lock().unwrap().get(&(site, node_id)).copied().unwrap_or(0)
 	}
 
+	pub(crate) fn inject_non_retryable_error(
+		site: NonRetryableErrorSite,
+		node_id: Uuid,
+	) -> NonRetryableErrorGuard {
+		inject_non_retryable_errors(site, node_id, 1)
+	}
+
+	pub(crate) fn inject_non_retryable_errors(
+		site: NonRetryableErrorSite,
+		node_id: Uuid,
+		count: usize,
+	) -> NonRetryableErrorGuard {
+		assert!(count > 0);
+		non_retryable_errors().lock().unwrap().insert((site, node_id), count);
+		NonRetryableErrorGuard {
+			site,
+			node_id,
+		}
+	}
+
+	pub(crate) fn maybe_inject_non_retryable_error(
+		site: NonRetryableErrorSite,
+		node_id: Uuid,
+	) -> Result<()> {
+		let mut errors = non_retryable_errors().lock().unwrap();
+		let Some(remaining) = errors.get_mut(&(site, node_id)) else {
+			return Ok(());
+		};
+		*remaining -= 1;
+		if *remaining == 0 {
+			errors.remove(&(site, node_id));
+		}
+		Err(super::Error::Internal(format!("injected non-retryable error at {site:?}")).into())
+	}
+
 	pub(crate) struct RetryableConflictGuard {
 		site: RetryableConflictSite,
 		node_id: Uuid,
@@ -162,6 +210,17 @@ pub(crate) mod testing {
 	impl Drop for RetryableConflictGuard {
 		fn drop(&mut self) {
 			retryable_conflicts().lock().unwrap().remove(&(self.site, self.node_id));
+		}
+	}
+
+	pub(crate) struct NonRetryableErrorGuard {
+		site: NonRetryableErrorSite,
+		node_id: Uuid,
+	}
+
+	impl Drop for NonRetryableErrorGuard {
+		fn drop(&mut self) {
+			non_retryable_errors().lock().unwrap().remove(&(self.site, self.node_id));
 		}
 	}
 }

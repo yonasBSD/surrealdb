@@ -22,6 +22,7 @@ use crate::idx::planner::executor::{
 use crate::idx::planner::plan::{IndexOperator, IndexOption};
 use crate::idx::planner::rewriter::KnnConditionRewriter;
 use crate::kvs::Transaction;
+use crate::kvs::index::filter_online_indexes;
 use crate::val::{Array, Number, TableName, Value};
 
 pub(super) struct Tree {
@@ -837,6 +838,13 @@ impl SchemaCache {
 		version: Option<u64>,
 	) -> Result<Self> {
 		let indexes = tx.all_tb_indexes(ns, db, table, version).await?;
+		let indexes = if version.is_none() {
+			// Schema analysis for live queries must only consider indexes whose
+			// durable build state has made them queryable.
+			filter_online_indexes(tx, ns, db, indexes).await?
+		} else {
+			indexes
+		};
 		let fields = tx.all_tb_fields(ns, db, table, version).await?;
 		Ok(Self {
 			indexes,

@@ -9,7 +9,6 @@ use anyhow::Result;
 
 #[cfg(not(target_family = "wasm"))]
 use crate::catalog::DiskAnnParams;
-use crate::catalog::providers::{DatabaseProvider, TableProvider};
 use crate::catalog::{
 	DatabaseId, HnswParams, Index, IndexDefinition, NamespaceId, TableDefinition, TableId,
 };
@@ -22,8 +21,6 @@ use crate::idx::trees::hnsw::cache::VectorCache;
 use crate::idx::trees::store::diskann::{DiskAnnIndexes, SharedDiskAnnIndex};
 use crate::idx::trees::store::hnsw::{HnswIndexes, SharedHnswIndex};
 use crate::idx::trees::store::mapper::Mappers;
-use crate::kvs::Transaction;
-use crate::kvs::index::IndexBuilder;
 
 #[derive(Clone)]
 pub struct IndexStores(Arc<Inner>);
@@ -81,60 +78,19 @@ impl IndexStores {
 		self.0.diskann_indexes.get(tb, &ikb, p, self.0.diskann_cache.clone()).await
 	}
 
+	/// Evict process-local index wrappers and caches for a retired index.
+	///
+	/// This deliberately does not abort durable index builders. Schema statements
+	/// register those aborts on the surrounding transaction so rollback/cancel
+	/// keeps still-valid builders alive.
 	pub(crate) async fn index_removed(
 		&self,
-		ib: Option<&IndexBuilder>,
 		ns: NamespaceId,
 		db: DatabaseId,
 		tb: &TableDefinition,
 		ix: &IndexDefinition,
 	) -> Result<()> {
-		if let Some(ib) = ib {
-			ib.remove_index(ns, db, &tb.name, ix.index_id).await?;
-		}
 		self.remove_index(ns, db, tb.table_id, ix).await
-	}
-
-	pub(crate) async fn namespace_removed(
-		&self,
-		ib: Option<&IndexBuilder>,
-		tx: &Transaction,
-		ns: NamespaceId,
-	) -> Result<()> {
-		for db in tx.all_db(ns, None).await?.iter() {
-			self.database_removed(ib, tx, ns, db.database_id).await?;
-		}
-		Ok(())
-	}
-
-	pub(crate) async fn database_removed(
-		&self,
-		ib: Option<&IndexBuilder>,
-		tx: &Transaction,
-		ns: NamespaceId,
-		db: DatabaseId,
-	) -> Result<()> {
-		for tb in tx.all_tb(ns, db, None).await?.iter() {
-			self.table_removed(ib, tx, ns, db, tb).await?;
-		}
-		Ok(())
-	}
-
-	pub(crate) async fn table_removed(
-		&self,
-		ib: Option<&IndexBuilder>,
-		tx: &Transaction,
-		ns: NamespaceId,
-		db: DatabaseId,
-		tb: &TableDefinition,
-	) -> Result<()> {
-		for ix in tx.all_tb_indexes(ns, db, &tb.name, None).await?.iter() {
-			if let Some(ib) = ib {
-				ib.remove_index(ns, db, &tb.name, ix.index_id).await?;
-			}
-			self.remove_index(ns, db, tb.table_id, ix).await?;
-		}
-		Ok(())
 	}
 
 	async fn remove_index(

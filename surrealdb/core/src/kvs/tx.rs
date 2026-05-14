@@ -5,22 +5,24 @@
 #![allow(clippy::clone_on_ref_ptr)]
 
 use std::any::Any;
-use std::collections::HashMap;
 use std::fmt::Debug;
 use std::ops::{Deref, Range};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use anyhow::Result;
+use chrono::Utc;
 use futures::TryStreamExt;
 use futures::future::try_join_all;
 use futures::stream::Stream;
-use tokio::sync::{Mutex, MutexGuard, Notify};
+use tokio::sync::{Mutex, Notify};
+use tokio::time::sleep;
 use uuid::Uuid;
 use web_time::Instant;
 
 use super::batch::Batch;
-use super::{Key, Val, util};
+use super::{Key, LockType, TransactionFactory, TransactionType, Val, util};
 use crate::catalog::providers::{
 	ApiProvider, AuthorisationProvider, BucketProvider, CatalogProvider, DatabaseProvider,
 	NamespaceProvider, NodeProvider, RootProvider, TableProvider, UserProvider,
@@ -35,13 +37,27 @@ use crate::ctx::Context;
 use crate::dbs::node::Node;
 use crate::doc::CursorRecord;
 use crate::err::Error;
+use crate::idx::IndexKeyBase;
 use crate::idx::planner::ScanDirection;
 use crate::key::database::sq::Sq;
+use crate::key::index::all as index_all;
+use crate::key::table::bg::Bg;
+use crate::key::table::br::Br;
+use crate::key::table::bs::Bs;
+use crate::key::table::ix as table_ix;
 use crate::kvs::cache::tx::TransactionCache;
-use crate::kvs::index::{BatchId, BatchIdsCleanQueue, SharedIndexKey};
+use crate::kvs::index::{IndexBuildPhase, IndexBuildReportStatus, IndexBuildState, IndexBuilder};
 use crate::kvs::scanner::Direction;
 use crate::kvs::sequences::Sequences;
-use crate::kvs::{BoxTimeStamp, BoxTimeStampImpl, KVKey, KVValue, Transactor, cache};
+#[cfg(test)]
+use crate::kvs::testing::{
+	NonRetryableErrorSite, RetryableConflictSite, maybe_inject_non_retryable_error,
+	maybe_inject_retryable_conflict,
+};
+use crate::kvs::{
+	BoxTimeStamp, BoxTimeStampImpl, Error as KvsError, KVKey, KVValue, Transactor, cache,
+	is_retryable_transaction_conflict,
+};
 use crate::observe::{
 	ExecutionObserver, Outcome, TenantIdentity, TransactionEvent, TransactionEventSafe,
 	TransactionMetrics,
@@ -100,8 +116,326 @@ pub struct Transaction {
 	async_event_trigger: Arc<Notify>,
 	/// Do we have to trigger async events after the commit?
 	trigger_async_event: AtomicBool,
-	/// Per index, track the pending append batch for cleanup after rollback
-	pending_index_batches: Mutex<HashMap<SharedIndexKey, (BatchId, BatchIdsCleanQueue)>>,
+	/// Durable index-build reservations to release once this transaction is closed.
+	///
+	/// Writers enqueue index appendings for a durable concurrent index build after
+	/// admission has reserved a ticket in a separate short transaction. Releasing
+	/// those reservations after commit/cancel keeps rollback semantics correct and
+	/// avoids making the user transaction delete a key that was created after its
+	/// snapshot, which can conflict on snapshot-isolated local engines such as
+	/// `kv-mem`.
+	pending_index_build_reservations: Mutex<Vec<IndexBuildReservationRelease>>,
+	/// Process-local index builders to abort only after a successful schema commit.
+	///
+	/// Durable index retirement and catalog deletion are staged in the schema
+	/// transaction. The in-process builder is not transactional, so aborting it
+	/// before commit would make a later rollback/cancel stop a still-valid
+	/// build. These actions are intentionally discarded on cancel or commit
+	/// failure.
+	pending_index_builder_aborts: Mutex<Vec<PendingIndexBuilderAbort>>,
+	/// Index builds started before their catalog definition has committed.
+	///
+	/// `DEFINE INDEX` starts the builder while the schema transaction is still
+	/// open. If that transaction is cancelled or fails to commit, the catalog row
+	/// is rolled back but the builder may already have committed durable build
+	/// state and index data from separate transactions. These cleanups remove that
+	/// provisional state only when the schema transaction does not commit.
+	pending_uncommitted_index_builds: Mutex<Vec<PendingUncommittedIndexBuild>>,
+}
+
+const INDEX_BUILD_RESERVATION_RELEASE_RETRY_SLEEP: Duration = Duration::from_millis(100);
+
+struct PendingIndexBuilderAbort {
+	builder: IndexBuilder,
+	ns: NamespaceId,
+	db: DatabaseId,
+	tb: TableName,
+	ix: IndexId,
+}
+
+impl PendingIndexBuilderAbort {
+	async fn abort(self) {
+		if let Err(err) = self.builder.remove_index(self.ns, self.db, &self.tb, self.ix).await {
+			tracing::warn!(
+				target: "surrealdb::core::kvs::tx",
+				"failed to abort local index builder after committed schema retirement: {err}"
+			);
+		}
+	}
+}
+
+struct PendingUncommittedIndexBuild {
+	builder: IndexBuilder,
+	tf: TransactionFactory,
+	sequences: Sequences,
+	ns: NamespaceId,
+	db: DatabaseId,
+	tb: TableName,
+	ix: IndexId,
+}
+
+impl PendingUncommittedIndexBuild {
+	async fn cleanup_once(&self) -> Result<()> {
+		// Stop the local task first. The durable `!bs` delete below is still the
+		// cross-node fence: any in-flight builder write has to read/update that key
+		// in the same transaction before it can commit index data.
+		if let Err(err) = self.builder.remove_index(self.ns, self.db, &self.tb, self.ix).await {
+			tracing::warn!(
+				target: "surrealdb::core::kvs::tx",
+				"failed to abort uncommitted local index builder during rollback cleanup: {err}"
+			);
+		}
+
+		let tx = self
+			.tf
+			.transaction(TransactionType::Write, LockType::Optimistic, self.sequences.clone())
+			.await?;
+		let ikb = IndexKeyBase::new(self.ns, self.db, self.tb.clone(), self.ix);
+		let index_prefix = index_all::new(self.ns, self.db, &self.tb, self.ix).encode_key()?;
+		let result: Result<()> = async {
+			tx.tr.del(ikb.new_bs_key().encode_key()?).await.map_err(Error::from)?;
+			tx.tr.delr(ikb.new_bg_all_generations_range()?).await.map_err(Error::from)?;
+			tx.tr.delr(ikb.new_bp_all_generations_range()?).await.map_err(Error::from)?;
+			tx.tr.delr(ikb.new_br_all_generations_range()?).await.map_err(Error::from)?;
+			tx.tr.delp(index_prefix).await.map_err(Error::from)?;
+			tx.tr.commit().await.map_err(Error::from)?;
+			Ok(())
+		}
+		.await;
+		if let Err(err) = result {
+			let _ = tx.tr.cancel().await;
+			return Err(err);
+		}
+		Ok(())
+	}
+
+	async fn cleanup(self) -> Result<()> {
+		loop {
+			match self.cleanup_once().await {
+				Ok(()) => return Ok(()),
+				Err(err) if is_retryable_transaction_conflict(&err) => {
+					tracing::debug!(
+						target: "surrealdb::core::kvs::tx",
+						error = %err,
+						"retryable conflict while cleaning uncommitted index build, retrying"
+					);
+					sleep(INDEX_BUILD_RESERVATION_RELEASE_RETRY_SLEEP).await;
+				}
+				Err(err) => return Err(err),
+			}
+		}
+	}
+}
+
+/// Close-time release for a durable index-build reservation owned by a user
+/// transaction.
+///
+/// The release uses a fresh short transaction and a compare-delete against the
+/// exact reservation value. That keeps the cleanup idempotent and prevents a
+/// late release from deleting a different reservation if ownership changed. The
+/// release may run after a queued `!bg` appending commits, or after a write fails
+/// before any appending is written. Retryable conflicts are retried so transient
+/// cleanup failures do not leave a live-node reservation blocking the index
+/// build forever. Non-retryable failures are returned to the transaction close
+/// path; if no committed durable appending exists for the reservation, the build
+/// is marked `Error` so it cannot remain stuck in `Closing`.
+#[derive(Clone)]
+pub(crate) struct IndexBuildReservationRelease {
+	tf: TransactionFactory,
+	sequences: Sequences,
+	node: Uuid,
+	key: Key,
+	val: Val,
+}
+
+impl IndexBuildReservationRelease {
+	pub(crate) fn new(
+		tf: TransactionFactory,
+		sequences: Sequences,
+		node: Uuid,
+		key: Key,
+		val: Val,
+	) -> Self {
+		Self {
+			tf,
+			sequences,
+			node,
+			key,
+			val,
+		}
+	}
+
+	async fn release_once(&self) -> Result<()> {
+		// Use raw transactor methods here so the cleanup transaction does not
+		// recursively run Transaction::commit/cancel and re-enter reservation
+		// release handling.
+		let tx = self
+			.tf
+			.transaction(TransactionType::Write, LockType::Optimistic, self.sequences.clone())
+			.await?;
+
+		#[cfg(test)]
+		if let Err(err) = maybe_inject_non_retryable_error(
+			NonRetryableErrorSite::ConcurrentIndexReservationRelease,
+			self.node,
+		) {
+			let _ = tx.tr.cancel().await;
+			return Err(err);
+		}
+
+		match tx.tr.delc(self.key.clone(), Some(self.val.clone())).await {
+			Ok(()) => {}
+			Err(KvsError::TransactionConditionNotMet) => {
+				let _ = tx.tr.cancel().await;
+				return Ok(());
+			}
+			Err(err) => {
+				let _ = tx.tr.cancel().await;
+				return Err(err.into());
+			}
+		}
+
+		#[cfg(test)]
+		if let Err(err) = maybe_inject_retryable_conflict(
+			RetryableConflictSite::ConcurrentIndexReservationRelease,
+			self.node,
+		) {
+			let _ = tx.tr.cancel().await;
+			return Err(err);
+		}
+
+		if let Err(err) = tx.tr.commit().await {
+			let _ = tx.tr.cancel().await;
+			return Err(err.into());
+		}
+		Ok(())
+	}
+
+	async fn mark_build_error_if_uncommitted(&self, release_err: &anyhow::Error) -> Result<()> {
+		let br = Br::decode_key(&self.key)?;
+		let bg =
+			Bg::new(br.ns, br.db, br.tb.as_ref(), br.ix, br.generation, br.ticket).encode_key()?;
+		let bs = Bs::new(br.ns, br.db, br.tb.as_ref(), br.ix).encode_key()?;
+		let reason = format!(
+			"Failed to release durable index-build reservation for generation {} ticket {} after transaction close: {release_err}",
+			br.generation, br.ticket
+		);
+
+		loop {
+			let tx = self
+				.tf
+				.transaction(TransactionType::Write, LockType::Optimistic, self.sequences.clone())
+				.await?;
+
+			let current_reservation = match tx.tr.get(self.key.clone(), None).await {
+				Ok(current) => current,
+				Err(err) => {
+					let _ = tx.tr.cancel().await;
+					return Err(err.into());
+				}
+			};
+			if current_reservation.as_deref() != Some(self.val.as_slice()) {
+				let _ = tx.tr.cancel().await;
+				return Ok(());
+			}
+
+			match tx.tr.exists(bg.clone(), None).await {
+				Ok(true) => {
+					let _ = tx.tr.cancel().await;
+					return Ok(());
+				}
+				Ok(false) => {}
+				Err(err) => {
+					let _ = tx.tr.cancel().await;
+					return Err(err.into());
+				}
+			}
+
+			let current_state = match tx.tr.get(bs.clone(), None).await {
+				Ok(Some(current_state)) => current_state,
+				Ok(None) => {
+					let _ = tx.tr.cancel().await;
+					return Ok(());
+				}
+				Err(err) => {
+					let _ = tx.tr.cancel().await;
+					return Err(err.into());
+				}
+			};
+			let current = IndexBuildState::kv_decode_value(current_state.clone())?;
+			if current.generation != br.generation
+				|| !matches!(current.phase, IndexBuildPhase::Building | IndexBuildPhase::Closing)
+			{
+				let _ = tx.tr.cancel().await;
+				return Ok(());
+			}
+
+			let mut next = current.clone();
+			next.phase = IndexBuildPhase::Error;
+			next.owner = None;
+			next.owner_heartbeat_at = None;
+			next.updated_at = Utc::now();
+			next.error = Some(reason.clone());
+			next.report_status = Some(IndexBuildReportStatus::Error);
+			let next_state = next.kv_encode_value()?;
+
+			match tx.tr.putc(bs.clone(), next_state, Some(current_state)).await {
+				Ok(()) => {}
+				Err(KvsError::TransactionConditionNotMet) => {
+					let _ = tx.tr.cancel().await;
+					continue;
+				}
+				Err(err) => {
+					let _ = tx.tr.cancel().await;
+					return Err(err.into());
+				}
+			}
+
+			match tx.tr.commit().await {
+				Ok(()) => return Ok(()),
+				Err(err) if err.is_retryable() => {
+					let _ = tx.tr.cancel().await;
+					sleep(INDEX_BUILD_RESERVATION_RELEASE_RETRY_SLEEP).await;
+				}
+				Err(err) => {
+					let _ = tx.tr.cancel().await;
+					return Err(err.into());
+				}
+			}
+		}
+	}
+
+	pub(crate) async fn release(self) -> Result<()> {
+		loop {
+			match self.release_once().await {
+				Ok(()) => return Ok(()),
+				Err(err) if is_retryable_transaction_conflict(&err) => {
+					tracing::debug!(
+						target: "surrealdb::core::kvs::tx",
+						node = %self.node,
+						error = %err,
+						"retryable conflict while releasing durable index-build reservation, retrying"
+					);
+					sleep(INDEX_BUILD_RESERVATION_RELEASE_RETRY_SLEEP).await;
+				}
+				Err(err) => {
+					tracing::warn!(
+						target: "surrealdb::core::kvs::tx",
+						node = %self.node,
+						"failed to release durable index-build reservation: {err}"
+					);
+					if let Err(mark_err) = self.mark_build_error_if_uncommitted(&err).await {
+						tracing::warn!(
+							target: "surrealdb::core::kvs::tx",
+							node = %self.node,
+							"failed to mark durable index build error after reservation release failure: {mark_err}"
+						);
+					}
+					return Err(err);
+				}
+			}
+		}
+	}
 }
 
 impl Deref for Transaction {
@@ -139,7 +473,9 @@ impl Transaction {
 			changefeed: OnceLock::new(),
 			async_event_trigger,
 			trigger_async_event: AtomicBool::new(false),
-			pending_index_batches: Mutex::new(HashMap::new()),
+			pending_index_build_reservations: Mutex::new(Vec::new()),
+			pending_index_builder_aborts: Mutex::new(Vec::new()),
+			pending_uncommitted_index_builds: Mutex::new(Vec::new()),
 		}
 	}
 
@@ -161,6 +497,11 @@ impl Transaction {
 	/// ignored.
 	pub fn set_tenant_identity(&self, identity: Arc<TenantIdentity>) {
 		let _ = self.tenant_identity.set(identity);
+	}
+
+	#[cfg(test)]
+	pub(crate) fn metrics_snapshot_for_test(&self) -> crate::observe::TransactionMetricsSnapshot {
+		self.metrics.snapshot()
 	}
 
 	/// Emit a [`TransactionEvent`] carrying the current counter snapshot and
@@ -200,10 +541,62 @@ impl Transaction {
 		});
 	}
 
-	pub(super) async fn lock_pending_index_batches<'a>(
-		&'a self,
-	) -> MutexGuard<'a, HashMap<SharedIndexKey, (BatchId, BatchIdsCleanQueue)>> {
-		self.pending_index_batches.lock().await
+	/// Defer release of a durable index-build reservation until close.
+	///
+	/// Admission commits the reservation before the user transaction writes the
+	/// queued appending. Registering the prepared release immediately gives every
+	/// admitted ticket a cleanup path even if fence or queue work fails. Releasing
+	/// from a fresh transaction after commit/cancel keeps rollbacks from undoing
+	/// the release and avoids snapshot conflicts on local engines.
+	pub(crate) async fn register_index_build_reservation_release(
+		&self,
+		release: IndexBuildReservationRelease,
+	) {
+		self.pending_index_build_reservations.lock().await.push(release);
+	}
+
+	/// Abort a process-local index builder after this transaction commits.
+	///
+	/// Schema retirement deletes durable build state and catalog entries
+	/// transactionally, but the local builder map is process memory. Deferring
+	/// the abort until after commit keeps rollback/cancel semantics correct.
+	pub(crate) async fn register_index_builder_abort_after_commit(
+		&self,
+		builder: IndexBuilder,
+		ns: NamespaceId,
+		db: DatabaseId,
+		tb: TableName,
+		ix: IndexId,
+	) {
+		self.pending_index_builder_aborts.lock().await.push(PendingIndexBuilderAbort {
+			builder,
+			ns,
+			db,
+			tb,
+			ix,
+		});
+	}
+
+	/// Register a provisional index build that should be deleted unless this
+	/// transaction commits its catalog definition.
+	pub(crate) async fn register_uncommitted_index_build_cleanup(
+		&self,
+		builder: IndexBuilder,
+		tf: TransactionFactory,
+		ns: NamespaceId,
+		db: DatabaseId,
+		tb: TableName,
+		ix: IndexId,
+	) {
+		self.pending_uncommitted_index_builds.lock().await.push(PendingUncommittedIndexBuild {
+			builder,
+			tf,
+			sequences: self.sequences.clone(),
+			ns,
+			db,
+			tb,
+			ix,
+		});
 	}
 
 	/// Check if the transaction is local or remote
@@ -235,14 +628,18 @@ impl Transaction {
 		if let Some(changefeed) = self.changefeed.get() {
 			changefeed.clear();
 		}
-		// Enqueue pending index batches for deferred cleanup
-		self.cleanup_index_batches().await;
 		// Cancel the underlying transactor. Emit a transaction event on
 		// either outcome so counters and durations are always reported
 		// even when cancel itself reports a driver-level error.
 		let result = self.tr.cancel().await.map_err(Error::from);
+		let cleanup_result = self.cleanup_uncommitted_index_builds().await;
+		let release_result = self.release_index_build_reservations().await;
+		self.discard_index_builder_aborts().await;
 		self.emit_transaction_event(Outcome::from(&result));
-		Ok(result?)
+		result?;
+		cleanup_result?;
+		release_result?;
+		Ok(())
 	}
 
 	/// Commit a transaction.
@@ -254,13 +651,22 @@ impl Transaction {
 		// `cancel`, which itself emits the transaction event, so avoid
 		// double-emission from this path.
 		if let Err(e) = self.store_changes().await {
-			let _ = self.cancel().await;
+			if let Err(err) = self.cancel().await {
+				tracing::warn!(
+					target: "surrealdb::core::kvs::tx",
+					"transaction cleanup failed after changefeed storage failed; preserving original store_changes error {e}: {err}"
+				);
+			}
+			// The cleanup error is secondary here. Callers need the original
+			// store_changes error so retry/error classification uses the
+			// operation that first made commit impossible.
 			return Err(e);
 		}
 		// Commit the transaction
 		if let Err(e) = self.tr.commit().await {
-			// Enqueue pending index batches for deferred cleanup after commit failure.
-			self.cleanup_index_batches().await;
+			let cleanup_result = self.cleanup_uncommitted_index_builds().await;
+			let release_result = self.release_index_build_reservations().await;
+			self.discard_index_builder_aborts().await;
 			// Classify the commit failure so the surrealdb.transaction.* metric
 			// family can carry an `error_class` attribute. `e` is a concrete
 			// `kvs::Error` here -- the transactor's `commit` returns
@@ -275,8 +681,30 @@ impl Transaction {
 				crate::observe::error_class::STORAGE
 			};
 			self.emit_transaction_event_with_class(Outcome::Error, Some(class));
+			if let Err(err) = release_result {
+				tracing::warn!(
+					target: "surrealdb::core::kvs::tx",
+					"durable index-build reservation cleanup failed after transaction commit failed; preserving original commit error {e}: {err}"
+				);
+			}
+			if let Err(err) = cleanup_result {
+				tracing::warn!(
+					target: "surrealdb::core::kvs::tx",
+					"uncommitted index-build cleanup failed after transaction commit failed; preserving original commit error {e}: {err}"
+				);
+			}
+			// The cleanup error is secondary here. Callers need the commit
+			// error so retryable transaction conflicts keep their retry path.
 			anyhow::bail!(e);
 		}
+		if let Err(err) = self.release_index_build_reservations().await {
+			tracing::warn!(
+				target: "surrealdb::core::kvs::tx",
+				"durable index-build reservation cleanup failed after transaction commit; committed appendings remain recoverable: {err}"
+			);
+		}
+		self.discard_uncommitted_index_builds().await;
+		self.run_index_builder_aborts().await;
 		if self.trigger_async_event.load(Ordering::Relaxed) {
 			// Notify after commit so queued events are visible to workers.
 			self.async_event_trigger.notify_one();
@@ -285,16 +713,62 @@ impl Transaction {
 		Ok(())
 	}
 
-	/// Enqueue pending index batches for deferred cleanup after rollback (cancel or failed commit).
-	async fn cleanup_index_batches(&self) {
-		let batches = {
-			let mut pending = self.lock_pending_index_batches().await;
+	async fn release_index_build_reservations(&self) -> Result<()> {
+		let reservations = {
+			let mut pending = self.pending_index_build_reservations.lock().await;
 			std::mem::take(&mut *pending)
 		};
-		for (_, (batch_id, clean_queue)) in batches {
-			// Enqueue batch ids for cleaning
-			clean_queue.lock().await.push(batch_id);
+		let mut first_error = None;
+		for reservation in reservations {
+			if let Err(err) = reservation.release().await
+				&& first_error.is_none()
+			{
+				first_error = Some(err);
+			}
 		}
+		if let Some(err) = first_error {
+			Err(err)
+		} else {
+			Ok(())
+		}
+	}
+
+	async fn cleanup_uncommitted_index_builds(&self) -> Result<()> {
+		let builds = {
+			let mut pending = self.pending_uncommitted_index_builds.lock().await;
+			std::mem::take(&mut *pending)
+		};
+		let mut first_error = None;
+		for build in builds {
+			if let Err(err) = build.cleanup().await
+				&& first_error.is_none()
+			{
+				first_error = Some(err);
+			}
+		}
+		if let Some(err) = first_error {
+			Err(err)
+		} else {
+			Ok(())
+		}
+	}
+
+	async fn discard_uncommitted_index_builds(&self) {
+		self.pending_uncommitted_index_builds.lock().await.clear();
+	}
+
+	async fn run_index_builder_aborts(&self) {
+		let aborts = {
+			let mut pending = self.pending_index_builder_aborts.lock().await;
+			std::mem::take(&mut *pending)
+		};
+		for abort in aborts {
+			abort.abort().await;
+		}
+	}
+
+	async fn discard_index_builder_aborts(&self) {
+		self.pending_index_builder_aborts.lock().await.clear();
 	}
 
 	/// Check if a key exists in the datastore.
@@ -2227,8 +2701,8 @@ impl TableProvider for Transaction {
 		version: Option<u64>,
 	) -> Result<Arc<[catalog::IndexDefinition]>> {
 		if version.is_some() {
-			let beg = crate::key::table::ix::prefix(ns, db, tb)?;
-			let end = crate::key::table::ix::suffix(ns, db, tb)?;
+			let beg = table_ix::prefix(ns, db, tb)?;
+			let end = table_ix::suffix(ns, db, tb)?;
 			let val = self.getr(beg..end, version).await?;
 			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
 		}
@@ -2236,8 +2710,8 @@ impl TableProvider for Transaction {
 		match self.cache.get(&qey) {
 			Some(val) => val.try_into_ixs(),
 			None => {
-				let beg = crate::key::table::ix::prefix(ns, db, tb)?;
-				let end = crate::key::table::ix::suffix(ns, db, tb)?;
+				let beg = table_ix::prefix(ns, db, tb)?;
+				let end = table_ix::suffix(ns, db, tb)?;
 				let val = self.getr(beg..end, None).await?;
 				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
 				let entry = cache::tx::Entry::Ixs(Arc::clone(&val));
@@ -2408,7 +2882,7 @@ impl TableProvider for Transaction {
 		version: Option<u64>,
 	) -> Result<Option<Arc<catalog::IndexDefinition>>> {
 		if version.is_some() {
-			let key = crate::key::table::ix::new(ns, db, tb, ix);
+			let key = table_ix::new(ns, db, tb, ix);
 			let Some(val) = self.get(&key, version).await? else {
 				return Ok(None);
 			};
@@ -2418,7 +2892,7 @@ impl TableProvider for Transaction {
 		match self.cache.get(&qey) {
 			Some(val) => val.try_into_type().map(Some),
 			None => {
-				let key = crate::key::table::ix::new(ns, db, tb, ix);
+				let key = table_ix::new(ns, db, tb, ix);
 				let Some(val) = self.get(&key, None).await? else {
 					return Ok(None);
 				};
@@ -2438,7 +2912,7 @@ impl TableProvider for Transaction {
 		ix: IndexId,
 		version: Option<u64>,
 	) -> Result<Option<Arc<catalog::IndexDefinition>>> {
-		let key = crate::key::table::ix::IndexNameLookupKey::new(ns, db, tb, ix);
+		let key = table_ix::IndexNameLookupKey::new(ns, db, tb, ix);
 		let Some(index_name) = self.get(&key, version).await? else {
 			return Ok(None);
 		};
@@ -2453,11 +2927,10 @@ impl TableProvider for Transaction {
 		tb: &TableName,
 		ix: &catalog::IndexDefinition,
 	) -> Result<()> {
-		let key = crate::key::table::ix::new(ns, db, tb, &ix.name);
+		let key = table_ix::new(ns, db, tb, &ix.name);
 		self.set(&key, ix).await?;
 
-		let name_lookup_key =
-			crate::key::table::ix::IndexNameLookupKey::new(ns, db, tb, ix.index_id);
+		let name_lookup_key = table_ix::IndexNameLookupKey::new(ns, db, tb, ix.index_id);
 		self.set(&name_lookup_key, &ix.name.to_string()).await?;
 
 		// Invalidate the cached list of all indexes for this table
@@ -2484,12 +2957,16 @@ impl TableProvider for Transaction {
 		};
 
 		// Remove the index data
-		let key = crate::key::index::all::new(ns, db, tb, ix.index_id);
+		let key = index_all::new(ns, db, tb, ix.index_id);
 		self.delp(&key).await?;
 
 		// Delete the definition
-		let key = crate::key::table::ix::new(ns, db, tb, &ix.name);
+		let key = table_ix::new(ns, db, tb, &ix.name);
 		self.del(&key).await?;
+
+		// Delete the id-to-name lookup
+		let name_lookup_key = table_ix::IndexNameLookupKey::new(ns, db, tb, ix.index_id);
+		self.del(&name_lookup_key).await?;
 
 		// Invalidate the cached list of all indexes for this table
 		let list_key = cache::tx::Lookup::Ixs(ns, db, tb.as_ref());

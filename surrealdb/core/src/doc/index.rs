@@ -24,8 +24,8 @@ use crate::dbs::{Force, Options};
 use crate::doc::{CursorDoc, Document};
 use crate::expr::FlowResultExt as _;
 use crate::idx::index::IndexOperation;
-use crate::kvs::index::ConsumeResult;
-use crate::val::{RecordId, Value};
+use crate::kvs::index::{ConsumeResult, IndexMutation};
+use crate::val::Value;
 
 impl Document {
 	pub(super) async fn store_index_data(
@@ -79,16 +79,26 @@ impl Document {
 				None
 			};
 
-			// Update the index entries
-			if o != n {
-				Self::one_index(&db, tb, stk, ctx, opt, ix, o, n, &rid, count_cond_match).await?;
+			// COUNT WHERE indexes have no indexed values, so predicate
+			// membership changes must still be treated as index mutations.
+			let count_condition_changed = matches!(count_cond_match, Some((old_matches, new_matches)) if old_matches != new_matches);
+
+			// Update the index entries. Building indexes may consume the
+			// mutation into a durable replay queue instead of applying it now.
+			if o != n || count_condition_changed {
+				let mutation = IndexMutation {
+					old_values: o,
+					new_values: n,
+					rid: &rid,
+					count_cond_match,
+				};
+				Self::one_index(&db, tb, stk, ctx, opt, ix, mutation).await?;
 			}
 		}
 		// Carry on
 		Ok(())
 	}
 
-	#[allow(clippy::too_many_arguments)]
 	async fn one_index(
 		db: &DatabaseDefinition,
 		tb: &TableDefinition,
@@ -96,22 +106,23 @@ impl Document {
 		ctx: &FrozenContext,
 		opt: &Options,
 		ix: &IndexDefinition,
-		o: Option<Vec<Value>>,
-		n: Option<Vec<Value>>,
-		rid: &RecordId,
-		count_cond_match: Option<(bool, bool)>,
+		mutation: IndexMutation<'_>,
 	) -> Result<()> {
+		let rid = mutation.rid;
+		let count_cond_match = mutation.count_cond_match;
 		let (o, n) = if let Some(ib) = ctx.get_index_builder() {
-			match ib.consume(db, ctx, ix, o, n, rid).await? {
-				// The index builder consumed the value, which means it is currently building the
-				// index asynchronously, we don't index the document and let the index builder
-				// do it later.
+			match ib.consume(db, ctx, ix, mutation).await? {
+				// The index builder accepted durable responsibility for this
+				// mutation, so the user transaction must not also apply it to
+				// the index directly.
 				ConsumeResult::Enqueued => return Ok(()),
-				// The index builder is done, the index has been built; we can proceed normally
+				// No build needs to consume this mutation; apply it normally.
 				ConsumeResult::Ignored(o, n) => (o, n),
+				// The definition was retired after it was read from a cache.
+				ConsumeResult::Retired => return Ok(()),
 			}
 		} else {
-			(o, n)
+			(mutation.old_values, mutation.new_values)
 		};
 
 		// Store all the variables and parameters required by the index operation

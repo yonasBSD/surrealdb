@@ -33,9 +33,10 @@ use super::util::{
 	resolve_param_value, resolve_projection_field_idioms, strip_fts_condition,
 	strip_index_conditions, strip_knn_from_condition,
 };
+use crate::catalog::Index;
 use crate::catalog::providers::{DatabaseProvider, NamespaceProvider, TableProvider};
 use crate::err::Error;
-use crate::exec::index::access_path::{AccessPath, BTreeAccess, select_access_path};
+use crate::exec::index::access_path::{AccessPath, BTreeAccess, IndexRef, select_access_path};
 use crate::exec::index::analysis::IndexAnalyzer;
 use crate::exec::operators::scan::determine_scan_direction;
 use crate::exec::operators::scan::resolved::{ResolvedTableContext, resolve_table_context};
@@ -47,7 +48,13 @@ use crate::exec::operators::{
 use crate::exec::pre_decode_filter::pre_decode_filter_status_at_plan_time;
 use crate::exec::{ExecOperator, OperatorMetrics};
 use crate::expr::field::{Field, Fields};
+use crate::expr::order::Ordering as OrderClause;
+use crate::expr::with::With;
 use crate::expr::{Cond, Expr, Idiom, Literal};
+use crate::idx::planner::ScanDirection;
+use crate::kvs::Transaction;
+use crate::kvs::index::filter_online_indexes;
+use crate::val::TableName;
 
 impl<'ctx> Planner<'ctx> {
 	/// Resolve a parameter to its value at plan time.
@@ -1851,10 +1858,7 @@ impl<'ctx> Planner<'ctx> {
 	/// exist. Errors in field state resolution are silently ignored (the
 	/// operator will fall back to runtime resolution). Catalog-lookup failures
 	/// are logged at debug level so the silent fallback is observable.
-	async fn try_resolve_table_ctx(
-		&self,
-		table_name: &crate::val::TableName,
-	) -> Option<crate::exec::operators::scan::resolved::ResolvedTableContext> {
+	async fn try_resolve_table_ctx(&self, table_name: &TableName) -> Option<ResolvedTableContext> {
 		let ns = self.ns()?;
 		let db = self.db()?;
 		// Single cached catalog read for (ns_id, db_id); `ns_db_ids`
@@ -1928,8 +1932,13 @@ impl<'ctx> Planner<'ctx> {
 				return false;
 			}
 		};
+		// COUNT fast paths must not use an index until the durable build
+		// protocol has published it as online.
+		let Ok(indexes) = filter_online_indexes(txn, ns_id, db_id, indexes).await else {
+			return false;
+		};
 		indexes.iter().any(|ix| {
-			if let crate::catalog::Index::Count(ref idx_cond) = ix.index {
+			if let Index::Count(ref idx_cond) = ix.index {
 				idx_cond.as_ref() == Some(cond)
 			} else {
 				false
@@ -1946,11 +1955,8 @@ impl<'ctx> Planner<'ctx> {
 		&self,
 		what: &[Expr],
 		cond: &Option<Cond>,
-		with: Option<&crate::expr::with::With>,
-	) -> Option<(
-		crate::exec::index::access_path::IndexRef,
-		crate::exec::index::access_path::BTreeAccess,
-	)> {
+		with: Option<&With>,
+	) -> Option<(IndexRef, BTreeAccess)> {
 		let txn = self.txn.as_ref()?;
 		let table_name = match what.first() {
 			Some(Expr::Table(t)) => t,
@@ -1971,6 +1977,9 @@ impl<'ctx> Planner<'ctx> {
 				return None;
 			}
 		};
+		// Key-only count scans read index data directly, so restrict candidates
+		// to durable-online indexes.
+		let indexes = filter_online_indexes(txn, ns_id, db_id, indexes).await.ok()?;
 
 		if indexes.is_empty() {
 			return None;
@@ -2006,17 +2015,17 @@ impl<'ctx> Planner<'ctx> {
 	#[allow(clippy::too_many_arguments)]
 	async fn resolve_access_path(
 		&self,
-		txn: &crate::kvs::Transaction,
+		txn: &Transaction,
 		ns_name: &str,
 		db_name: &str,
-		table_name: &crate::val::TableName,
+		table_name: &TableName,
 		cond: Option<&Cond>,
-		order: Option<&crate::expr::order::Ordering>,
-		with: Option<&crate::expr::with::With>,
-	) -> Result<Option<(AccessPath, crate::idx::planner::ScanDirection)>, Error> {
+		order: Option<&OrderClause>,
+		with: Option<&With>,
+	) -> Result<Option<(AccessPath, ScanDirection)>, Error> {
 		let direction = determine_scan_direction(order);
 
-		if matches!(with, Some(crate::expr::with::With::NoIndex)) {
+		if matches!(with, Some(With::NoIndex)) {
 			return Ok(Some((AccessPath::TableScan, direction)));
 		}
 
@@ -2030,12 +2039,20 @@ impl<'ctx> Planner<'ctx> {
 			_ => return Ok(None),
 		};
 
-		// Fetch indexes for the table
+		// Fetch queryable indexes for the table. Building or errored durable
+		// indexes stay in the catalog for write admission, but the planner must
+		// ignore them until the durable phase is `Online`.
 		let indexes = match txn
 			.all_tb_indexes(ns_def.namespace_id, db_def.database_id, table_name, None)
 			.await
 		{
-			Ok(idx) => idx,
+			Ok(idx) => {
+				match filter_online_indexes(txn, ns_def.namespace_id, db_def.database_id, idx).await
+				{
+					Ok(idx) => idx,
+					Err(_) => return Ok(None),
+				}
+			}
 			Err(_) => return Ok(None),
 		};
 

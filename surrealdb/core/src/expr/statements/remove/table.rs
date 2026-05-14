@@ -2,6 +2,7 @@ use anyhow::{Result, bail};
 use reblessive::tree::Stk;
 use uuid::Uuid;
 
+use super::retire_table_indexes;
 use crate::catalog::providers::TableProvider;
 use crate::catalog::{TableDefinition, ViewDefinition};
 use crate::ctx::FrozenContext;
@@ -61,9 +62,6 @@ impl RemoveTableStatement {
 			}
 			.into());
 		};
-		// Remove the index stores
-		ctx.get_index_stores().table_removed(ctx.get_index_builder(), &txn, ns, db, &tb).await?;
-
 		// Get the foreign tables
 		let fts = txn.all_tb_views(ns, db, &name, None).await?;
 
@@ -86,6 +84,9 @@ impl RemoveTableStatement {
 
 		// Get the live queries
 		let lvs = txn.all_tb_lives(ns, db, &name, None).await?;
+		// Retire index state before deleting the table definition. Durable
+		// cleanup is transactional; local builder aborts are deferred until commit.
+		retire_table_indexes(ctx, &txn, ns, db, &tb).await?;
 
 		// Delete the definition
 		if self.expunge {

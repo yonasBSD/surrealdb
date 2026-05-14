@@ -22,15 +22,16 @@ use surrealdb_strand::Strand;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::catalog::{DatabaseDefinition, NamespaceDefinition};
+use crate::catalog::{DatabaseDefinition, IndexDefinition, NamespaceDefinition, TableDefinition};
 use crate::ctx::{Context, FrozenContext};
 use crate::dbs::{Capabilities, Options};
 use crate::err::Error;
 use crate::exec::function::FunctionRegistry;
 use crate::expr::Base;
 use crate::iam::{Action, Auth, ResourceKind};
+use crate::kvs::index::filter_online_indexes;
 use crate::kvs::{Datastore, Transaction};
-use crate::val::{Datetime, Value};
+use crate::val::{Datetime, TableName, Value};
 
 /// Parameters passed to queries (e.g., `$param` values).
 pub(crate) type Parameters = HashMap<Strand, Arc<Value>>;
@@ -39,10 +40,7 @@ pub(crate) type Parameters = HashMap<Strand, Arc<Value>>;
 /// keyed by `(table_name, check_perms)`.
 pub(crate) type FieldStateCache = Arc<
 	tokio::sync::RwLock<
-		HashMap<
-			(crate::val::TableName, bool),
-			Arc<crate::exec::operators::scan::pipeline::FieldState>,
-		>,
+		HashMap<(TableName, bool), Arc<crate::exec::operators::scan::pipeline::FieldState>>,
 	>,
 >;
 
@@ -226,17 +224,13 @@ pub struct DatabaseContext {
 	/// Cache of table definitions keyed by table name.
 	/// Avoids repeated `get_tb_by_name` KV lookups across scan operators
 	/// within the same query execution.
-	pub(crate) table_def_cache: Arc<
-		tokio::sync::RwLock<
-			HashMap<crate::val::TableName, Option<Arc<crate::catalog::TableDefinition>>>,
-		>,
-	>,
+	pub(crate) table_def_cache:
+		Arc<tokio::sync::RwLock<HashMap<TableName, Option<Arc<TableDefinition>>>>>,
 	/// Cache of index definitions keyed by table name.
 	/// Avoids repeated `all_tb_indexes` KV lookups in DynamicScan's
 	/// runtime index analysis within the same query execution.
-	pub(crate) index_def_cache: Arc<
-		tokio::sync::RwLock<HashMap<crate::val::TableName, Arc<[crate::catalog::IndexDefinition]>>>,
-	>,
+	pub(crate) index_def_cache:
+		Arc<tokio::sync::RwLock<HashMap<TableName, Arc<[IndexDefinition]>>>>,
 }
 
 impl std::fmt::Debug for DatabaseContext {
@@ -287,9 +281,9 @@ impl DatabaseContext {
 	/// in time being queried.
 	pub(crate) async fn get_table_def(
 		&self,
-		table: &crate::val::TableName,
+		table: &TableName,
 		version: Option<u64>,
-	) -> anyhow::Result<Option<Arc<crate::catalog::TableDefinition>>> {
+	) -> anyhow::Result<Option<Arc<TableDefinition>>> {
 		use crate::catalog::providers::TableProvider;
 		if version.is_none() {
 			// Check execution-level cache (read lock — concurrent reads allowed)
@@ -316,20 +310,35 @@ impl DatabaseContext {
 	///
 	/// This avoids repeated `all_tb_indexes` KV roundtrips for the same table
 	/// across multiple DynamicScan operations within the same query execution.
+	/// The cache stores the catalog definitions, not the durable build status;
+	/// non-versioned callers still filter the cached list through durable state
+	/// on every read so an index does not become queryable until its `!bs`
+	/// record is `Online`.
 	///
 	/// When `version` is `Some`, the cache is bypassed for the same reason
-	/// as `get_table_def`.
+	/// as `get_table_def`, and the historical catalog is returned without
+	/// applying current durable build-state filtering.
 	pub(crate) async fn get_table_indexes(
 		&self,
-		table: &crate::val::TableName,
+		table: &TableName,
 		version: Option<u64>,
-	) -> anyhow::Result<Arc<[crate::catalog::IndexDefinition]>> {
+	) -> anyhow::Result<Arc<[IndexDefinition]>> {
 		use crate::catalog::providers::TableProvider;
 		if version.is_none() {
-			// Check execution-level cache (read lock — concurrent reads allowed)
-			let cache = self.index_def_cache.read().await;
-			if let Some(cached) = cache.get(table) {
-				return Ok(Arc::clone(cached));
+			let cached = {
+				// Release the cache guard before durable filtering, which awaits KV reads.
+				let cache = self.index_def_cache.read().await;
+				cache.get(table).cloned()
+			};
+			if let Some(cached) = cached {
+				let txn = self.txn();
+				return filter_online_indexes(
+					&txn,
+					self.ns_ctx.ns.namespace_id,
+					self.db.database_id,
+					cached,
+				)
+				.await;
 			}
 		}
 
@@ -344,7 +353,12 @@ impl DatabaseContext {
 			self.index_def_cache.write().await.insert(table.clone(), Arc::clone(&result));
 		}
 
-		Ok(result)
+		if version.is_none() {
+			filter_online_indexes(&txn, self.ns_ctx.ns.namespace_id, self.db.database_id, result)
+				.await
+		} else {
+			Ok(result)
+		}
 	}
 }
 
