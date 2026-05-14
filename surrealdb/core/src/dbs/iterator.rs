@@ -98,10 +98,15 @@ pub(crate) enum Operable {
 	/// Record is the record we're operating on (eg. )
 	/// Second argument is `ON DUPLICATE KEY` value.
 	Insert(Arc<Record>, Arc<Value>),
-	/// 1. RecordId
-	/// 2. Record
-	/// 3. Relation RecordId
-	/// 4. For update operations if it doesn't exist (TODO: This may be true, maybe not)
+	/// Resolved form of [`Iterable::Relatable`], driving RELATE / INSERT
+	/// RELATION edge processing.
+	/// 1. The `from` record id (the subject side of the edge).
+	/// 2. The current state of the edge record itself — a default [`Record`] when newly created, or
+	///    the existing record fetched from storage when an explicit edge record id was supplied.
+	/// 3. The `to` record id (the target side of the edge).
+	/// 4. Optional content to apply to the edge record. Populated by `INSERT RELATION` to carry the
+	///    per-row value supplied in the statement; merged into the document and exposed as `$input`
+	///    to any `ON DUPLICATE KEY UPDATE` expression.
 	Relate(RecordId, Arc<Record>, RecordId, Option<Arc<Value>>),
 
 	Count(usize),
