@@ -7653,6 +7653,7 @@ dependencies = [
  "nu-ansi-term",
  "num_cpus",
  "opentelemetry",
+ "opentelemetry-http",
  "opentelemetry-otlp",
  "opentelemetry-prometheus-text-exporter",
  "opentelemetry-proto",

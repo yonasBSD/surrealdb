@@ -8,6 +8,8 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use futures::stream::FuturesUnordered;
 use futures::{Sink, SinkExt, StreamExt};
+use http::{HeaderMap, HeaderName, HeaderValue};
+use opentelemetry_http::HeaderExtractor;
 use surrealdb_core::dbs::Session;
 use surrealdb_core::kvs::{Datastore, LockType, Transaction, TransactionType};
 use surrealdb_core::mem::ALLOC;
@@ -22,7 +24,8 @@ use tokio::sync::RwLock;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, Span};
+use tracing::Instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
 use super::RpcState;
@@ -44,6 +47,32 @@ const SERVER_SHUTTING_DOWN: &str = "The server is gracefully shutting down";
 /// An error string sent when an in-flight RPC is dropped because the
 /// connection-level `canceller` fires (e.g. the WebSocket has been torn down).
 const REQUEST_CANCELLED: &str = "The request was cancelled because the WebSocket is closing";
+
+/// Build an OTel parent `Context` from W3C Trace Context propagation
+/// headers carried in the RPC envelope's `trace_context` field. Reuses
+/// the `HeaderMap`-based `HeaderExtractor` so the same propagator path
+/// is used as for HTTP — the only difference is where the headers come
+/// from. Returns `None` when the map produces no usable entries, so the
+/// caller can leave the span as a fresh root rather than parent it to
+/// an empty context.
+fn extract_trace_context(
+	trace_context: &std::collections::HashMap<String, String>,
+) -> Option<opentelemetry::Context> {
+	let mut headers = HeaderMap::with_capacity(trace_context.len());
+	for (k, v) in trace_context {
+		if let (Ok(name), Ok(value)) =
+			(HeaderName::try_from(k.as_str()), HeaderValue::try_from(v.as_str()))
+		{
+			headers.insert(name, value);
+		}
+	}
+	if headers.is_empty() {
+		return None;
+	}
+	Some(opentelemetry::global::get_text_map_propagator(|propagator| {
+		propagator.extract(&HeaderExtractor(&headers))
+	}))
+}
 
 pub struct Websocket {
 	/// The unique id of this WebSocket connection
@@ -434,21 +463,55 @@ impl Websocket {
 		// `NetworkBytesEvent` above, no longer attached to a per-RPC
 		// telemetry context.
 		let _ = len;
-		// Parse the request
+		// Parse the RPC envelope synchronously BEFORE `.instrument(span)`.
+		//
+		// Both pre-populating the span (rpc.method / otel.name /
+		// rpc.request_id) and attaching the propagated OTel parent
+		// (`req.trace_context`) must happen while the underlying
+		// `tracing_opentelemetry::OtelData` is still in `Builder` state.
+		// `Instrumented::poll` enters the wrapped span on its first
+		// poll, which fires `on_enter` in the OTel `Layer` and calls
+		// `start_with_context`, transitioning the state from `Builder`
+		// to `Context` and freezing the span's `trace_id` from whatever
+		// parent context was on the builder at that moment. After that
+		// transition, `set_parent` returns `Err(AlreadyStarted)` and is
+		// silently dropped — the WS span would surface in OTLP under a
+		// fresh root trace, defeating per-message W3C propagation. The
+		// regression test below
+		// (`set_parent_before_instrument_attaches_remote_trace_id`)
+		// guards this ordering.
+		let parsed = rpc.format.req_ws(msg, rec_limit);
+		if let Ok(req) = &parsed {
+			// Now that we know the method, update the tracing span so
+			// structured fields show up on any OTel-bridged trace.
+			span.record("rpc.method", req.method.to_str());
+			span.record("otel.name", format!("surrealdb.rpc/{}", req.method));
+			span.record(
+				"rpc.request_id",
+				req.id.as_ref().map(|id| id.to_sql()).unwrap_or_default(),
+			);
+			// If the client included W3C Trace Context propagation
+			// headers in the RPC envelope, use them as the OTel parent
+			// of the per-message span. WebSocket has no per-message
+			// header layer, so the context lives on the message body
+			// under `trace_context`. Invalid entries are silently
+			// dropped: `HeaderMap` rejects non-ASCII names/values, but
+			// the propagator handles the resulting empty map
+			// gracefully by producing a no-op parent. SDKs that don't
+			// emit `trace_context` get today's behavior (fresh root
+			// span per message).
+			if let Some(trace_context) = req.trace_context.as_ref()
+				&& let Some(parent_cx) = extract_trace_context(trace_context)
+			{
+				// `set_parent` returns `Err(SetParentError::LayerNotFound)`
+				// when the OTel bridge layer isn't registered (OTLP
+				// export disabled). Non-actionable here, so discard.
+				let _ = span.set_parent(parent_cx);
+			}
+		}
 		async move {
-			let span = Span::current();
-			// Parse the RPC request structure
-			match rpc.format.req_ws(msg,rec_limit) {
+			match parsed {
 				Ok(req) => {
-					// Now that we know the method, update the tracing
-					// span so structured fields show up on the
-					// surrounding span and on any OTel-bridged trace.
-					span.record("rpc.method", req.method.to_str());
-					span.record("otel.name", format!("surrealdb.rpc/{}", req.method));
-					span.record(
-						"rpc.request_id",
-						req.id.as_ref().map(|id| id.to_sql()).unwrap_or_default(),
-					);
 					// Capture the request id, session id and a cloned channel handle up-front so we
 					// can still build a `DbResponse::failure` if the cancel branch wins the
 					// select below — by the time it fires, `req` and `chn` will have been moved
@@ -1024,5 +1087,173 @@ mod tests {
 		assert!(ctx.namespace.is_none());
 		assert!(ctx.database.is_none());
 		assert!(ctx.user.is_none());
+	}
+
+	/// Install the W3C trace-context propagator once per process. The
+	/// `extract_trace_context_*` tests share it because
+	/// `set_text_map_propagator` is process-global; running them with no
+	/// installed propagator would silently exercise the no-op default
+	/// and produce empty contexts, masking regressions.
+	fn ensure_propagator() {
+		use std::sync::Once;
+		static INIT: Once = Once::new();
+		INIT.call_once(|| {
+			opentelemetry::global::set_text_map_propagator(
+				opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+			);
+		});
+	}
+
+	#[test]
+	fn extract_trace_context_with_traceparent_returns_remote_context() {
+		use opentelemetry::trace::TraceContextExt;
+		ensure_propagator();
+		let mut map = std::collections::HashMap::new();
+		map.insert(
+			"traceparent".to_string(),
+			"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01".to_string(),
+		);
+		let cx = extract_trace_context(&map).expect("should produce a context");
+		let span = cx.span();
+		let span_cx = span.span_context();
+		assert!(span_cx.is_valid(), "extracted span context should be valid");
+		assert_eq!(format!("{}", span_cx.trace_id()), "0af7651916cd43dd8448eb211c80319c");
+		assert_eq!(format!("{}", span_cx.span_id()), "b7ad6b7169203331");
+		assert!(span_cx.is_remote(), "context must mark the parent as remote");
+	}
+
+	#[test]
+	fn extract_trace_context_empty_map_returns_none() {
+		ensure_propagator();
+		let map = std::collections::HashMap::new();
+		assert!(extract_trace_context(&map).is_none());
+	}
+
+	#[test]
+	fn extract_trace_context_invalid_header_name_drops_entry() {
+		// HTTP header names disallow whitespace; the entry is silently
+		// skipped during `HeaderMap` construction, the map ends up empty,
+		// and we return `None` rather than parenting the span to a no-op
+		// context.
+		ensure_propagator();
+		let mut map = std::collections::HashMap::new();
+		map.insert("not a valid header name".to_string(), "value".to_string());
+		assert!(extract_trace_context(&map).is_none());
+	}
+
+	#[test]
+	fn extract_trace_context_invalid_traceparent_value_yields_invalid_context() {
+		// Junk traceparent value is accepted by `HeaderMap` (any ASCII
+		// passes), but `TraceContextPropagator::extract` rejects it and
+		// returns an empty context. The function still returns `Some`
+		// because the map wasn't empty — `set_parent` on an empty context
+		// is a harmless no-op, matching today's "fresh root" behavior.
+		ensure_propagator();
+		let mut map = std::collections::HashMap::new();
+		map.insert("traceparent".to_string(), "garbage".to_string());
+		let cx = extract_trace_context(&map).expect("non-empty map produces Some");
+		use opentelemetry::trace::TraceContextExt;
+		let span = cx.span();
+		assert!(!span.span_context().is_valid());
+	}
+
+	/// Build a tracing subscriber with the OTel bridge layer attached
+	/// to a real `SdkTracerProvider`. The provider has no exporter, but
+	/// that's fine: the OTel layer's state machine (`OtelData::Builder`
+	/// → `OtelData::Context`) and `OpenTelemetrySpanExt::set_parent`
+	/// returns are what we want to exercise.
+	fn otel_test_subscriber() -> (
+		impl tracing::Subscriber + Send + Sync + 'static,
+		opentelemetry_sdk::trace::SdkTracerProvider,
+	) {
+		use opentelemetry::trace::TracerProvider as _;
+		use opentelemetry_sdk::trace::SdkTracerProvider;
+		use tracing_subscriber::prelude::*;
+		let provider = SdkTracerProvider::builder().build();
+		let layer = tracing_opentelemetry::layer().with_tracer(provider.tracer("test"));
+		let subscriber = tracing_subscriber::registry().with(layer);
+		(subscriber, provider)
+	}
+
+	#[test]
+	fn set_parent_before_instrument_attaches_remote_trace_id() {
+		// Regression test for the WS propagation ordering bug.
+		//
+		// `tracing_opentelemetry 0.32.1` carries an explicit state
+		// machine: a span starts in `OtelData::Builder { parent_cx }`
+		// and transitions to `OtelData::Context { current_cx }` the
+		// first time `on_enter` fires (i.e. on the first poll of an
+		// `Instrumented` future). `set_parent` only mutates the parent
+		// while the state is `Builder`; once it's `Context`, the trace
+		// id is frozen and the call returns `Err(AlreadyStarted)`.
+		//
+		// The production code in `handle_message` parses the envelope
+		// and calls `set_parent` BEFORE wrapping the future in
+		// `.instrument(span)`, so the call lands on a `Builder`-state
+		// span and the remote trace id propagates through. This test
+		// asserts that ordering: `set_parent` returns `Ok(())` and the
+		// span's resolved context carries the parent's trace id.
+		use opentelemetry::trace::TraceContextExt;
+		ensure_propagator();
+		let (subscriber, _provider) = otel_test_subscriber();
+		tracing::subscriber::with_default(subscriber, || {
+			let mut map = std::collections::HashMap::new();
+			map.insert(
+				"traceparent".to_string(),
+				"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01".to_string(),
+			);
+			let parent_cx = extract_trace_context(&map).expect("Some");
+
+			let span = span_for_request(&Uuid::new_v4());
+			// Span is in `Builder` state — `set_parent` must succeed.
+			span.set_parent(parent_cx).expect("set_parent must succeed on Builder-state span");
+
+			// Resolve the span's OTel context. `OpenTelemetrySpanExt::context`
+			// forces the Builder→Context transition internally if needed and
+			// returns the resulting context.
+			let cx = span.context();
+			let active = cx.span();
+			let span_cx = active.span_context();
+			assert!(span_cx.is_valid(), "span context should be valid after activation");
+			assert_eq!(
+				format!("{}", span_cx.trace_id()),
+				"0af7651916cd43dd8448eb211c80319c",
+				"span's resolved trace_id must match the propagated parent",
+			);
+		});
+	}
+
+	#[test]
+	fn set_parent_after_span_entered_returns_already_started() {
+		// Documents the bug the production code avoids. Once the span
+		// has been entered (which `.instrument(span).await` does on
+		// the first poll), `OtelData` transitions from `Builder` to
+		// `Context` and `set_parent` becomes a no-op returning
+		// `Err(AlreadyStarted)`. If anyone refactors `handle_message`
+		// to call `set_parent` from inside the instrumented async
+		// block, this test catches it.
+		ensure_propagator();
+		let (subscriber, _provider) = otel_test_subscriber();
+		tracing::subscriber::with_default(subscriber, || {
+			let mut map = std::collections::HashMap::new();
+			map.insert(
+				"traceparent".to_string(),
+				"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01".to_string(),
+			);
+			let parent_cx = extract_trace_context(&map).expect("Some");
+
+			let span = span_for_request(&Uuid::new_v4());
+			// Enter the span to simulate what `Instrumented::poll`
+			// does before the wrapped future runs. `on_enter` consumes
+			// the `SpanBuilder` and the state becomes `Context`.
+			let _enter = span.enter();
+			let err = span
+				.set_parent(parent_cx)
+				.expect_err("set_parent on entered span must return AlreadyStarted");
+			assert!(
+				matches!(err, tracing_opentelemetry::SetParentError::AlreadyStarted),
+				"expected AlreadyStarted, got {err:?}",
+			);
+		});
 	}
 }

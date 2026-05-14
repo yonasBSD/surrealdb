@@ -306,8 +306,13 @@ impl Builder {
 		// Setup logging to opentelemetry
 		let mut tracer_provider = None;
 		{
-			// Get the otel filter or global filter
-			let filter = self.otel_filter.clone().unwrap_or_else(|| self.filter.clone());
+			// Get the otel filter, falling back to a curated minimal
+			// default that surfaces the four user-facing spans (HTTP
+			// `request`, WS `rpc/call`, `rpc.execute`, `executor`) while
+			// keeping the deep core trace-level instrumentation hidden.
+			// Operators who want full tracing override this via
+			// `SURREAL_LOG_OTEL_LEVEL` (or `--log-otel-level`).
+			let filter = self.otel_filter.clone().unwrap_or_else(default_otel_filter);
 			// Create the otel destination layer
 			if let Some(trace_layer) = traces::new(filter)? {
 				// Add the layer to the registry
@@ -315,6 +320,16 @@ impl Builder {
 				// Retain the provider on the runtime so the batch span
 				// processor stays alive for the process lifetime.
 				tracer_provider = Some(trace_layer.provider);
+				// Install the W3C trace-context propagator globally so
+				// inbound `traceparent` / `tracestate` headers can be
+				// extracted at the HTTP / WS boundary and used as the
+				// OTel parent of the spans the server already emits.
+				// Without this, `opentelemetry::global::get_text_map_propagator()`
+				// returns a no-op and every server span is the root of a
+				// fresh trace, unlinked from the SDK caller.
+				opentelemetry::global::set_text_map_propagator(
+					opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+				);
 			}
 		}
 
@@ -428,6 +443,40 @@ impl Builder {
 /// owns the order in which providers wind down.
 pub fn shutdown() {
 	trace!("Shutting down telemetry service");
+}
+
+/// Curated default filter for the OTel export layer when
+/// `SURREAL_LOG_OTEL_LEVEL` is unset.
+///
+/// Defaults the world to `info` so the OTLP collector isn't flooded, then
+/// raises only the four span targets that an SDK user expects to see
+/// when they trace a query through the DB:
+///
+/// - `surrealdb_server::ntw::tracer` — HTTP `request` span (per HTTP request)
+/// - `surrealdb_server::telemetry::traces::rpc` — WS `rpc/call` span (per WebSocket RPC message)
+/// - `surrealdb::core::rpc` — `rpc.execute` span (per dispatched RPC method)
+/// - `surrealdb::core::dbs` — `executor` span (per query batch)
+///
+/// Operators wanting the deep nested core instrumentation set
+/// `SURREAL_LOG_OTEL_LEVEL=trace` (or any other `EnvFilter` directive
+/// string accepted by [`filter_from_value`]).
+fn default_otel_filter() -> CustomFilter {
+	let env = EnvFilter::default()
+		.add_directive(Level::INFO.into())
+		.add_directive("surrealdb::core::rpc=debug".parse().expect("static filter directive"))
+		.add_directive("surrealdb::core::dbs=debug".parse().expect("static filter directive"))
+		.add_directive(
+			"surrealdb_server::ntw::tracer=debug".parse().expect("static filter directive"),
+		)
+		.add_directive(
+			"surrealdb_server::telemetry::traces::rpc=debug"
+				.parse()
+				.expect("static filter directive"),
+		);
+	CustomFilter {
+		env,
+		spans: std::collections::HashMap::new(),
+	}
 }
 
 /// Create an EnvFilter from the given value. If the value is not a valid log
