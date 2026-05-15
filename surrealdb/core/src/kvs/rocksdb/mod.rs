@@ -24,9 +24,11 @@ use disk_space_manager::{DiskSpaceManager, DiskSpaceState, TransactionState};
 use garbage_collector::GarbageCollector;
 use memory_manager::MemoryManager;
 use rocksdb::{
-	ColumnFamilyDescriptor, DBCompactionStyle, DBCompressionType, FlushOptions, LogLevel,
-	OptimisticTransactionDB, OptimisticTransactionOptions, Options, ReadOptions,
-	SnapshotWithThreadMode, WriteOptions, properties,
+	BottommostLevelCompaction, ColumnFamilyDescriptor, CompactOptions, DBCompactionStyle,
+	DBCompressionType, FlushOptions, LogLevel, OptimisticTransactionDB,
+	OptimisticTransactionOptions, Options, ReadOptions, SnapshotWithThreadMode,
+	UniversalCompactOptions, UniversalCompactionStopStyle, WaitForCompactOptions, WriteOptions,
+	properties,
 };
 use tokio::sync::{Mutex, MutexGuard};
 
@@ -66,6 +68,14 @@ pub struct Datastore {
 	/// Whether scan/count `ReadOptions` set `verify_checksums(true)`.
 	/// When false, CRC32C verification is skipped on cold block reads.
 	scan_verify_checksums: bool,
+	/// Whether `shutdown` should run a full-keyspace compaction (down to
+	/// the bottommost level) after flushing memtables. Off by default —
+	/// the operation is O(database size) and is intended for maintenance
+	/// shutdowns rather than the SIGTERM-grace-period path.
+	compact_on_shutdown: bool,
+	/// Timeout (seconds) for the post-flush `wait_for_compact` step
+	/// during shutdown. `0` waits indefinitely.
+	shutdown_wait_for_compact_seconds: u64,
 }
 
 pub struct Transaction {
@@ -144,6 +154,19 @@ fn apply_cf_level_options(target: &mut Options, config: &RocksDbConfig) {
 	let compaction_trigger = config.file_compaction_trigger.min(i32::MAX as usize) as i32;
 	info!(target: TARGET, "Number of files to trigger compaction: {compaction_trigger}");
 	target.set_level_zero_file_num_compaction_trigger(compaction_trigger);
+	// L0 file-count watermark at which writes start to self-throttle.
+	info!(target: TARGET, "Level-0 slowdown writes trigger: {}", config.level0_slowdown_writes_trigger);
+	target.set_level_zero_slowdown_writes_trigger(config.level0_slowdown_writes_trigger);
+	// L0 file-count watermark at which writes are halted entirely.
+	info!(target: TARGET, "Level-0 stop writes trigger: {}", config.level0_stop_writes_trigger);
+	target.set_level_zero_stop_writes_trigger(config.level0_stop_writes_trigger);
+	// Periodic compaction safety net for cold ranges.
+	if config.periodic_compaction_seconds > 0 {
+		info!(target: TARGET, "Periodic compaction seconds: {}", config.periodic_compaction_seconds);
+		target.set_periodic_compaction_seconds(config.periodic_compaction_seconds);
+	} else {
+		info!(target: TARGET, "Periodic compaction: disabled");
+	}
 	// Enable separation of keys and values
 	info!(target: TARGET, "Enable separation of keys and values: {}", config.enable_blob_files);
 	target.set_enable_blob_files(config.enable_blob_files);
@@ -187,10 +210,46 @@ fn apply_cf_level_options(target: &mut Options, config: &RocksDbConfig) {
 	);
 	// Set the datastore compaction style
 	info!(target: TARGET, "Setting compaction style: {}", config.compaction_style);
-	target.set_compaction_style(match config.compaction_style.to_ascii_lowercase().as_str() {
+	let style = match config.compaction_style.to_ascii_lowercase().as_str() {
 		"universal" => DBCompactionStyle::Universal,
 		_ => DBCompactionStyle::Level,
-	});
+	};
+	target.set_compaction_style(style);
+	// Universal-compaction-specific options
+	if matches!(style, DBCompactionStyle::Universal) {
+		// Create the universal compaction options
+		let mut uco = UniversalCompactOptions::default();
+		// Set the intended size ratio
+		info!(target: TARGET, "Universal compaction size ratio: {}", config.universal_size_ratio);
+		uco.set_size_ratio(config.universal_size_ratio);
+		// Set the minimum merge width
+		let min = config.universal_min_merge_width.min(i32::MAX as u32);
+		info!(target: TARGET, "Universal compaction min merge width: {min}");
+		uco.set_min_merge_width(min as i32);
+		// Set the maximum merge width
+		let max = config.universal_max_merge_width.min(i32::MAX as u32);
+		info!(target: TARGET, "Universal compaction max merge width: {max}");
+		uco.set_max_merge_width(max as i32);
+		// Set the max size amplification percentage
+		let amp_pct = config.universal_max_size_amplification_percent.min(i32::MAX as u32);
+		info!(target: TARGET, "Universal compaction max size amplification percent: {amp_pct}");
+		uco.set_max_size_amplification_percent(amp_pct as i32);
+		// Set the compression size percentage. Note this field is `i32`
+		// rather than `u32` because RocksDB uses `-1` as the sentinel
+		// meaning "compress all output"; no clamp is needed.
+		let compress_pct = config.universal_compression_size_percent;
+		info!(target: TARGET, "Universal compaction compression size percent: {compress_pct}");
+		uco.set_compression_size_percent(compress_pct);
+		// Set the compaction stop style
+		let style = config.universal_stop_style.to_ascii_lowercase();
+		info!(target: TARGET, "Universal compaction stop style: {style}");
+		uco.set_stop_style(match style.as_str() {
+			"similar_size" | "similar" => UniversalCompactionStopStyle::Similar,
+			_ => UniversalCompactionStopStyle::Total,
+		});
+		// Set the universal compaction options
+		target.set_universal_compaction_options(&uco);
+	}
 	// Set specific compression levels
 	info!(target: TARGET, "Setting compression level");
 	target.set_compression_per_level(&[
@@ -389,6 +448,8 @@ impl Datastore {
 			prefix_extractor_enabled: config.prefix_extractor_enabled,
 			inline_scan_threshold: config.inline_scan_threshold,
 			scan_verify_checksums: config.scan_verify_checksums,
+			compact_on_shutdown: config.compact_on_shutdown,
+			shutdown_wait_for_compact_seconds: config.shutdown_wait_for_compact_seconds,
 		})
 	}
 
@@ -483,33 +544,108 @@ impl Datastore {
 		})
 	}
 
-	/// Shutdown the database
+	/// Gracefully shut down the database.
+	///
+	/// Order of operations matters and is documented inline. Roughly:
+	///
+	/// 1. Stop the application-level pumps (garbage collector, background flusher, commit
+	///    coordinator) so nothing schedules new work.
+	/// 2. Flush the WAL to storage and the memtables to L0 SSTs so the next startup needs minimal
+	///    recovery.
+	/// 3. *Optionally* run a full-keyspace compaction (`compact_on_shutdown`) down to the
+	///    bottommost level, mirroring `ALTER SYSTEM COMPACT`.
+	/// 4. Drain in-flight compactions with a bounded `wait_for_compact` so we do not abandon work
+	///    that was already in progress (typical case: the flush above just produced an L0 file that
+	///    tripped `level_zero_file_num_compaction_trigger`).
+	/// 5. `cancel_all_background_work(wait=true)` so the bg thread pool is drained cleanly before
+	///    the `Arc<OptimisticTransactionDB>` is dropped.
+	/// 6. Shut down the memory manager.
+	///
+	/// Steps 1, 2, and 6 already existed; 3-5 are new. All errors are
+	/// logged-and-continued rather than propagated: a partial shutdown is
+	/// always better than panicking on the way out.
 	pub(crate) async fn shutdown(&self) -> Result<()> {
-		// Wait for the garbage collector to finish
+		// (1) Stop the application-level pumps so nothing schedules new
+		//     compactions / flushes / commits while we tear the LSM down.
 		if let Some(garbage_collector) = &self.garbage_collector {
 			garbage_collector.shutdown()?;
 		}
-		// Wait for the background flusher to finish
 		if let Some(background_flusher) = &self.background_flusher {
 			background_flusher.shutdown()?;
 		}
-		// Wait for the commit coordinator to finish
 		if let Some(commit_coordinator) = &self.commit_coordinator {
 			commit_coordinator.shutdown()?;
 		}
-		// Create new flush options
-		let mut opts = FlushOptions::default();
-		// Wait for the sync to finish
-		opts.set_wait(true);
-		// Flush the WAL to storage
+		// (2) Build the flush options once: every flush waits for completion.
+		let mut flush_opts = FlushOptions::default();
+		flush_opts.set_wait(true);
+		// (2a) Flush the WAL so anything sitting in the WAL buffer is
+		//      fsynced to disk before we touch the memtable.
 		if let Err(e) = self.db.flush_wal(true) {
 			error!("An error occurred flushing the WAL buffer to disk: {e}");
 		}
-		// Flush the memtables to SST
-		if let Err(e) = self.db.flush_opt(&opts) {
+		// (2b) Flush the memtables so the next startup does not have to
+		//      replay them from the WAL.
+		if let Err(e) = self.db.flush_opt(&flush_opts) {
 			error!("An error occurred flushing memtables to SST files: {e}");
 		}
-		// Shutdown the memory manager
+		// (3-5) Offload the LSM-cleanup steps to the affinity pool because
+		//       `compact_range_opt` and `wait_for_compact` are synchronous
+		//       and can block for a long time on large databases. We do not
+		//       want to stall the async runtime for the duration.
+		let compact_on_shutdown = self.compact_on_shutdown;
+		let wait_for_compact_seconds = self.shutdown_wait_for_compact_seconds;
+		let cleanup: anyhow::Result<()> = affinitypool::spawn_local(move || {
+			// (3) Optional full-keyspace compaction. Mirrors the
+			//     `Transactable::compact` impl: change_level=true,
+			//     target_level=6, bottommost_level_compaction=Force so
+			//     the data lands at the configured bottommost-Zstd
+			//     level and superseded versions there are rewritten
+			//     away. Skipped by default because it is O(database
+			//     size).
+			if compact_on_shutdown {
+				info!(
+					target: TARGET,
+					"Running full-keyspace compaction on shutdown",
+				);
+				let mut copts = CompactOptions::default();
+				copts.set_exclusive_manual_compaction(true);
+				copts.set_change_level(true);
+				copts.set_target_level(6);
+				copts.set_bottommost_level_compaction(BottommostLevelCompaction::Force);
+				// Turbofish required: with `None, None` the compiler
+				// cannot otherwise infer the byte-slice types.
+				self.db.compact_range_opt::<&[u8], &[u8]>(None, None, &copts);
+			}
+			// (4) Drain in-flight compactions. After the memtable flush
+			//     above, the new L0 file may have crossed
+			//     `level_zero_file_num_compaction_trigger`; waiting for
+			//     that to settle means the next startup does not have
+			//     to recover or re-perform the work.
+			let mut wfco = WaitForCompactOptions::default();
+			// `set_timeout` takes microseconds. `0` waits indefinitely.
+			let timeout_us = wait_for_compact_seconds.saturating_mul(1_000_000);
+			wfco.set_timeout(timeout_us);
+			info!(
+				target: TARGET,
+				"Waiting for in-flight compactions to drain (timeout: {wait_for_compact_seconds}s)",
+			);
+			if let Err(e) = self.db.wait_for_compact(&wfco) {
+				error!("An error occurred waiting for compactions to drain: {e}");
+			}
+			// (5) Cancel any remaining scheduled bg work and wait for
+			//     currently-running jobs to finish. After this point
+			//     RocksDB will not start any new flush or compaction.
+			info!(target: TARGET, "Cancelling background work");
+			self.db.cancel_all_background_work(true);
+			Ok(())
+		})
+		.await;
+		if let Err(e) = cleanup {
+			error!("An error occurred during shutdown cleanup: {e}");
+		}
+		// (6) Shut down the memory manager last, after we are sure no
+		//     bg thread is going to touch the write buffer manager.
 		self.memory_manager.shutdown()?;
 		// All good
 		Ok(())
@@ -1515,22 +1651,32 @@ impl Transactable for Transaction {
 
 	async fn compact(&self, range: Option<Range<Key>>) -> anyhow::Result<()> {
 		// Create new flush options
-		let mut opts = FlushOptions::default();
+		let mut fopts = FlushOptions::default();
 		// Wait for the sync to finish
-		opts.set_wait(true);
+		fopts.set_wait(true);
+		// Create new compact options
+		let mut copts = CompactOptions::default();
+		// Set the exclusive manual compaction flag
+		copts.set_exclusive_manual_compaction(true);
+		// Allow files to move to a higher level
+		copts.set_change_level(true);
+		// Set the target level for SSTs
+		copts.set_target_level(6);
+		// Force the bottommost SSTs to be rewritten
+		copts.set_bottommost_level_compaction(BottommostLevelCompaction::Force);
 		// Spawn a new task to compact the range
 		affinitypool::spawn_local(move || {
 			// Flush the WAL to storage
 			self.db.flush_wal(true)?;
 			// Flush the memtables to SST
-			self.db.flush_opt(&opts)?;
+			self.db.flush_opt(&fopts)?;
 			// Get the compaction range
 			let (start, end) = match range {
 				Some(r) => (Some(r.start), Some(r.end)),
 				None => (None, None),
 			};
-			// Compact the specified range
-			self.db.compact_range(start, end);
+			// Compact the specified range with the bottommost target.
+			self.db.compact_range_opt(start, end, &copts);
 			// All ok
 			Ok(())
 		})

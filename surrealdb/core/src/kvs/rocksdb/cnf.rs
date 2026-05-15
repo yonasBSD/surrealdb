@@ -273,6 +273,60 @@ impl FromStr for BlobCompression {
 	}
 }
 
+/// Default file count at L0 that triggers a level-0 → level-1 compaction.
+///
+/// The RocksDB default is 4. We tighten it to 2 so that L0 stays small and
+/// the `MergingIterator` heap exercised by scans has fewer participants —
+/// each L0 file becomes its own iterator child until it is folded into L1.
+fn default_file_compaction_trigger() -> usize {
+	2
+}
+
+/// Default level-0 file count that triggers RocksDB's write slowdown.
+///
+/// The RocksDB default is 20. Lowering to 8 means writes self-throttle
+/// earlier, keeping L0 from growing during write bursts and bounding the
+/// `MergingIterator` heap size for concurrent scans. Trades a small slice
+/// of pure-write throughput for steadier read latency.
+fn default_level0_slowdown_writes_trigger() -> i32 {
+	8
+}
+
+/// Default level-0 file count that triggers RocksDB's write stall.
+///
+/// The RocksDB default is 36. Lowering to 12 is the corresponding hard cap
+/// to the slowdown trigger above: even under pathological write bursts, L0
+/// cannot accumulate beyond this many files. Should remain comfortably
+/// above `level0_slowdown_writes_trigger`.
+fn default_level0_stop_writes_trigger() -> i32 {
+	12
+}
+
+/// Default periodic compaction interval (seconds).
+///
+/// RocksDB's own default is `UINT64_MAX` (never), which means cold ranges
+/// with no overlap-driven compaction keep their superseded versions and
+/// stale data forever. One hour bounds that overhang at a modest constant
+/// background-I/O cost. Set to `0` to disable.
+fn default_periodic_compaction_seconds() -> u64 {
+	3600
+}
+
+/// Default timeout (seconds) for the post-flush `wait_for_compact` step
+/// during shutdown.
+///
+/// Once memtables are flushed at shutdown, RocksDB may have queued an
+/// auto-compaction (the new L0 file having crossed
+/// `file_compaction_trigger`). Draining that work means the next startup
+/// does not have to recover or re-perform it. Thirty seconds matches a
+/// typical container-orchestrator SIGTERM grace period so the default
+/// never causes a SIGKILL mid-wait; operators issuing maintenance
+/// shutdowns can raise it via `rocksdb_shutdown_wait_for_compact_seconds`.
+/// Set to `0` to wait indefinitely.
+fn default_shutdown_wait_for_compact_seconds() -> u64 {
+	30
+}
+
 /// Configuration for the RocksDB storage engine, parsed from query parameters.
 #[derive(Debug, Clone)]
 pub struct RocksDbConfig {
@@ -311,8 +365,23 @@ pub struct RocksDbConfig {
 	pub target_file_size_base: u64,
 	/// The target file size multiplier for each compaction level (default: 2)
 	pub target_file_size_multiplier: usize,
-	/// The number of files needed to trigger level 0 compaction (default: 4)
+	/// The number of files needed to trigger level 0 compaction (default: 2).
+	/// Tighter than the RocksDB default of 4 to keep L0 small for scans.
 	pub file_compaction_trigger: usize,
+	/// The level-0 file count that triggers RocksDB's write slowdown
+	/// (default: 8, RocksDB default: 20). Lowering self-throttles writes
+	/// earlier, bounding the `MergingIterator` heap exercised by scans.
+	pub level0_slowdown_writes_trigger: i32,
+	/// The level-0 file count that triggers RocksDB's write stall
+	/// (default: 12, RocksDB default: 36). Acts as the hard cap when the
+	/// slowdown trigger cannot keep up; should remain above
+	/// `level0_slowdown_writes_trigger`.
+	pub level0_stop_writes_trigger: i32,
+	/// The interval (seconds) at which RocksDB rewrites any SST not touched
+	/// by overlap-driven compaction. Bounds the version-overhang and
+	/// tombstone accumulation on cold ranges. Set to 0 to disable
+	/// (default: 3600, RocksDB default: never).
+	pub periodic_compaction_seconds: u64,
 	/// The readahead buffer size used during compaction
 	/// (default: dynamic from 4 MiB to 16 MiB)
 	pub compaction_readahead_size: usize,
@@ -331,11 +400,44 @@ pub struct RocksDbConfig {
 	pub keep_log_file_num: usize,
 	/// The information log level of the RocksDB library (default: "warn")
 	pub storage_log_level: String,
-	/// Use to specify the database compaction style (default: "level")
+	/// Use to specify the database compaction style (default: "level").
+	/// Accepted values: "level" | "universal". When set to "universal" the
+	/// `universal_*` fields below configure the universal compaction
+	/// algorithm; otherwise they are ignored.
 	pub compaction_style: String,
-	/// The size of the window used to track deletions (default: 1000)
+	/// Universal compaction: size-ratio percentage controlling how much
+	/// slack the next file's size has when picking files to merge
+	/// (default: 1, RocksDB default: 1). Only applies when
+	/// `compaction_style = "universal"`.
+	pub universal_size_ratio: i32,
+	/// Universal compaction: minimum number of files in a single merge
+	/// (default: 2, RocksDB default: 2). Only applies when
+	/// `compaction_style = "universal"`.
+	pub universal_min_merge_width: u32,
+	/// Universal compaction: maximum number of files in a single merge
+	/// (default: u32::MAX, RocksDB sentinel for "unlimited"). Only applies
+	/// when `compaction_style = "universal"`.
+	pub universal_max_merge_width: u32,
+	/// Universal compaction: maximum acceptable storage amplification, as
+	/// a percentage of the live data size (default: 200, RocksDB default:
+	/// 200). Only applies when `compaction_style = "universal"`.
+	pub universal_max_size_amplification_percent: u32,
+	/// Universal compaction: percentage of output files to compress
+	/// (default: -1, RocksDB sentinel for "compress all output"). Only
+	/// applies when `compaction_style = "universal"`.
+	pub universal_compression_size_percent: i32,
+	/// Universal compaction: stop-style governing when a merge is judged
+	/// large enough to halt at (default: "total"; accepted values:
+	/// "similar_size" | "total"). Only applies when
+	/// `compaction_style = "universal"`.
+	pub universal_stop_style: String,
+	/// The size of the window used to track deletions (default: 500).
+	/// Tighter than the previous 1000 to react to delete-driven compaction
+	/// triggers more eagerly, reducing tombstone overhang seen by scans.
 	pub deletion_factory_window_size: usize,
-	/// The number of deletions to track in the window (default: 50)
+	/// The number of deletions to track in the window (default: 25).
+	/// Halved from 50 to keep the trigger ratio aligned with the smaller
+	/// window above.
 	pub deletion_factory_delete_count: usize,
 	/// The ratio of deletions to track in the window (default: 0.5)
 	pub deletion_factory_ratio: f64,
@@ -454,6 +556,24 @@ pub struct RocksDbConfig {
 	/// Applies to both `scan_read_options` and `count_read_options`
 	/// (default: true).
 	pub scan_verify_checksums: bool,
+
+	/// Whether the graceful-shutdown path runs a full-keyspace compaction
+	/// (down to the bottommost level, mirroring `ALTER SYSTEM COMPACT`)
+	/// after flushing memtables. Off by default because the operation is
+	/// O(database size) and can take minutes-to-hours on large datasets,
+	/// which conflicts with typical container-orchestrator SIGTERM grace
+	/// periods. Useful for maintenance shutdowns and benchmark setups
+	/// where the next startup is expected to be scan-heavy
+	/// (default: false).
+	pub compact_on_shutdown: bool,
+
+	/// Timeout (seconds) for the post-flush `wait_for_compact` step during
+	/// graceful shutdown. After memtables flush to L0 the engine may have
+	/// auto-scheduled an L0→L1 compaction; waiting for it to drain means
+	/// the next startup does not have to recover or re-perform it. Set to
+	/// `0` to wait indefinitely
+	/// (default: 30).
+	pub shutdown_wait_for_compact_seconds: u64,
 }
 
 impl Default for RocksDbConfig {
@@ -470,15 +590,24 @@ impl Default for RocksDbConfig {
 			wal_size_limit: default_wal_size_limit(),
 			target_file_size_base: default_target_file_size_base(),
 			target_file_size_multiplier: 2,
-			file_compaction_trigger: 4,
+			file_compaction_trigger: default_file_compaction_trigger(),
+			level0_slowdown_writes_trigger: default_level0_slowdown_writes_trigger(),
+			level0_stop_writes_trigger: default_level0_stop_writes_trigger(),
+			periodic_compaction_seconds: default_periodic_compaction_seconds(),
 			compaction_readahead_size: default_compaction_readahead_size(),
 			max_concurrent_subcompactions: default_max_concurrent_subcompactions(),
 			enable_pipelined_writes: true,
 			keep_log_file_num: default_keep_log_file_num(),
 			storage_log_level: "warn".to_owned(),
 			compaction_style: "level".to_owned(),
-			deletion_factory_window_size: 1000,
-			deletion_factory_delete_count: 50,
+			universal_size_ratio: 1,
+			universal_min_merge_width: 2,
+			universal_max_merge_width: u32::MAX,
+			universal_max_size_amplification_percent: 200,
+			universal_compression_size_percent: -1,
+			universal_stop_style: "total".to_owned(),
+			deletion_factory_window_size: 500,
+			deletion_factory_delete_count: 25,
 			deletion_factory_ratio: 0.5,
 			enable_blob_files: default_enable_blob_files(),
 			min_blob_size: 4 * 1024,
@@ -504,6 +633,8 @@ impl Default for RocksDbConfig {
 			memtable_prefix_bloom_ratio: 0.1,
 			inline_scan_threshold: default_inline_scan_threshold(),
 			scan_verify_checksums: true,
+			compact_on_shutdown: false,
+			shutdown_wait_for_compact_seconds: default_shutdown_wait_for_compact_seconds(),
 		}
 	}
 }
@@ -520,6 +651,12 @@ impl Config for RocksDbConfig {
 			.parse_key("rocksdb_target_file_size_base", &mut self.target_file_size_base)
 			.parse_key("rocksdb_target_file_size_multiplier", &mut self.target_file_size_multiplier)
 			.parse_key("rocksdb_file_compaction_trigger", &mut self.file_compaction_trigger)
+			.parse_key(
+				"rocksdb_level0_slowdown_writes_trigger",
+				&mut self.level0_slowdown_writes_trigger,
+			)
+			.parse_key("rocksdb_level0_stop_writes_trigger", &mut self.level0_stop_writes_trigger)
+			.parse_key("rocksdb_periodic_compaction_seconds", &mut self.periodic_compaction_seconds)
 			.parse_key("rocksdb_compaction_readahead_size", &mut self.compaction_readahead_size)
 			.parse_key(
 				"rocksdb_max_concurrent_subcompactions",
@@ -529,6 +666,18 @@ impl Config for RocksDbConfig {
 			.parse_key("rocksdb_keep_log_file_num", &mut self.keep_log_file_num)
 			.parse_key("rocksdb_storage_log_level", &mut self.storage_log_level)
 			.parse_key("rocksdb_compaction_style", &mut self.compaction_style)
+			.parse_key("rocksdb_universal_size_ratio", &mut self.universal_size_ratio)
+			.parse_key("rocksdb_universal_min_merge_width", &mut self.universal_min_merge_width)
+			.parse_key("rocksdb_universal_max_merge_width", &mut self.universal_max_merge_width)
+			.parse_key(
+				"rocksdb_universal_max_size_amplification_percent",
+				&mut self.universal_max_size_amplification_percent,
+			)
+			.parse_key(
+				"rocksdb_universal_compression_size_percent",
+				&mut self.universal_compression_size_percent,
+			)
+			.parse_key("rocksdb_universal_stop_style", &mut self.universal_stop_style)
 			.parse_key(
 				"rocksdb_deletion_factory_window_size",
 				&mut self.deletion_factory_window_size,
@@ -575,7 +724,12 @@ impl Config for RocksDbConfig {
 			.parse_key_bool("rocksdb_prefix_extractor_enabled", &mut self.prefix_extractor_enabled)
 			.parse_key_bool("rocksdb_whole_key_filtering", &mut self.whole_key_filtering)
 			.parse_key("rocksdb_memtable_prefix_bloom_ratio", &mut self.memtable_prefix_bloom_ratio)
-			.parse_key_bool("rocksdb_scan_verify_checksums", &mut self.scan_verify_checksums);
+			.parse_key_bool("rocksdb_scan_verify_checksums", &mut self.scan_verify_checksums)
+			.parse_key_bool("rocksdb_compact_on_shutdown", &mut self.compact_on_shutdown)
+			.parse_key(
+				"rocksdb_shutdown_wait_for_compact_seconds",
+				&mut self.shutdown_wait_for_compact_seconds,
+			);
 
 		if map.has_key("datastore_sync") {
 			map.parse_key("datastore_sync", &mut self.sync_mode);
@@ -600,6 +754,77 @@ mod test {
 		assert!(!config.versioned);
 		assert_eq!(config.retention, Duration::ZERO);
 		assert_eq!(config.sync_mode, SyncMode::Every);
+	}
+
+	#[test]
+	fn test_rocksdb_config_compaction_defaults() {
+		let config = ConfigMap::empty().load::<RocksDbConfig>();
+		// Compaction-trigger defaults tightened to favour scans.
+		assert_eq!(config.file_compaction_trigger, 2);
+		assert_eq!(config.level0_slowdown_writes_trigger, 8);
+		assert_eq!(config.level0_stop_writes_trigger, 12);
+		// Periodic compaction enabled by default (one hour).
+		assert_eq!(config.periodic_compaction_seconds, 3600);
+		// Deletion-collector factory window halved.
+		assert_eq!(config.deletion_factory_window_size, 500);
+		assert_eq!(config.deletion_factory_delete_count, 25);
+		assert!((config.deletion_factory_ratio - 0.5).abs() < f64::EPSILON);
+		// Universal-compaction knobs default to RocksDB's own defaults.
+		assert_eq!(config.compaction_style, "level");
+		assert_eq!(config.universal_size_ratio, 1);
+		assert_eq!(config.universal_min_merge_width, 2);
+		assert_eq!(config.universal_max_merge_width, u32::MAX);
+		assert_eq!(config.universal_max_size_amplification_percent, 200);
+		assert_eq!(config.universal_compression_size_percent, -1);
+		assert_eq!(config.universal_stop_style, "total");
+		// Shutdown defaults: drain in-flight compactions for up to 60s but
+		// never run a full-keyspace compaction unless asked.
+		assert!(!config.compact_on_shutdown);
+		assert_eq!(config.shutdown_wait_for_compact_seconds, 30);
+	}
+
+	#[test]
+	fn test_rocksdb_config_compaction_overrides() {
+		let map = ConfigMap::empty()
+			.with_key_value("rocksdb_file_compaction_trigger", "5")
+			.with_key_value("rocksdb_level0_slowdown_writes_trigger", "16")
+			.with_key_value("rocksdb_level0_stop_writes_trigger", "24")
+			.with_key_value("rocksdb_periodic_compaction_seconds", "0");
+		let config = map.load::<RocksDbConfig>();
+		assert_eq!(config.file_compaction_trigger, 5);
+		assert_eq!(config.level0_slowdown_writes_trigger, 16);
+		assert_eq!(config.level0_stop_writes_trigger, 24);
+		assert_eq!(config.periodic_compaction_seconds, 0);
+	}
+
+	#[test]
+	fn test_rocksdb_config_shutdown_overrides() {
+		let map = ConfigMap::empty()
+			.with_key_value("rocksdb_compact_on_shutdown", "true")
+			.with_key_value("rocksdb_shutdown_wait_for_compact_seconds", "5");
+		let config = map.load::<RocksDbConfig>();
+		assert!(config.compact_on_shutdown);
+		assert_eq!(config.shutdown_wait_for_compact_seconds, 5);
+	}
+
+	#[test]
+	fn test_rocksdb_config_universal_overrides() {
+		let map = ConfigMap::empty()
+			.with_key_value("rocksdb_compaction_style", "universal")
+			.with_key_value("rocksdb_universal_size_ratio", "5")
+			.with_key_value("rocksdb_universal_min_merge_width", "3")
+			.with_key_value("rocksdb_universal_max_merge_width", "16")
+			.with_key_value("rocksdb_universal_max_size_amplification_percent", "150")
+			.with_key_value("rocksdb_universal_compression_size_percent", "75")
+			.with_key_value("rocksdb_universal_stop_style", "similar_size");
+		let config = map.load::<RocksDbConfig>();
+		assert_eq!(config.compaction_style, "universal");
+		assert_eq!(config.universal_size_ratio, 5);
+		assert_eq!(config.universal_min_merge_width, 3);
+		assert_eq!(config.universal_max_merge_width, 16);
+		assert_eq!(config.universal_max_size_amplification_percent, 150);
+		assert_eq!(config.universal_compression_size_percent, 75);
+		assert_eq!(config.universal_stop_style, "similar_size");
 	}
 
 	#[test]
