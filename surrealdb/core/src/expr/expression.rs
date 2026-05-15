@@ -448,13 +448,11 @@ impl Expr {
 			Expr::Foreach(foreach_statement) => {
 				foreach_statement.compute(stk, ctx, &opt, doc).await
 			}
-			Expr::Let(_) => {
-				//TODO: This error needs to be improved or it needs to be rejected in the
-				// parser.
-				Err(ControlFlow::Err(anyhow::Error::new(Error::unreachable(
-					"Set statement outside of block",
-				))))
-			}
+			Expr::Let(_) => Err(ControlFlow::Err(anyhow::Error::new(Error::InvalidStatement(
+				"LET statements can only appear at the top level of a query or inside a block \
+				 expression"
+					.to_string(),
+			)))),
 			Expr::Sleep(sleep_statement) => {
 				sleep_statement.compute(ctx, &opt, doc).await.map_err(ControlFlow::Err)
 			}

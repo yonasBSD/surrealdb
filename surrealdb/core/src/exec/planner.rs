@@ -494,10 +494,13 @@ impl<'ctx> Planner<'ctx> {
 				..
 			} => Box::pin(self.physical_statement_subquery(expr)).await,
 
-			// LET is handled by block/sequence operators, not as an expression
-			Expr::Let(_) => Err(Error::Query {
-				message: "LET statements are handled by block or sequence operators".to_string(),
-			}),
+			// LET is only valid as a top-level statement or inside a block; reject any
+			// other position (function arg, array element, object value, etc.).
+			Expr::Let(_) => Err(Error::InvalidStatement(
+				"LET statements can only appear at the top level of a query or inside a block \
+				 expression"
+					.to_string(),
+			)),
 
 			// DDL — cannot be used in expression context
 			Expr::Define(_) | Expr::Remove(_) | Expr::Rebuild(_) | Expr::Alter(_) => {
