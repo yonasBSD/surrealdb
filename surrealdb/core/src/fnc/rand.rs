@@ -81,6 +81,15 @@ pub fn float((NoneOrRange(range),): (NoneOrRange<f64>,)) -> Result<Value> {
 	Ok(Value::from(v))
 }
 
+// Without this check, a negative length wraps to a huge `usize` and either
+// panics `random_range` ("cannot sample empty range") or OOMs the allocator
+// when used as a string length.
+fn to_random_len(name: &str, val: i64) -> Result<usize> {
+	usize::try_from(val).map_err(|_| {
+		anyhow::Error::new(Error::ArithmeticNegativeOverflow(format!("{name}({val})")))
+	})
+}
+
 pub fn id((Optional(arg1), Optional(arg2)): (Optional<i64>, Optional<i64>)) -> Result<Value> {
 	// Set a reasonable maximum length
 	const LIMIT: i64 = 64;
@@ -105,8 +114,9 @@ pub fn id((Optional(arg1), Optional(arg2)): (Optional<i64>, Optional<i64>)) -> R
 				),
 			}
 		);
-
-		rand::rng().random_range((lower as usize)..=(upper as usize))
+		let lower = to_random_len("rand::id", lower)?;
+		let upper = to_random_len("rand::id", upper)?;
+		rand::rng().random_range(lower..=upper)
 	} else {
 		ensure!(
 			lower <= LIMIT,
@@ -117,7 +127,7 @@ pub fn id((Optional(arg1), Optional(arg2)): (Optional<i64>, Optional<i64>)) -> R
 				),
 			}
 		);
-		lower as usize
+		to_random_len("rand::id", lower)?
 	};
 
 	// Generate the random id
@@ -142,7 +152,7 @@ pub fn int((NoneOrRange(range),): (NoneOrRange<i64>,)) -> Result<Value> {
 pub fn string((Optional(arg1), Optional(arg2)): (Optional<i64>, Optional<i64>)) -> Result<Value> {
 	// Set a reasonable maximum length
 	const LIMIT: i64 = 65536;
-	// rand::id(NULL,10) is not allowed by the calling infrastructure.
+	// rand::string(NULL,10) is not allowed by the calling infrastructure.
 	let lower = arg1.unwrap_or(32);
 	let len = if let Some(upper) = arg2 {
 		ensure!(
@@ -162,8 +172,9 @@ pub fn string((Optional(arg1), Optional(arg2)): (Optional<i64>, Optional<i64>)) 
 				),
 			}
 		);
-
-		rand::rng().random_range((lower as usize)..=(upper as usize))
+		let lower = to_random_len("rand::string", lower)?;
+		let upper = to_random_len("rand::string", upper)?;
+		rand::rng().random_range(lower..=upper)
 	} else {
 		ensure!(
 			lower <= LIMIT,
@@ -174,7 +185,7 @@ pub fn string((Optional(arg1), Optional(arg2)): (Optional<i64>, Optional<i64>)) 
 				),
 			}
 		);
-		lower as usize
+		to_random_len("rand::string", lower)?
 	};
 	// Generate the random string
 	Ok(Alphanumeric.sample_string(&mut rand::rng(), len).into())
