@@ -5,6 +5,7 @@ use crate::catalog::providers::DatabaseProvider;
 use crate::ctx::FrozenContext;
 use crate::dbs::Options;
 use crate::err::Error;
+use crate::expr::model::get_model_path;
 use crate::expr::{Base, Value};
 use crate::iam::{Action, ResourceKind};
 
@@ -41,7 +42,11 @@ impl RemoveModelStatement {
 		txn.del(&key).await?;
 		// Clear the cache
 		txn.clear_cache();
-		// TODO Remove the model file from storage
+		// `obs::del` is idempotent, so this is safe even for definitions
+		// registered without an uploaded artifact (e.g. via import).
+		let (ns_name, db_name) = opt.ns_db()?;
+		let path = get_model_path(ns_name, db_name, &ml.name, &ml.version, &ml.hash);
+		crate::obs::del(&path).await?;
 		// Ok all good
 		Ok(Value::None)
 	}
