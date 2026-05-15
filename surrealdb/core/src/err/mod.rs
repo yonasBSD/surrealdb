@@ -345,6 +345,16 @@ pub(crate) enum Error {
 		name: String,
 	},
 
+	/// The analyzer cannot be removed because it is referenced by an index
+	#[error(
+		"The analyzer '{name}' is in use by index '{index}' on table '{table}' and cannot be removed"
+	)]
+	AzInUse {
+		name: String,
+		table: String,
+		index: String,
+	},
+
 	/// The requested api does not exist
 	#[error("The bucket '{name}' does not exist")]
 	BuNotFound {
