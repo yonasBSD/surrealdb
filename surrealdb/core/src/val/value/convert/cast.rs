@@ -457,7 +457,7 @@ impl Cast for Bytes {
 	fn can_cast(v: &Value) -> bool {
 		match v {
 			Value::Bytes(_) | Value::String(_) => true,
-			Value::Array(x) => x.iter().all(|x| x.can_cast_to::<i64>()),
+			Value::Array(x) => x.iter().all(|v| value_to_byte(v).is_some()),
 			_ => false,
 		}
 	}
@@ -466,32 +466,33 @@ impl Cast for Bytes {
 		match v {
 			Value::Bytes(b) => Ok(b),
 			Value::String(s) => Ok(Bytes::from(s.into_string().into_bytes())),
-			Value::Array(x) => {
-				// Optimization to check first if the conversion can succeed to avoid possibly
-				// cloning large values.
-				if !x.0.iter().all(|x| x.can_cast_to::<i64>()) {
-					return Err(CastError::InvalidKind {
-						from: x.into(),
-						into: "bytes".to_owned(),
-					});
-				}
-
-				let mut res = Vec::new();
-
-				for v in x.0 {
-					// Condition checked above
-					let x = v.clone().cast_to::<i64>().expect("value checked to be castable above");
-					// TODO: Fix truncation.
-					res.push(x as u8);
-				}
-
-				Ok(Bytes::from(res))
-			}
+			Value::Array(x) => match x.0.iter().map(value_to_byte).collect::<Option<Vec<u8>>>() {
+				Some(bytes) => Ok(Bytes::from(bytes)),
+				None => Err(CastError::InvalidKind {
+					from: Value::Array(x),
+					into: "bytes".to_owned(),
+				}),
+			},
 			_ => Err(CastError::InvalidKind {
 				from: v,
 				into: "bytes".into(),
 			}),
 		}
+	}
+}
+
+// `TryFrom<Number> for u8` is intentionally not reused: it truncates fractional
+// floats (via `num_traits::ToPrimitive::to_u8`) instead of rejecting them, which
+// would reintroduce the truncation bug this helper is here to prevent.
+fn value_to_byte(v: &Value) -> Option<u8> {
+	match v {
+		Value::Number(Number::Int(x)) => u8::try_from(*x).ok(),
+		Value::Number(Number::Float(f)) if f.fract() == 0.0 => u8::try_from(*f as i64).ok(),
+		Value::Number(Number::Decimal(d)) if d.is_integer() => {
+			u8::try_from(i64::try_from(*d).ok()?).ok()
+		}
+		Value::String(s) => s.parse::<u8>().ok(),
+		_ => None,
 	}
 }
 
