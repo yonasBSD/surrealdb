@@ -23,7 +23,7 @@ use crate::exec::{
 };
 use crate::expr::idiom::Idiom;
 use crate::expr::part::{DestructurePart, Part};
-use crate::val::{Object, Value};
+use crate::val::{Object, Strand, Value};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -42,17 +42,31 @@ fn parse_output_path(name: &str) -> FieldPath {
 	FieldPath::field(name.to_string())
 }
 
-/// Set a value at the given [`FieldPath`] on an [`Object`].
+/// Set a value at the given [`FieldPath`] on an [`Object`], consuming `value`.
 ///
 /// Internally wraps the object in a `Value::Object` so that
-/// `Value::set_at_field_path` can be used, then unwraps the result back.
+/// `Value::set_at_field_path_owned` can be used, then unwraps the result back.
+/// Taking `value` by value avoids the per-leaf clone that the borrowed form
+/// pays inside the recursive path walk.
 #[inline]
-fn set_field_on_object(obj: &mut Object, path: &FieldPath, value: &Value) {
+fn set_field_on_object(obj: &mut Object, path: &FieldPath, value: Value) {
 	let mut target = Value::Object(std::mem::take(obj));
-	target.set_at_field_path(path, value);
+	target.set_at_field_path_owned(path, value);
 	if let Value::Object(new_obj) = target {
 		*obj = new_obj;
 	}
+}
+
+/// Drain `writes` into `obj` and return it as a `Value::Object`.
+///
+/// The drain leaves `writes` empty (capacity retained) so the caller can reuse
+/// it across rows without re-allocating.
+#[inline]
+fn apply_field_writes(mut obj: Object, writes: &mut Vec<(FieldPath, Value)>) -> Value {
+	for (path, v) in writes.drain(..) {
+		set_field_on_object(&mut obj, &path, v);
+	}
+	Value::Object(obj)
 }
 
 // ---------------------------------------------------------------------------
@@ -253,54 +267,56 @@ impl ExecOperator for Project {
 							}
 						}
 					} else {
+						// Reused across rows; `drain(..)` empties it for the next
+						// iteration while keeping the backing buffer.
+						let mut field_writes: Vec<(FieldPath, Value)> =
+							Vec::with_capacity(fields.len());
 						for value in batch.values {
-							let row_ctx = eval_ctx.with_value_and_doc(&value);
+							// For RecordId inputs, resolve the target record FIRST.
+							// When the record is missing or resolves to a non-Object,
+							// field expressions must not run — field expressions can
+							// have side effects (mutating subqueries) that must not
+							// fire for rows we'll then drop or pass through raw.
+							let fetched_obj: Option<Object> = if let Value::RecordId(rid) = &value {
+								match super::fetch::fetch_record(eval_ctx.exec_ctx, rid).await? {
+									Value::Object(obj) => Some(obj),
+									Value::None => continue,
+									mut raw => {
+										for field in omit.iter() {
+											omit_field_sync(&mut raw, field);
+										}
+										values.push(raw);
+										continue;
+									}
+								}
+							} else {
+								None
+							};
 
-							let mut output_value = match &value {
-								Value::Object(original) => {
-									let mut obj = original.clone();
-									for field in fields.iter() {
-										evaluate_and_set_field(&mut obj, field, row_ctx.clone())
-											.await?;
-									}
-									Value::Object(obj)
+							// Evaluate every field expression against the original
+							// `value` (still borrowed by `row_ctx`); writes are
+							// applied later, after `value` is freely movable.
+							field_writes.clear();
+							if !fields.is_empty() {
+								let row_ctx = eval_ctx.with_value_and_doc(&value);
+								for field in fields.iter() {
+									compute_field_writes(field, row_ctx.clone(), &mut field_writes)
+										.await?;
 								}
-								Value::RecordId(rid) => {
-									let fetched =
-										super::fetch::fetch_record(eval_ctx.exec_ctx, rid).await?;
-									match fetched {
-										Value::Object(mut obj) => {
-											for field in fields.iter() {
-												evaluate_and_set_field(
-													&mut obj,
-													field,
-													row_ctx.clone(),
-												)
-												.await?;
-											}
-											Value::Object(obj)
-										}
-										Value::None => {
-											continue;
-										}
-										other => other,
+							}
+
+							// Materialize the output. `value` is no longer borrowed,
+							// so its Object payload can be moved out instead of
+							// deep-cloned.
+							let mut output_value = if let Some(obj) = fetched_obj {
+								apply_field_writes(obj, &mut field_writes)
+							} else {
+								match value {
+									Value::Object(obj) => {
+										apply_field_writes(obj, &mut field_writes)
 									}
-								}
-								other => {
-									if fields.is_empty() {
-										other.clone()
-									} else {
-										let mut obj = Object::default();
-										for field in fields.iter() {
-											evaluate_and_set_field(
-												&mut obj,
-												field,
-												row_ctx.clone(),
-											)
-											.await?;
-										}
-										Value::Object(obj)
-									}
+									other if fields.is_empty() => other,
+									_ => apply_field_writes(Object::default(), &mut field_writes),
 								}
 							};
 
@@ -342,7 +358,7 @@ impl ExecOperator for Project {
 								set_field_on_object(
 									&mut objects[i],
 									&field.output_path,
-									&field_value,
+									field_value,
 								);
 							}
 						}
@@ -373,6 +389,52 @@ impl ExecOperator for Project {
 // evaluate_and_set_field
 // ---------------------------------------------------------------------------
 
+/// Evaluate a field expression and collect the resulting `(FieldPath, Value)`
+/// writes into `writes`, without touching any output object.
+///
+/// Used by the `include_all` path so that field expressions can be evaluated
+/// while the input row is still borrowed (for `row_ctx`), then applied later
+/// to an output Object that has been moved out of the input value — avoiding
+/// the deep clone of the input Object that mutating-in-place would force.
+///
+/// Semantics mirror [`evaluate_and_set_field`]:
+/// - Projection functions with an explicit alias collapse to one write at the alias path (single
+///   binding) or one write of an Array (multiple bindings).
+/// - Projection functions without an alias produce one write per binding, keyed by the binding's
+///   idiom.
+/// - Regular expressions produce one write at `field.output_path`.
+async fn compute_field_writes(
+	field: &FieldSelection,
+	eval_ctx: EvalContext<'_>,
+	writes: &mut Vec<(FieldPath, Value)>,
+) -> Result<(), crate::expr::ControlFlow> {
+	if field.expr.is_projection_function()
+		&& let Some(bindings) = field.expr.evaluate_projection(eval_ctx.clone()).await?
+	{
+		if field.has_explicit_alias {
+			let value = if bindings.len() == 1 {
+				bindings.into_iter().next().expect("bindings verified non-empty").1
+			} else {
+				Value::Array(bindings.into_iter().map(|(_, v)| v).collect::<Vec<_>>().into())
+			};
+			writes.push((field.output_path.clone(), value));
+		} else {
+			for (idiom, value) in bindings {
+				if let Ok(path) = FieldPath::try_from(&idiom)
+					&& !path.is_empty()
+				{
+					writes.push((path, value));
+				}
+			}
+		}
+		return Ok(());
+	}
+
+	let field_value = field.expr.evaluate(eval_ctx).await?;
+	writes.push((field.output_path.clone(), field_value));
+	Ok(())
+}
+
 /// Evaluate a field expression and set the resulting value(s) on the output object.
 ///
 /// For regular expressions, evaluates the expression and sets the result at the output_path.
@@ -395,14 +457,14 @@ async fn evaluate_and_set_field(
 			} else {
 				Value::Array(bindings.into_iter().map(|(_, v)| v).collect::<Vec<_>>().into())
 			};
-			set_field_on_object(obj, &field.output_path, &value);
+			set_field_on_object(obj, &field.output_path, value);
 		} else {
 			// No alias - use the dynamic field names from the function
 			for (idiom, value) in bindings {
 				if let Ok(path) = FieldPath::try_from(&idiom)
 					&& !path.is_empty()
 				{
-					set_field_on_object(obj, &path, &value);
+					set_field_on_object(obj, &path, value);
 				}
 			}
 		}
@@ -411,7 +473,7 @@ async fn evaluate_and_set_field(
 	}
 
 	let field_value = field.expr.evaluate(eval_ctx).await?;
-	set_field_on_object(obj, &field.output_path, &field_value);
+	set_field_on_object(obj, &field.output_path, field_value);
 	Ok(())
 }
 
@@ -526,19 +588,24 @@ fn omit_destructure_fields(obj: &mut Object, parts: &[DestructurePart]) {
 // ============================================================================
 
 /// Specifies how to handle a field in SelectProject.
+///
+/// Field names are stored as [`Strand`] rather than `String` so that per-row
+/// inserts into the output [`Object`] only pay a 24-byte bitwise copy for
+/// short names (the common case), avoiding the heap allocation that
+/// `String::clone` would do on every row × projection.
 #[derive(Debug, Clone)]
 pub enum Projection {
 	/// Include a field with its original name
-	Include(String),
+	Include(Strand),
 	/// Rename a field (from internal name to output name)
 	Rename {
-		from: String,
-		to: String,
+		from: Strand,
+		to: Strand,
 	},
 	/// Include all fields from input (SELECT *)
 	All,
 	/// Exclude a field (for OMIT)
-	Omit(String),
+	Omit(Strand),
 }
 
 /// Simplified project operator that only does field selection and renaming.
@@ -589,7 +656,7 @@ impl ExecOperator for SelectProject {
 			.projections
 			.iter()
 			.map(|p| match p {
-				Projection::Include(name) => name.clone(),
+				Projection::Include(name) => name.to_string(),
 				Projection::Rename {
 					from,
 					to,
@@ -771,7 +838,7 @@ mod tests {
 		]);
 
 		let projections =
-			vec![Projection::Include("a".to_string()), Projection::Include("c".to_string())];
+			vec![Projection::Include(Strand::new("a")), Projection::Include(Strand::new("c"))];
 
 		let result = apply_projections_to_object(obj, &projections, false);
 		if let Value::Object(result_obj) = result {
@@ -788,8 +855,8 @@ mod tests {
 		let obj = Object::from(vec![("old_name".to_string(), Value::from(42))]);
 
 		let projections = vec![Projection::Rename {
-			from: "old_name".to_string(),
-			to: "new_name".to_string(),
+			from: Strand::new("old_name"),
+			to: Strand::new("new_name"),
 		}];
 
 		let result = apply_projections_to_object(obj, &projections, false);
@@ -810,7 +877,7 @@ mod tests {
 			("c".to_string(), Value::from(3)),
 		]);
 
-		let projections = vec![Projection::All, Projection::Omit("b".to_string())];
+		let projections = vec![Projection::All, Projection::Omit(Strand::new("b"))];
 
 		let result = apply_projections_to_object(obj, &projections, true);
 		if let Value::Object(result_obj) = result {

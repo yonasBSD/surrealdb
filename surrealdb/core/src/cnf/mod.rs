@@ -205,6 +205,12 @@ pub struct CommonConfig {
 	/// Set to 0 to disable operator-level pipeline buffering.
 	/// (default: 2)
 	pub operator_buffer_size: usize,
+	/// Default batch size for scan operators that collect records before
+	/// yielding downstream (table/index/record-id/graph/reference scans).
+	/// Memory-constrained deployments can reduce this to lower per-pipeline
+	/// in-flight memory at the cost of slightly more per-batch dispatch
+	/// overhead. Per-batch unit is values, not bytes. (default: 1000)
+	pub scan_batch_size: usize,
 	/// The maximum size of the priority queue triggering usage of the priority
 	/// queue for the result collector.
 	pub max_order_limit_priority_queue_size: u32,
@@ -302,6 +308,7 @@ impl Default for CommonConfig {
 			datastore_cache_size: 1_000,
 			export_batch_size: 1000,
 			operator_buffer_size: 2,
+			scan_batch_size: crate::exec::operators::scan::common::DEFAULT_SCAN_BATCH_SIZE,
 			max_order_limit_priority_queue_size: 1000,
 			scripting_max_stack_size: 256 * 1024,
 			scripting_max_memory_limit: 2 << 20,
@@ -349,6 +356,7 @@ impl Config for CommonConfig {
 		.parse_key("surrealism_cache_size", &mut self.surrealism_cache_size)
 		.parse_key("export_batch_size", &mut self.export_batch_size)
 		.parse_key("operator_buffer_size", &mut self.operator_buffer_size)
+		.parse_key("scan_batch_size", &mut self.scan_batch_size)
 		.parse_key(
 			"max_order_limit_priority_queue_size",
 			&mut self.max_order_limit_priority_queue_size,

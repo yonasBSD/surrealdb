@@ -37,8 +37,8 @@ use crate::expr::FlowResult;
 /// output fits in roughly one batch, so spawning a dedicated task cannot
 /// overlap meaningful work. Cooperative prefetch is used instead.
 ///
-/// This matches the scan batch size used by most operators (see
-/// [`super::operators::scan::common::BATCH_SIZE`]).
+/// This matches the default scan batch size used by most operators (see
+/// [`super::operators::scan::common::DEFAULT_SCAN_BATCH_SIZE`]).
 #[cfg(not(target_family = "wasm"))]
 const SMALL_BOUNDED_THRESHOLD: usize = 1000;
 

@@ -457,7 +457,11 @@ impl<'ctx> Planner<'ctx> {
 				}
 
 				let computed = if registry.has_expressions_for_point(ComputePoint::Sort) {
-					let compute_fields = registry.get_expressions_for_point(ComputePoint::Sort);
+					let compute_fields = registry
+						.get_expressions_for_point(ComputePoint::Sort)
+						.into_iter()
+						.map(|(name, expr)| (crate::val::Strand::new(name), expr))
+						.collect();
 					Arc::new(Compute::new(input, compute_fields)) as Arc<dyn ExecOperator>
 				} else {
 					input

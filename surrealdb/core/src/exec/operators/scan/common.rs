@@ -11,8 +11,12 @@ use crate::expr::ControlFlow;
 use crate::kvs::{CachePolicy, Transaction};
 use crate::val::{RecordId, RecordIdKey, Value};
 
-/// Default batch size for collecting records before yielding downstream.
-pub(crate) const BATCH_SIZE: usize = 1000;
+/// Default value for [`crate::cnf::CommonConfig::scan_batch_size`] — the
+/// number of records each scan operator buffers before yielding a batch
+/// downstream. Read at runtime from config (overridable via
+/// `SURREAL_SCAN_BATCH_SIZE`); this constant exists only as the
+/// documentation anchor for that default.
+pub(crate) const DEFAULT_SCAN_BATCH_SIZE: usize = 1000;
 
 /// Convert a [`Value`] to a [`RecordIdKey`] for use in key range construction.
 ///

@@ -205,7 +205,7 @@ impl<'ctx> Planner<'ctx> {
 					let mut projections = vec![Projection::All];
 					for expr in &omit {
 						if let Expr::Idiom(idiom) = expr {
-							projections.push(Projection::Omit(idiom_to_field_name(idiom)));
+							projections.push(Projection::Omit(idiom_to_field_name(idiom).into()));
 						}
 					}
 					return Ok(Arc::new(SelectProject::new(
@@ -319,18 +319,18 @@ impl<'ctx> Planner<'ctx> {
 					match classification {
 						ProjectedField::All => {} // already handled via has_wildcard
 						ProjectedField::Include(name) => {
-							projections.push(Projection::Include(name));
+							projections.push(Projection::Include(name.into()));
 						}
 						ProjectedField::Rename {
 							from,
 							to,
 						} => {
 							if from == to {
-								projections.push(Projection::Include(to));
+								projections.push(Projection::Include(to.into()));
 							} else {
 								projections.push(Projection::Rename {
-									from,
-									to,
+									from: from.into(),
+									to: to.into(),
 								});
 							}
 						}
@@ -363,13 +363,17 @@ impl<'ctx> Planner<'ctx> {
 				// Add OMIT projections (all simple / top-level)
 				for expr in &omit {
 					if let Expr::Idiom(idiom) = expr {
-						projections.push(Projection::Omit(idiom_to_field_name(idiom)));
+						projections.push(Projection::Omit(idiom_to_field_name(idiom).into()));
 					}
 				}
 
 				// Create Compute operator if any complex expressions were registered
 				let computed = if registry.has_expressions_for_point(ComputePoint::Project) {
-					let compute_fields = registry.get_expressions_for_point(ComputePoint::Project);
+					let compute_fields = registry
+						.get_expressions_for_point(ComputePoint::Project)
+						.into_iter()
+						.map(|(name, expr)| (crate::val::Strand::new(name), expr))
+						.collect();
 					Arc::new(Compute::new(input, compute_fields)) as Arc<dyn ExecOperator>
 				} else {
 					input
@@ -472,11 +476,11 @@ impl<'ctx> Planner<'ctx> {
 			Some(output_name.clone()),
 		);
 		if internal_name == output_name {
-			projections.push(Projection::Include(output_name));
+			projections.push(Projection::Include(output_name.into()));
 		} else {
 			projections.push(Projection::Rename {
-				from: internal_name,
-				to: output_name,
+				from: internal_name.into(),
+				to: output_name.into(),
 			});
 		}
 	}

@@ -12,7 +12,7 @@ use revision::revisioned;
 use rust_decimal::prelude::*;
 use storekey::{BorrowDecode, Encode};
 use surrealdb_collections::VecMap;
-use surrealdb_strand::Strand;
+pub(crate) use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use crate::err::Error;

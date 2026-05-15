@@ -10,9 +10,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::StreamExt;
 
-use super::common::{
-	BATCH_SIZE, evaluate_bound_key, extract_record_ids_into, resolve_record_batch,
-};
+use super::common::{evaluate_bound_key, extract_record_ids_into, resolve_record_batch};
 use crate::catalog::{DatabaseId, NamespaceId};
 use crate::exec::parts::LookupDirection;
 use crate::exec::permission::{PhysicalPermission, should_check_perms};
@@ -187,6 +185,7 @@ impl ExecOperator for GraphEdgeScan {
 		let output_mode = self.output_mode;
 		let edge_limit = self.limit;
 		let version_expr = self.version.clone();
+		let scan_batch_size = ctx.root().ctx.config.scan_batch_size;
 		let ctx = ctx.clone();
 		let fetch_full = output_mode == GraphScanOutput::FullEdge;
 
@@ -230,7 +229,7 @@ impl ExecOperator for GraphEdgeScan {
 
 			// Read from the child operator stream and extract RecordIds
 			futures::pin_mut!(input_stream);
-			let mut rid_batch: Vec<RecordId> = Vec::with_capacity(BATCH_SIZE);
+			let mut rid_batch: Vec<RecordId> = Vec::with_capacity(scan_batch_size);
 
 			while let Some(batch_result) = input_stream.next().await {
 				let batch = batch_result?;
@@ -266,7 +265,7 @@ impl ExecOperator for GraphEdgeScan {
 									rid_batch.push(target_rid);
 									edges_yielded += 1;
 
-									if rid_batch.len() >= BATCH_SIZE {
+									if rid_batch.len() >= scan_batch_size {
 										let values = resolve_record_batch(
 											&ctx, &txn, ns_id, db_id, &rid_batch, fetch_full,
 											check_perms, version, CachePolicy::ReadWrite,
