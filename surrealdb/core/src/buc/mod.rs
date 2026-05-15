@@ -46,6 +46,18 @@ impl cnf::Config for Config {
 	}
 }
 
+#[cfg(test)]
+impl Config {
+	/// Test-only helper for building a `Config` with a custom bucket allowlist
+	/// without going through the `cnf::Config` parser.
+	pub(crate) fn for_test(bucket_list: Vec<PathBuf>) -> Self {
+		Self {
+			bucket_list,
+			..Self::default()
+		}
+	}
+}
+
 /// Marker trait for bucket store provider requirements.
 pub trait BucketStoreProviderRequirements: Send + Sync + 'static {}
 
