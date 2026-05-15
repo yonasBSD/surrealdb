@@ -231,6 +231,44 @@ fn scan_record_object_at_path_non_object_intermediate_bails() {
 	assert!(matches!(result, ScanResult::Bail));
 }
 
+/// Non-ASCII keys lock down the load-bearing claim of the byte-borrowed
+/// `find_bytes` / `with_key_bytes` path: `Strand` is validated UTF-8, so
+/// byte lexicographic order equals codepoint lexicographic order. If the
+/// `VecMap<Strand, Value>` sort and the on-wire byte comparator ever
+/// diverge, lookups against multi-byte keys would silently miss.
+#[test]
+fn extract_handles_non_ascii_keys() {
+	// Three keys ordered by UTF-8 byte sequence (which equals codepoint
+	// order for valid UTF-8):
+	//   "café"   = 63 61 66 c3 a9
+	//   "naïve"  = 6e 61 c3 af 76 65
+	//   "日本"    = e6 97 a5 e6 9c ac
+	let obj = Object::from(BTreeMap::from([
+		(Strand::from("café"), Value::Number(Number::Int(1))),
+		(Strand::from("naïve"), Value::Number(Number::Int(2))),
+		(Strand::from("日本"), Value::Number(Number::Int(3))),
+	]));
+	let rec = wire_record_plain_object(obj);
+	for (key, expected) in [("café", 1i64), ("naïve", 2), ("日本", 3)] {
+		match extract_field_from_record_bytes(&rec, &[String::from(key)]) {
+			Extracted::Found(Value::Number(Number::Int(n))) => {
+				assert_eq!(n, expected, "wrong value for key {key:?}")
+			}
+			other => panic!("expected Found(Int({expected})) for {key:?}, got {other:?}"),
+		}
+	}
+	// Multi-needle scan over the same object exercises `with_key_bytes`.
+	let needles: &[&[u8]] = &["café".as_bytes(), "naïve".as_bytes(), "日本".as_bytes()];
+	let scanned = scan_record_root_object_for_keys_sorted(&rec, needles).expect("plain row");
+	assert_eq!(scanned.len(), 3);
+	for (got, expected) in scanned.iter().zip([1i64, 2, 3]) {
+		match got {
+			Value::Number(Number::Int(n)) => assert_eq!(*n, expected),
+			other => panic!("expected Int({expected}), got {other:?}"),
+		}
+	}
+}
+
 #[test]
 fn scan_record_object_at_path_with_empty_path_falls_back_to_root() {
 	// Empty path should produce the same scan output as the root-only

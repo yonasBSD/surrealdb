@@ -7,9 +7,7 @@
 //! into nested fields without materialising the entire `Value` tree by using
 //! the per-type walkers emitted by `revision`'s `#[revisioned(...)]` derive.
 
-use std::io::Read;
-
-use revision::{MapWalker, WalkRevisioned};
+use revision::{BorrowedReader, MapWalker, WalkRevisioned};
 use surrealdb_strand::Strand;
 
 use crate::catalog::Record;
@@ -78,7 +76,20 @@ pub(crate) enum ScanResult {
 /// - [`Extracted::Bail`] for edge / view records, non-object intermediates, or any wire-level
 ///   error.
 pub(crate) fn extract_field_from_record_bytes(record_bytes: &[u8], path: &[String]) -> Extracted {
-	if path.is_empty() {
+	extract_field_from_record_bytes_parts(record_bytes, &[], path)
+}
+
+/// Like [`extract_field_from_record_bytes`] but walks `prefix` segments
+/// first, then `path`, without concatenating into a new [`Vec`].
+///
+/// Lets per-record evaluators in `pre_decode_filter` avoid allocating a
+/// `Vec<String>` of `prefix ++ path` in their hot loops.
+pub(crate) fn extract_field_from_record_bytes_parts(
+	record_bytes: &[u8],
+	prefix: &[String],
+	path: &[String],
+) -> Extracted {
+	if prefix.is_empty() && path.is_empty() {
 		return Extracted::Bail;
 	}
 	let mut reader = record_bytes;
@@ -96,19 +107,24 @@ pub(crate) fn extract_field_from_record_bytes(record_bytes: &[u8], path: &[Strin
 		Ok(w) => w,
 		Err(_) => return Extracted::Bail,
 	};
-	descend_value_path(value_walker, path)
+	descend_value_path_parts(value_walker, prefix, path)
 }
 
-/// Borrowed cursor at any nested object inside a revision-encoded `Value`.
-///
-/// Tracks "currently positioned at a `Value` walker" semantics so the
-/// pre-decode filter can descend through nested `Value::Object` payloads.
-fn descend_value_path<'r, R: Read>(
+/// Borrowed cursor at any nested object inside a revision-encoded `Value`:
+/// walks `prefix` segments first, then `path`, without concatenating into a
+/// new [`Vec`]. The decoded leaf is the value at the end of `path` (or, when
+/// `path` is empty, at the end of `prefix`).
+fn descend_value_path_parts<'r, R: BorrowedReader>(
 	value_walker: <Value as WalkRevisioned>::Walker<'r, R>,
+	prefix: &[String],
 	path: &[String],
 ) -> Extracted {
+	let total = prefix.len() + path.len();
+	if total == 0 {
+		return Extracted::Bail;
+	}
 	let mut walker = value_walker;
-	let mut segments: &[String] = path;
+	let mut i = 0usize;
 	loop {
 		// Each iteration starts with `walker` positioned right after a
 		// Value's `u16 revision` and `u32 discriminant`. Verify the variant
@@ -128,11 +144,18 @@ fn descend_value_path<'r, R: Read>(
 			Err(_) => return Extracted::Bail,
 		};
 		// Pull the next path segment to look up.
-		let needle = segments[0].as_str();
-		segments = &segments[1..];
-		// `find` returns a value handle: the reader is positioned at the
-		// value's encoding without the type-level prefix consumed.
-		let handle = match map_walker.find(|k: &Strand| k.as_str().cmp(needle)) {
+		let needle = if i < prefix.len() {
+			prefix[i].as_bytes()
+		} else {
+			path[i - prefix.len()].as_bytes()
+		};
+		i += 1;
+		// `find_bytes` compares the on-wire `Strand` key bytes directly
+		// against `needle` — no per-key `Strand` allocation. Safe because
+		// `Strand` is validated UTF-8 (`LengthPrefixedBytes`), so byte
+		// lexicographic order ≡ codepoint lexicographic order, matching
+		// `VecMap<Strand, Value>`'s sort order on wire.
+		let handle = match map_walker.find_bytes(|kb: &[u8]| kb.cmp(needle)) {
 			Ok(v) => v,
 			Err(_) => return Extracted::Bail,
 		};
@@ -140,7 +163,7 @@ fn descend_value_path<'r, R: Read>(
 			Some(h) => h,
 			None => return Extracted::Missing,
 		};
-		if segments.is_empty() {
+		if i == total {
 			// Leaf: decode the entire Value (handle reader is positioned
 			// before the Value's prefix).
 			return match handle.decode() {
@@ -237,7 +260,7 @@ pub(crate) fn scan_record_object_at_path_for_keys_sorted<K: AsRef<[u8]>>(
 }
 
 /// Outcome of [`descend_to_value_walker`].
-pub(crate) enum DescendResult<'r, R: Read + 'r> {
+pub(crate) enum DescendResult<'r, R: BorrowedReader + 'r> {
 	/// Successfully consumed every path segment; the inner walker is
 	/// positioned at the navigated [`Value`] (post type-level prefix).
 	Found(<Value as WalkRevisioned>::Walker<'r, R>),
@@ -254,7 +277,7 @@ pub(crate) enum DescendResult<'r, R: Read + 'r> {
 /// segment (including the last) and returns the resulting walker rather
 /// than decoding the leaf — that lets callers stream the navigated value's
 /// contents instead of materialising it.
-pub(crate) fn descend_to_value_walker<'r, R: Read>(
+pub(crate) fn descend_to_value_walker<'r, R: BorrowedReader>(
 	value_walker: <Value as WalkRevisioned>::Walker<'r, R>,
 	path: &[String],
 ) -> DescendResult<'r, R> {
@@ -263,7 +286,7 @@ pub(crate) fn descend_to_value_walker<'r, R: Read>(
 
 /// Like [`descend_to_value_walker`] but walks `prefix` segments first, then
 /// `path`, without concatenating into a new [`Vec`].
-pub(crate) fn descend_to_value_walker_parts<'r, R: Read>(
+pub(crate) fn descend_to_value_walker_parts<'r, R: BorrowedReader>(
 	mut walker: <Value as WalkRevisioned>::Walker<'r, R>,
 	prefix: &[String],
 	path: &[String],
@@ -282,8 +305,9 @@ pub(crate) fn descend_to_value_walker_parts<'r, R: Read>(
 			Ok(w) => w,
 			Err(_) => return DescendResult::Bail,
 		};
-		let needle_str = needle.as_str();
-		let handle = match map_walker.find(|k: &Strand| k.as_str().cmp(needle_str)) {
+		// See `descend_value_path` for why `find_bytes` is correct here.
+		let needle_bytes = needle.as_bytes();
+		let handle = match map_walker.find_bytes(|kb: &[u8]| kb.cmp(needle_bytes)) {
 			Ok(v) => v,
 			Err(_) => return DescendResult::Bail,
 		};
@@ -300,7 +324,7 @@ pub(crate) fn descend_to_value_walker_parts<'r, R: Read>(
 }
 
 /// Multi-key scan over an object payload reached through a value walker.
-pub(crate) fn scan_value_object_for_keys_sorted<'r, R: Read, K: AsRef<[u8]>>(
+pub(crate) fn scan_value_object_for_keys_sorted<'r, R: BorrowedReader, K: AsRef<[u8]>>(
 	value_walker: <Value as WalkRevisioned>::Walker<'r, R>,
 	needles_sorted: &[K],
 ) -> Option<Vec<Value>> {
@@ -321,12 +345,19 @@ pub(crate) fn scan_value_object_for_keys_sorted<'r, R: Read, K: AsRef<[u8]>>(
 	while qi < needles_sorted.len()
 		&& let Some(mut entry) = map_walker.next_entry()
 	{
-		let key = entry.decode_key().ok()?;
-		// Advance past consumed needles that are strictly less than this key.
-		while qi < needles_sorted.len() && needles_sorted[qi].as_ref() < key.as_str().as_bytes() {
-			qi += 1;
-		}
-		if qi < needles_sorted.len() && needles_sorted[qi].as_ref() == key.as_str().as_bytes() {
+		// Read the entry's key as raw bytes without allocating a `Strand`.
+		// `Strand`'s wire format is `usize len || utf8 bytes`, validated UTF-8,
+		// so byte ordering matches the `VecMap<Strand, Value>` sort order.
+		let matched = entry
+			.with_key_bytes(|kb: &[u8]| {
+				// Advance past consumed needles that are strictly less than this key.
+				while qi < needles_sorted.len() && needles_sorted[qi].as_ref() < kb {
+					qi += 1;
+				}
+				qi < needles_sorted.len() && needles_sorted[qi].as_ref() == kb
+			})
+			.ok()?;
+		if matched {
 			let v = entry.decode_value().ok()?;
 			out[qi] = v;
 			qi += 1;
@@ -355,5 +386,5 @@ pub(crate) fn descend_value_slice_path(value_wire: &[u8], path: &[String]) -> Ex
 		Ok(w) => w,
 		Err(_) => return Extracted::Bail,
 	};
-	descend_value_path(walker, path)
+	descend_value_path_parts(walker, &[], path)
 }

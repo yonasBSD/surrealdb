@@ -52,7 +52,8 @@ use crate::fnc::operate;
 use crate::key::record::RecordKey;
 use crate::val::object_extract::{
 	DescendResult, Extracted, ScanResult, WalkLeafErr, descend_to_value_walker_parts,
-	extract_field_from_record_bytes, scan_record_object_at_path_for_keys_sorted,
+	extract_field_from_record_bytes, extract_field_from_record_bytes_parts,
+	scan_record_object_at_path_for_keys_sorted,
 };
 use crate::val::{RecordId, Value};
 
@@ -388,8 +389,7 @@ impl PreDecodeFilter {
 		op: &BinaryOperator,
 		set: &HashSet<Value>,
 	) -> Evidence {
-		let full: Vec<String> = prefix.iter().cloned().chain(path.iter().cloned()).collect();
-		let v = match extract_field_from_record_bytes(record_bytes, &full) {
+		let v = match extract_field_from_record_bytes_parts(record_bytes, prefix, path) {
 			Extracted::Found(v) => v,
 			Extracted::Missing => Value::None,
 			Extracted::Bail => return Evidence::Unknown,
@@ -442,9 +442,9 @@ impl PreDecodeFilter {
 		if prefix.is_empty() && path.first().is_some_and(|s| s.as_str() == "id") && path.len() > 1 {
 			return Evidence::Unknown;
 		}
-		// Build the full path = prefix ++ path and walk the record.
-		let full: Vec<String> = prefix.iter().cloned().chain(path.iter().cloned()).collect();
-		match extract_field_from_record_bytes(record_bytes, &full) {
+		// Walk the record, descending `prefix` then `path` without
+		// concatenating into a fresh `Vec<String>` per row.
+		match extract_field_from_record_bytes_parts(record_bytes, prefix, path) {
 			Extracted::Found(v) => evidence_from_binary_cmp(op, literal, reversed, &v),
 			Extracted::Missing => evidence_from_binary_cmp(op, literal, reversed, &Value::None),
 			Extracted::Bail => Evidence::Unknown,
