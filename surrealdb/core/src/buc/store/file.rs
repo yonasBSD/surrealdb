@@ -223,34 +223,41 @@ fn is_path_allowed(
 	lowercase_paths: bool,
 	allowed: &[PathBuf],
 ) -> bool {
-	// FIXME: This function is incorrect for non-utf8 paths, to_string_lossy will convert any
-	// non-utf8 character to `\u{FFFD}` and therefore, two strings which are not the same will be
-	// allowed if they only differ by a non-utf8 characters.
-	//
-	// Check if the path is within any of the allowed paths
+	if !lowercase_paths {
+		// Case-sensitive comparison goes component-wise, which already handles
+		// non-UTF-8 bytes correctly (each component is compared as an `OsStr`).
+		return allowed.iter().any(|allowed_path| path_to_check.starts_with(allowed_path));
+	}
+
+	// Reject paths that aren't valid UTF-8: `to_string_lossy` would collapse
+	// every invalid byte onto the same `U+FFFD` replacement character, so two
+	// distinct paths that differ only in their invalid bytes would compare
+	// equal and slip past the prefix check.
+	let Some(raw_path) = path_to_check.to_str() else {
+		return false;
+	};
+
+	// Windows canonical paths often carry a `\\?\` prefix; after lowercasing
+	// and normalising separators it becomes `//?/`. Strip it so callers can
+	// pass either form interchangeably.
+	const WINDOWS_CANONICAL_PATH_PREFIX: &str = "//?/";
+	let normalized = raw_path.to_lowercase().replace('\\', "/");
+	let path_str = normalized.strip_prefix(WINDOWS_CANONICAL_PATH_PREFIX).unwrap_or(&normalized);
+
 	allowed.iter().any(|allowed_path| {
-		if lowercase_paths {
-			// Windows canonical paths often have "\\?\" prefix that needs special handling
-			// Convert to lowercase and normalize path separators for consistent comparison
-			let mut path_str = path_to_check.to_string_lossy().to_lowercase().replace("\\", "/");
-
-			// Strip Windows canonical path prefix if present (becomes "//?/" after normalization)
-			const WINDOWS_CANONICAL_PATH_PREFIX: &str = "//?/";
-			if path_str.starts_with(WINDOWS_CANONICAL_PATH_PREFIX) {
-				path_str = path_str
-					.strip_prefix(WINDOWS_CANONICAL_PATH_PREFIX)
-					.unwrap_or(&path_str)
-					.to_string();
-			}
-
-			// Normalize allowed path for comparison
-			let allowed_str = allowed_path.to_string_lossy().to_lowercase().replace("\\", "/");
-
-			path_str.starts_with(&allowed_str)
-		} else {
-			// Case-sensitive comparison (original behavior)
-			path_to_check.starts_with(allowed_path)
-		}
+		let Some(raw_allowed) = allowed_path.to_str() else {
+			return false;
+		};
+		let allowed_str = raw_allowed.to_lowercase().replace('\\', "/");
+		// Strip a trailing separator so an entry like `/srv/data/` accepts
+		// `/srv/data` itself, not just children.
+		let allowed_str = allowed_str.trim_end_matches('/');
+		// Require the prefix to land on a component boundary: bare
+		// `str::starts_with` would let `/srv/data-evil` match `/srv/data`.
+		let Some(rest) = path_str.strip_prefix(allowed_str) else {
+			return false;
+		};
+		rest.is_empty() || rest.starts_with('/')
 	})
 }
 
@@ -717,5 +724,66 @@ mod tests {
 		store.put(&key, Bytes::from_static(b"hello")).await.unwrap();
 
 		assert_eq!(on_disk_names(&root), vec!["mixedcase.txt"]);
+	}
+
+	#[test]
+	fn case_sensitive_allowlist_matches_prefix_components() {
+		let allowed = vec![PathBuf::from("/srv/data")];
+		assert!(is_path_allowed(OsPath::new("/srv/data/file.txt"), false, &allowed));
+		assert!(!is_path_allowed(OsPath::new("/srv/other/file.txt"), false, &allowed));
+	}
+
+	#[test]
+	fn lowercase_allowlist_matches_case_insensitively() {
+		let allowed = vec![PathBuf::from("/srv/Data")];
+		assert!(is_path_allowed(OsPath::new("/SRV/data/file.txt"), true, &allowed));
+	}
+
+	/// Regression: bare `str::starts_with` would let a sibling directory
+	/// whose name extends the allowlisted prefix (`/srv/data-evil`) match
+	/// `/srv/data`. The component-boundary check rejects that case while
+	/// still accepting the exact entry and any path nested below it.
+	#[test]
+	fn lowercase_allowlist_requires_component_boundary() {
+		let allowed = vec![PathBuf::from("/srv/data")];
+		assert!(!is_path_allowed(OsPath::new("/srv/data-evil/secret"), true, &allowed));
+		assert!(is_path_allowed(OsPath::new("/srv/data"), true, &allowed));
+		assert!(is_path_allowed(OsPath::new("/srv/data/file.txt"), true, &allowed));
+	}
+
+	/// A trailing separator on the allowlist entry should still accept the
+	/// entry itself, not just children, so `/srv/data/` is equivalent to
+	/// `/srv/data`.
+	#[test]
+	fn lowercase_allowlist_accepts_trailing_separator() {
+		let allowed = vec![PathBuf::from("/srv/data/")];
+		assert!(is_path_allowed(OsPath::new("/srv/data"), true, &allowed));
+		assert!(is_path_allowed(OsPath::new("/srv/data/file.txt"), true, &allowed));
+		assert!(!is_path_allowed(OsPath::new("/srv/data-evil"), true, &allowed));
+	}
+
+	/// Regression: `to_string_lossy` previously collapsed every invalid UTF-8
+	/// byte onto `U+FFFD`, so two distinct non-UTF-8 paths could compare equal
+	/// and bypass the allowlist. With the lossless `Path::to_str` check, any
+	/// non-UTF-8 candidate is rejected outright when `lowercase_paths` is on.
+	#[cfg(unix)]
+	#[test]
+	fn lowercase_mode_rejects_non_utf8_paths() {
+		use std::ffi::OsStr;
+		use std::os::unix::ffi::OsStrExt;
+
+		let allowed = vec![PathBuf::from("/srv/data")];
+		let bad_path = OsPath::new(OsStr::from_bytes(b"/srv/data/\xFFsecret"));
+		assert!(!is_path_allowed(bad_path, true, &allowed));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn lowercase_mode_rejects_non_utf8_allowed_entry() {
+		use std::ffi::OsStr;
+		use std::os::unix::ffi::OsStrExt;
+
+		let allowed = vec![PathBuf::from(OsStr::from_bytes(b"/srv/data/\xFF"))];
+		assert!(!is_path_allowed(OsPath::new("/srv/data/file.txt"), true, &allowed));
 	}
 }
