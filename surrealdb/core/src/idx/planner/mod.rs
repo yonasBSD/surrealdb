@@ -49,7 +49,7 @@ pub(crate) enum RecordStrategy {
 	KeysAndValues,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScanDirection {
 	Forward,
 	Backward,

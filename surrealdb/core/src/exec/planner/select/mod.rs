@@ -28,10 +28,10 @@ use super::util::{
 	SELECT_ITERATION_PARAMS, all_value_sources, derive_field_name, extract_bruteforce_knn,
 	extract_count_field_names, extract_matches_context, extract_record_id_point_lookup,
 	extract_version, fold_condition_expressions, has_knn_k_operator, has_knn_operator,
-	has_top_level_or, idiom_to_field_name, index_covers_ordering, is_count_all_eligible,
-	is_indexed_count_eligible, order_is_scan_compatible, resolve_condition_params,
-	resolve_param_value, resolve_projection_field_idioms, strip_fts_condition,
-	strip_index_conditions, strip_knn_from_condition,
+	has_top_level_or, idiom_to_field_name, index_covers_ordering, is_bounded_topk_downstream,
+	is_count_all_eligible, is_indexed_count_eligible, order_is_scan_compatible,
+	resolve_condition_params, resolve_param_value, resolve_projection_field_idioms,
+	strip_fts_condition, strip_index_conditions, strip_knn_from_condition,
 };
 use crate::catalog::Index;
 use crate::catalog::providers::{DatabaseProvider, NamespaceProvider, TableProvider};
@@ -995,6 +995,18 @@ impl<'ctx> Planner<'ctx> {
 		// compiling the same AST expression into a PhysicalExpr twice.
 		let scan_predicate_for_reuse = scan_predicate.clone();
 
+		// Tell source planning whether the downstream pipeline contains a
+		// bounded top-k sort. Used by UnionIndexScan to skip eager
+		// per-sub-stream prefetch — the heap discards most rows anyway,
+		// so prefetching only wastes memory under high concurrency.
+		let downstream_topk = is_bounded_topk_downstream(
+			order.as_ref(),
+			&start,
+			&limit,
+			tempfiles,
+			self.ctx.config.max_order_limit_priority_queue_size as usize,
+		);
+
 		// Source resolution with plan-time index analysis.
 		// The result tracks whether the predicate and limit/start were
 		// consumed by the source operator, so we can avoid duplicating
@@ -1010,6 +1022,7 @@ impl<'ctx> Planner<'ctx> {
 				scan_predicate,
 				scan_limit,
 				scan_start,
+				downstream_topk,
 			)
 			.await?;
 
@@ -1104,6 +1117,7 @@ impl<'ctx> Planner<'ctx> {
 		scan_predicate: Option<Arc<dyn crate::exec::PhysicalExpr>>,
 		scan_limit: Option<Arc<dyn crate::exec::PhysicalExpr>>,
 		scan_start: Option<Arc<dyn crate::exec::PhysicalExpr>>,
+		downstream_topk: bool,
 	) -> Result<PlannedSource, Error> {
 		if what.is_empty() {
 			return Err(Error::Query {
@@ -1123,6 +1137,7 @@ impl<'ctx> Planner<'ctx> {
 					scan_predicate.clone(),
 					scan_limit.clone(),
 					scan_start.clone(),
+					downstream_topk,
 				)
 				.await?;
 			plans.push(p);
@@ -1164,6 +1179,7 @@ impl<'ctx> Planner<'ctx> {
 		scan_predicate: Option<Arc<dyn crate::exec::PhysicalExpr>>,
 		scan_limit: Option<Arc<dyn crate::exec::PhysicalExpr>>,
 		scan_start: Option<Arc<dyn crate::exec::PhysicalExpr>>,
+		downstream_topk: bool,
 	) -> Result<PlannedSource, Error> {
 		// Optimisation: WHERE id = <RecordId> -> point lookup.
 		// Detects `id = <RecordId literal>` in the top-level AND chain and
@@ -1303,6 +1319,7 @@ impl<'ctx> Planner<'ctx> {
 								version,
 								table_ctx,
 								knn_ctx,
+								downstream_topk,
 							)
 							.await;
 					}
@@ -1639,6 +1656,7 @@ impl<'ctx> Planner<'ctx> {
 		version: Option<Arc<dyn crate::exec::PhysicalExpr>>,
 		table_ctx: Option<ResolvedTableContext>,
 		knn_ctx: Option<Arc<crate::exec::function::KnnContext>>,
+		downstream_topk: bool,
 	) -> Result<PlannedSource, Error> {
 		// Enable merge-sort by record ID when ORDER BY is `id ASC/DESC`
 		// only and every sub-path is an equality B-tree scan (each one
@@ -1655,10 +1673,55 @@ impl<'ctx> Planner<'ctx> {
 			})
 		});
 
+		// If we couldn't merge-by-id, try the composite-index k-way merge:
+		// every branch pins the same composite-index prefix and the ORDER
+		// BY column is the next column of that index. Each branch is then
+		// already sorted by the ORDER BY column (in the scan's direction).
+		let merge_by_index_key = if merge_dir.is_none() {
+			detect_order_for_composite_union(order, &paths)
+		} else {
+			None
+		};
+
+		// When the merge-by-index-key opportunity applies but a branch's
+		// scan direction doesn't match the ORDER BY direction (this happens
+		// when `try_in_expansion` used the default direction because the
+		// chosen ORDER BY isn't on `id`), rewrite each branch to scan in
+		// the correct direction. Each per-branch sub-scan must yield rows
+		// already sorted by the suffix column in the merge's direction.
+		let paths = if let Some((_, dir)) = &merge_by_index_key {
+			let target = match dir {
+				SortDirection::Asc => crate::idx::planner::ScanDirection::Forward,
+				SortDirection::Desc => crate::idx::planner::ScanDirection::Backward,
+			};
+			paths
+				.into_iter()
+				.map(|p| match p {
+					AccessPath::BTreeScan {
+						index_ref,
+						access,
+						..
+					} => AccessPath::BTreeScan {
+						index_ref,
+						access,
+						direction: target,
+					},
+					other => other,
+				})
+				.collect::<Vec<_>>()
+		} else {
+			paths
+		};
+
 		// When merge mode is active and a downstream LIMIT exists, pass
 		// it as a batch-ceiling hint to each sub-scan so the merge
 		// terminates quickly.
-		let merge_batch_ceiling = merge_dir.and(scan_limit);
+		let merge_active = merge_dir.is_some() || merge_by_index_key.is_some();
+		let merge_batch_ceiling = if merge_active {
+			scan_limit
+		} else {
+			None
+		};
 
 		let mut sub_operators: Vec<Arc<dyn ExecOperator>> = Vec::with_capacity(paths.len());
 		for path in paths {
@@ -1679,6 +1742,13 @@ impl<'ctx> Planner<'ctx> {
 		let mut union_scan = UnionIndexScan::new(table, sub_operators, needed_fields);
 		if let Some(dir) = merge_dir {
 			union_scan = union_scan.with_merge_by_id(dir);
+		} else if let Some((path, dir)) = merge_by_index_key {
+			// Composite-index k-way merge by the indexed sort column.
+			union_scan = union_scan.with_merge_by_index_key(path, dir);
+		} else if downstream_topk {
+			// No merge available — but a bounded top-k sort is downstream.
+			// Skip eager per-sub-stream prefetch so the heap drives demand.
+			union_scan = union_scan.with_downstream_topk();
 		}
 		if let Some(tc) = table_ctx {
 			union_scan = union_scan.with_resolved(tc);
@@ -2376,6 +2446,126 @@ fn detect_order_by_id_only(order: Option<&crate::expr::order::Ordering>) -> Opti
 	} else {
 		None
 	}
+}
+
+/// Detect the pattern "every branch pins the same composite-index prefix
+/// to an equality value, and ORDER BY is the next column of that index".
+///
+/// When this holds, each per-branch sub-scan is already sorted by the
+/// ORDER BY column (in the scan's direction), so a k-way merge over the
+/// branches by that column yields a globally-sorted stream — with
+/// early-stop on a downstream `LIMIT`.
+///
+/// Returns the field path to merge on and the required scan direction
+/// (the caller may need to rewrite per-branch scan directions to match).
+/// Returns `None` when the pattern is not applicable (different indexes,
+/// non-equality access, ORDER BY column not the next index column,
+/// COLLATE/NUMERIC modifiers, single-column indexes, duplicate branch
+/// prefixes, etc).
+fn detect_order_for_composite_union(
+	order: Option<&crate::expr::order::Ordering>,
+	paths: &[AccessPath],
+) -> Option<(crate::exec::field_path::FieldPath, SortDirection)> {
+	use crate::exec::field_path::FieldPath;
+	use crate::exec::index::access_path::BTreeAccess;
+	use crate::expr::order::Ordering;
+
+	// Must be ORDER BY a single, plain column with no collation modifiers.
+	let Some(Ordering::Order(order_list)) = order else {
+		return None;
+	};
+	if order_list.len() != 1 {
+		return None;
+	}
+	let order_field = order_list.0.first()?;
+	if order_field.collate || order_field.numeric {
+		return None;
+	}
+	let order_path = FieldPath::try_from(&order_field.value).ok()?;
+	let direction = if order_field.direction {
+		SortDirection::Asc
+	} else {
+		SortDirection::Desc
+	};
+
+	// All branches must share the same index. Take the first branch's
+	// index_ref as the reference and check every branch against it.
+	let mut branches = paths.iter();
+	let first = branches.next()?;
+	let (first_index_ref, first_prefix_len) = match first {
+		AccessPath::BTreeScan {
+			index_ref,
+			access: BTreeAccess::Compound {
+				prefix,
+				range: None,
+			},
+			..
+		} => (index_ref.clone(), prefix.len()),
+		// Single-column equality on the ORDER BY column itself wouldn't
+		// give us a "next column" to merge on.
+		_ => return None,
+	};
+	// Composite index must have an additional column after the prefix
+	// that is exactly the ORDER BY target.
+	let ix_def = first_index_ref.definition();
+	if ix_def.cols.len() <= first_prefix_len {
+		return None;
+	}
+	let sort_col_idiom = ix_def.cols.get(first_prefix_len)?;
+	let sort_col_path = FieldPath::try_from(sort_col_idiom).ok()?;
+	if sort_col_path != order_path {
+		return None;
+	}
+
+	// Every remaining branch must use the same index and same prefix
+	// length. Branch directions need not match — the caller rewrites
+	// each branch's scan direction to align with ORDER BY before
+	// constructing the sub-operators. Branch prefixes must be distinct
+	// so no record appears twice.
+	let first_prefix = match first {
+		AccessPath::BTreeScan {
+			access: BTreeAccess::Compound {
+				prefix,
+				..
+			},
+			..
+		} => prefix.as_slice(),
+		_ => return None,
+	};
+	let mut seen_prefixes: Vec<&[crate::val::Value]> = Vec::with_capacity(paths.len());
+	seen_prefixes.push(first_prefix);
+	for path in branches {
+		let (idx, access) = match path {
+			AccessPath::BTreeScan {
+				index_ref,
+				access: access @ BTreeAccess::Compound {
+					range: None,
+					..
+				},
+				..
+			} => (index_ref, access),
+			_ => return None,
+		};
+		if idx != &first_index_ref {
+			return None;
+		}
+		let BTreeAccess::Compound {
+			prefix,
+			..
+		} = access
+		else {
+			return None;
+		};
+		if prefix.len() != first_prefix_len {
+			return None;
+		}
+		if seen_prefixes.iter().any(|p| p == &prefix.as_slice()) {
+			return None;
+		}
+		seen_prefixes.push(prefix.as_slice());
+	}
+
+	Some((order_path, direction))
 }
 
 #[cfg(test)]

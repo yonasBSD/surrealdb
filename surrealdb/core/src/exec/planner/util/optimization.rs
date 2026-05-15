@@ -176,22 +176,53 @@ pub(crate) fn get_effective_limit_literal(
 	start: &Option<crate::expr::start::Start>,
 	limit: &Option<crate::expr::limit::Limit>,
 ) -> Option<usize> {
-	let limit_val = limit.as_ref().and_then(|l| match &l.0 {
+	let limit_val = limit_expr_as_usize(limit.as_ref().map(|l| &l.0))?;
+	let start_val = start.as_ref().map(|s| limit_expr_as_usize(Some(&s.0))).unwrap_or(Some(0))?;
+
+	start_val.checked_add(limit_val)
+}
+
+/// Resolve an expression to a non-negative `usize` if it is a non-negative
+/// integer or float literal.  Returns `None` for any other shape — including
+/// parameters, function calls, and negative numbers.
+fn limit_expr_as_usize(expr: Option<&Expr>) -> Option<usize> {
+	match expr? {
 		Expr::Literal(Literal::Integer(n)) if *n >= 0 => Some(*n as usize),
 		Expr::Literal(Literal::Float(n)) if *n >= 0.0 => Some(*n as usize),
 		_ => None,
-	})?;
+	}
+}
 
-	let start_val = start
-		.as_ref()
-		.map(|s| match &s.0 {
-			Expr::Literal(Literal::Integer(n)) if *n >= 0 => Some(*n as usize),
-			Expr::Literal(Literal::Float(n)) if *n >= 0.0 => Some(*n as usize),
-			_ => None,
-		})
-		.unwrap_or(Some(0))?;
-
-	start_val.checked_add(limit_val)
+/// Returns `true` when the SELECT pipeline's ORDER BY + LIMIT will be served
+/// by a bounded top-k sort (heap of size ≤ `max_order_limit_priority_queue_size`).
+///
+/// Used by source planning to drop eager per-sub-stream prefetch in
+/// upstream scans — the heap discards most rows, so prefetching only wastes
+/// memory under high concurrency.
+///
+/// Returns `false` when:
+/// - no ORDER BY, or ORDER BY RANDOM
+/// - no LIMIT, or LIMIT/START aren't literal non-negative integers
+/// - `start + limit` exceeds the priority-queue threshold
+/// - TEMPFILES is set (disk-backed sort is preferred, top-k path is skipped)
+pub(crate) fn is_bounded_topk_downstream(
+	order: Option<&crate::expr::order::Ordering>,
+	start: &Option<crate::expr::start::Start>,
+	limit: &Option<crate::expr::limit::Limit>,
+	tempfiles: bool,
+	threshold: usize,
+) -> bool {
+	use crate::expr::order::Ordering;
+	if tempfiles {
+		return false;
+	}
+	match order {
+		Some(Ordering::Order(_)) => match get_effective_limit_literal(start, limit) {
+			Some(n) => n <= threshold,
+			None => false,
+		},
+		_ => false,
+	}
 }
 
 // ============================================================================
@@ -351,5 +382,91 @@ pub(crate) fn extract_count_field_names(fields: &Fields) -> Vec<String> {
 				_ => None,
 			})
 			.collect(),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::expr::limit::Limit;
+	use crate::expr::order::{Order, OrderList, Ordering};
+	use crate::expr::start::Start;
+	use crate::expr::{Idiom, Part};
+
+	fn int_lit(n: i64) -> Expr {
+		Expr::Literal(Literal::Integer(n))
+	}
+
+	fn order_by_created_at_desc() -> Ordering {
+		Ordering::Order(OrderList(vec![Order {
+			value: Idiom(vec![Part::Field(crate::val::Strand::new("created_at"))]),
+			collate: false,
+			numeric: false,
+			direction: false,
+		}]))
+	}
+
+	#[test]
+	fn effective_limit_handles_literals_and_rejects_params() {
+		assert_eq!(get_effective_limit_literal(&None, &Some(Limit(int_lit(100)))), Some(100));
+		assert_eq!(
+			get_effective_limit_literal(&Some(Start(int_lit(20))), &Some(Limit(int_lit(100)))),
+			Some(120)
+		);
+		// Negative integer literal is not accepted as a valid LIMIT.
+		assert_eq!(get_effective_limit_literal(&None, &Some(Limit(int_lit(-1)))), None);
+		// Non-literal LIMIT (param, function call, etc.) returns None so the
+		// caller falls back to the full sort.
+		let param = Expr::Param(crate::expr::param::Param::default());
+		assert_eq!(get_effective_limit_literal(&None, &Some(Limit(param))), None);
+	}
+
+	#[test]
+	fn topk_downstream_predicate_matches_design_intent() {
+		let order = order_by_created_at_desc();
+		// Standard case: literal LIMIT under threshold → top-k engages.
+		assert!(is_bounded_topk_downstream(
+			Some(&order),
+			&None,
+			&Some(Limit(int_lit(1000))),
+			false,
+			1000,
+		));
+		// START + LIMIT exactly at threshold still qualifies.
+		assert!(is_bounded_topk_downstream(
+			Some(&order),
+			&Some(Start(int_lit(500))),
+			&Some(Limit(int_lit(500))),
+			false,
+			1000,
+		));
+		// Over the threshold → falls back to full sort.
+		assert!(!is_bounded_topk_downstream(
+			Some(&order),
+			&None,
+			&Some(Limit(int_lit(2000))),
+			false,
+			1000,
+		));
+		// No ORDER BY → no sort to bound.
+		assert!(!is_bounded_topk_downstream(None, &None, &Some(Limit(int_lit(10))), false, 1000));
+		// ORDER BY RANDOM → no top-k path.
+		assert!(!is_bounded_topk_downstream(
+			Some(&Ordering::Random),
+			&None,
+			&Some(Limit(int_lit(10))),
+			false,
+			1000,
+		));
+		// No LIMIT → no top-k.
+		assert!(!is_bounded_topk_downstream(Some(&order), &None, &None, false, 1000));
+		// TEMPFILES → user opted into disk-backed sort.
+		assert!(!is_bounded_topk_downstream(
+			Some(&order),
+			&None,
+			&Some(Limit(int_lit(10))),
+			true,
+			1000,
+		));
 	}
 }

@@ -9,6 +9,7 @@
 //! table-level and field-level SELECT permissions, builds computed fields,
 //! and applies the full [`ScanPipeline`](super::pipeline::ScanPipeline).
 
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -32,6 +33,86 @@ use crate::expr::{ControlFlow, ControlFlowExt};
 use crate::iam::Action;
 use crate::val::{RecordId, TableName, Value};
 
+/// How [`UnionIndexScan`] combines per-branch sub-streams.
+#[derive(Debug, Clone)]
+pub(crate) enum MergeMode {
+	/// K-way merge by record ID. Used when each sub-stream is already
+	/// sorted by record ID (e.g. single-column equality index scans) and
+	/// the downstream wants `ORDER BY id`.  Duplicate record IDs across
+	/// branches are deduplicated.
+	ById(SortDirection),
+	/// K-way merge by an indexed field value (e.g. composite index's
+	/// second column when each branch pins the first column to a
+	/// distinct equality value).  Each sub-stream must already be sorted
+	/// by `path` in `direction`; branches must be prefix-disjoint so no
+	/// record appears twice.  Enables ORDER BY-by-suffix-column with
+	/// early-stop on a LIMIT downstream.
+	ByIndexKey {
+		path: FieldPath,
+		direction: SortDirection,
+	},
+}
+
+impl MergeMode {
+	fn direction(&self) -> SortDirection {
+		match self {
+			MergeMode::ById(d)
+			| MergeMode::ByIndexKey {
+				direction: d,
+				..
+			} => *d,
+		}
+	}
+}
+
+/// Comparison key extracted from a row for k-way merge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MergeKey {
+	Rid(RecordId),
+	Field(Value),
+}
+
+impl PartialOrd for MergeKey {
+	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+		Some(self.cmp(other))
+	}
+}
+
+impl Ord for MergeKey {
+	fn cmp(&self, other: &Self) -> Ordering {
+		match (self, other) {
+			(MergeKey::Rid(a), MergeKey::Rid(b)) => a.cmp(b),
+			(MergeKey::Field(a), MergeKey::Field(b)) => a.cmp(b),
+			// Mixing modes is a programmer error — treat as Equal so the
+			// merge falls back to "first branch wins" rather than
+			// panicking.
+			_ => Ordering::Equal,
+		}
+	}
+}
+
+/// Extract the comparison key for a row based on the active merge mode.
+///
+/// Returns `None` when the row does not have a usable key (e.g. an
+/// object missing the indexed field, or a non-object value).  The
+/// merge skips such rows; they are emitted only when no sub-stream
+/// has a usable key, in which case the loop exits.
+fn extract_merge_key(mode: &MergeMode, value: &Value) -> Option<MergeKey> {
+	match mode {
+		MergeMode::ById(_) => match value {
+			Value::Object(obj) => match obj.get("id") {
+				Some(Value::RecordId(rid)) => Some(MergeKey::Rid(rid.clone())),
+				_ => None,
+			},
+			_ => None,
+		},
+		MergeMode::ByIndexKey {
+			path,
+			..
+		} => Some(MergeKey::Field(path.extract(value))),
+	}
+}
+
 /// Union index scan operator for OR conditions.
 ///
 /// Wraps multiple pre-planned index scan operators (one per OR branch)
@@ -52,12 +133,22 @@ pub struct UnionIndexScan {
 	/// Plan-time resolved table context. When present, `execute()` skips
 	/// runtime table def + permission lookup and uses pre-built field state.
 	pub(crate) resolved: Option<ResolvedTableContext>,
-	/// When set, use a k-way merge by record ID instead of sequential
-	/// iteration.  Each sub-stream must already produce results in record-ID
-	/// order (which single-column equality index scans naturally do).
-	/// The merge produces globally record-ID-sorted output, enabling sort
-	/// elimination and early termination for ORDER BY id queries.
-	pub(crate) merge_by_id: Option<SortDirection>,
+	/// When set, the sub-streams are k-way merged on a comparison key
+	/// instead of drained sequentially.  See [`MergeMode`].
+	///
+	/// The merge produces a globally-sorted output and is consumed
+	/// on-demand — combined with a downstream `LIMIT` this terminates
+	/// early, typically reading only ~LIMIT rows total across all
+	/// sub-streams.
+	pub(crate) merge: Option<MergeMode>,
+	/// Hint set by the planner when the downstream pipeline contains a
+	/// bounded top-k sort (e.g. `ORDER BY ... LIMIT N` with N small).
+	///
+	/// When true, per-sub-stream prefetch via [`buffer_stream`] is skipped
+	/// because the heap will discard most rows anyway; eagerly pulling
+	/// batches into background channels just wastes memory under high
+	/// concurrency without improving throughput.
+	pub(crate) downstream_topk: bool,
 	pub(crate) metrics: Arc<OperatorMetrics>,
 }
 
@@ -72,7 +163,8 @@ impl UnionIndexScan {
 			inputs,
 			needed_fields,
 			resolved: None,
-			merge_by_id: None,
+			merge: None,
+			downstream_topk: false,
 			metrics: Arc::new(OperatorMetrics::new()),
 		}
 	}
@@ -90,7 +182,33 @@ impl UnionIndexScan {
 	/// This produces globally record-ID-sorted output, allowing the
 	/// planner to eliminate the Sort operator for ORDER BY id queries.
 	pub(crate) fn with_merge_by_id(mut self, direction: SortDirection) -> Self {
-		self.merge_by_id = Some(direction);
+		self.merge = Some(MergeMode::ById(direction));
+		self
+	}
+
+	/// Enable k-way merge by an indexed field value.
+	///
+	/// Used when each sub-stream pins the prefix column(s) of a composite
+	/// index to an equality value and is therefore already sorted by the
+	/// next column.  The merge produces a globally-sorted output by
+	/// `path` in `direction` — letting a downstream `ORDER BY` with
+	/// `LIMIT` cancel the scans after just `LIMIT` rows.
+	pub(crate) fn with_merge_by_index_key(
+		mut self,
+		path: FieldPath,
+		direction: SortDirection,
+	) -> Self {
+		self.merge = Some(MergeMode::ByIndexKey {
+			path,
+			direction,
+		});
+		self
+	}
+
+	/// Mark the scan as feeding a bounded top-k sort. Disables eager
+	/// per-sub-stream prefetch (see [`Self::downstream_topk`]).
+	pub(crate) fn with_downstream_topk(mut self) -> Self {
+		self.downstream_topk = true;
 		self
 	}
 }
@@ -104,8 +222,20 @@ impl ExecOperator for UnionIndexScan {
 			("table".to_string(), self.table_name.to_string()),
 			("branches".to_string(), self.inputs.len().to_string()),
 		];
-		if let Some(dir) = &self.merge_by_id {
-			attrs.push(("merge_by_id".to_string(), format!("{dir:?}")));
+		match &self.merge {
+			Some(MergeMode::ById(dir)) => {
+				attrs.push(("merge_by_id".to_string(), format!("{dir:?}")));
+			}
+			Some(MergeMode::ByIndexKey {
+				path,
+				direction,
+			}) => {
+				attrs.push(("merge_by_index_key".to_string(), format!("{path} {direction:?}")));
+			}
+			None => {}
+		}
+		if self.downstream_topk {
+			attrs.push(("downstream_topk".to_string(), "true".to_string()));
 		}
 		attrs
 	}
@@ -131,15 +261,23 @@ impl ExecOperator for UnionIndexScan {
 	}
 
 	fn output_ordering(&self) -> OutputOrdering {
-		if let Some(direction) = self.merge_by_id {
-			OutputOrdering::Sorted(vec![SortProperty {
+		match &self.merge {
+			Some(MergeMode::ById(direction)) => OutputOrdering::Sorted(vec![SortProperty {
 				path: FieldPath::field("id"),
-				direction,
+				direction: *direction,
 				collate: false,
 				numeric: false,
-			}])
-		} else {
-			OutputOrdering::Unordered
+			}]),
+			Some(MergeMode::ByIndexKey {
+				path,
+				direction,
+			}) => OutputOrdering::Sorted(vec![SortProperty {
+				path: path.clone(),
+				direction: *direction,
+				collate: false,
+				numeric: false,
+			}]),
+			None => OutputOrdering::Unordered,
 		}
 	}
 
@@ -166,11 +304,12 @@ impl ExecOperator for UnionIndexScan {
 		let mut sub_streams: Vec<ValueBatchStream> = Vec::with_capacity(self.inputs.len());
 		for input in &self.inputs {
 			let stream = input.execute(ctx)?;
-			// In merge mode, consume sub-streams on-demand — no buffering.
-			// This prevents background tasks from eagerly fetching entire
-			// equality ranges when only a small number of records are
-			// needed (e.g. ORDER BY id LIMIT 25).
-			let sub_stream = if self.merge_by_id.is_some() {
+			// Skip per-sub-stream prefetch when either:
+			//   - merge mode is set (already consumed on-demand), or
+			//   - downstream_topk is set: the heap will discard most rows anyway, so spawning
+			//     background tasks to eagerly pull batches just inflates memory under high
+			//     concurrency without improving throughput.
+			let sub_stream = if self.merge.is_some() || self.downstream_topk {
 				stream
 			} else {
 				buffer_stream(
@@ -187,7 +326,7 @@ impl ExecOperator for UnionIndexScan {
 		let table_name = self.table_name.clone();
 		let needed_fields = self.needed_fields.clone();
 		let resolved = self.resolved.clone();
-		let merge_by_id = self.merge_by_id;
+		let merge = self.merge.clone();
 		let ctx = ctx.clone();
 
 		let stream: ValueBatchStream = Box::pin(async_stream::try_stream! {
@@ -241,18 +380,22 @@ impl ExecOperator for UnionIndexScan {
 				check_perms, None, 0,
 			);
 
-			if let Some(merge_dir) = merge_by_id {
-				// ─── K-way merge by record ID ──────────────────────────
+			if let Some(merge_mode) = merge {
+				// ─── K-way merge of sub-streams ────────────────────────
 				//
-				// Each sub-stream produces records sorted by record ID
-				// (guaranteed by single-column equality index scans).
-				// We merge them into a single globally-sorted stream,
-				// picking the min (ASC) or max (DESC) record ID at each
-				// step.  Because the downstream Limit operator stops
-				// consuming after N records, the merge terminates early
-				// for LIMIT queries — typically reading only ~N records
-				// total across all sub-streams.
+				// Each sub-stream produces records already sorted by the
+				// merge key (record ID for [`MergeMode::ById`], an indexed
+				// field value for [`MergeMode::ByIndexKey`]).  We merge
+				// them into a single globally-sorted stream by repeatedly
+				// picking the cursor with the best key and yielding it.
+				//
+				// The merge consumes sub-streams on-demand, so a
+				// downstream Limit operator terminates the scan after N
+				// records — typically reading only ~N records total
+				// across all sub-streams instead of draining every
+				// branch.
 
+				let direction = merge_mode.direction();
 				// Per-stream buffers and positions
 				let k = sub_streams.len();
 				let mut buffers: Vec<Vec<Value>> = Vec::with_capacity(k);
@@ -271,6 +414,9 @@ impl ExecOperator for UnionIndexScan {
 				}
 
 				// Track the last yielded record ID for deduplication
+				// (only meaningful in `ById` mode — branches in
+				// `ByIndexKey` mode are prefix-disjoint, so a record
+				// cannot appear twice).
 				let mut last_rid: Option<RecordId> = None;
 
 				loop {
@@ -281,31 +427,32 @@ impl ExecOperator for UnionIndexScan {
 						))?;
 					}
 
-					// Find the cursor with the best (min for ASC, max for DESC) record ID
+					// Find the cursor with the best key.
+					// For `Asc`, "best" means minimum; for `Desc`, maximum.
 					let mut best_idx: Option<usize> = None;
-					let mut best_rid: Option<RecordId> = None;
+					let mut best_key: Option<MergeKey> = None;
 
 					for i in 0..k {
 						if positions[i] >= buffers[i].len() {
 							continue; // stream exhausted or buffer drained
 						}
-						let rid = match &buffers[i][positions[i]] {
-							Value::Object(obj) => match obj.get("id") {
-								Some(Value::RecordId(r)) => r.clone(),
-								_ => continue,
-							},
-							_ => continue,
+						let key = match extract_merge_key(
+							&merge_mode,
+							&buffers[i][positions[i]],
+						) {
+							Some(k) => k,
+							None => continue,
 						};
-						let is_better = match &best_rid {
+						let is_better = match &best_key {
 							None => true,
-							Some(prev) => match merge_dir {
-								SortDirection::Asc => rid < *prev,
-								SortDirection::Desc => rid > *prev,
+							Some(prev) => match direction {
+								SortDirection::Asc => key.cmp(prev) == Ordering::Less,
+								SortDirection::Desc => key.cmp(prev) == Ordering::Greater,
 							},
 						};
 						if is_better {
 							best_idx = Some(i);
-							best_rid = Some(rid);
+							best_key = Some(key);
 						}
 					}
 
@@ -327,8 +474,12 @@ impl ExecOperator for UnionIndexScan {
 						}
 					}
 
-					// Deduplicate: skip if same record ID as last yielded
-					if let Some(ref rid) = best_rid {
+					// In `ById` mode the same record can appear in
+					// multiple branches (OR-dedup); skip if same record
+					// ID as last yielded.
+					if matches!(merge_mode, MergeMode::ById(_))
+						&& let Some(MergeKey::Rid(ref rid)) = best_key
+					{
 						if last_rid.as_ref() == Some(rid) {
 							continue;
 						}

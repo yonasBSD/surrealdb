@@ -34,7 +34,8 @@ pub(crate) use literals::{
 };
 pub(crate) use optimization::{
 	extract_count_field_names, extract_version, get_effective_limit_literal, index_covers_ordering,
-	is_count_all_eligible, is_indexed_count_eligible, order_is_scan_compatible,
+	is_bounded_topk_downstream, is_count_all_eligible, is_indexed_count_eligible,
+	order_is_scan_compatible,
 };
 pub(crate) use params::{
 	SELECT_ITERATION_PARAMS, resolve_condition_params, resolve_param_value,
