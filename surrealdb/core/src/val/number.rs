@@ -1252,33 +1252,12 @@ mod tests {
 			}
 		}
 
-		// TODO: Use std library once stable https://doc.rust-lang.org/std/primitive.f64.html#method.next_down
-		fn next_down(n: f64) -> f64 {
-			const TINY_BITS: u64 = 0x1; // Smallest positive f64.
-			const CLEAR_SIGN_MASK: u64 = 0x7fff_ffff_ffff_ffff;
-
-			let bits = n.to_bits();
-			if n.is_nan() || bits == f64::INFINITY.to_bits() {
-				return n;
-			}
-
-			let abs = bits & CLEAR_SIGN_MASK;
-			let next_bits = if abs == 0 {
-				TINY_BITS
-			} else if bits == abs {
-				bits + 1
-			} else {
-				bits - 1
-			};
-			f64::from_bits(next_bits)
-		}
-
 		fn random_permutation(number: Number) -> Number {
 			let mut rng = rand::rng();
 			let value = match rng.random_range(0..4) {
 				0 => number + Number::from(rng.random::<f64>()),
 				1 if !matches!(number, Number::Int(i64::MIN)) => number * Number::from(-1),
-				2 => Number::Float(next_down(number.as_float())),
+				2 => Number::Float(number.as_float().next_down()),
 				_ => number,
 			};
 			match rng.random_range(0..3) {
