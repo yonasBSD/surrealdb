@@ -2,11 +2,10 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use surrealdb_types::{SqlFormat, ToSql};
 
 use crate::exec::physical_expr::{EvalContext, PhysicalExpr};
-use crate::exec::{AccessMode, ContextLevel};
+use crate::exec::{AccessMode, BoxFut, ContextLevel};
 use crate::expr::FlowResult;
 use crate::val::Value;
 
@@ -15,9 +14,6 @@ use crate::val::Value;
 pub struct IndexPart {
 	pub expr: Arc<dyn PhysicalExpr>,
 }
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl PhysicalExpr for IndexPart {
 	fn name(&self) -> &'static str {
 		"Index"
@@ -31,20 +27,22 @@ impl PhysicalExpr for IndexPart {
 		self.expr.required_context()
 	}
 
-	async fn evaluate(&self, ctx: EvalContext<'_>) -> FlowResult<Value> {
-		let value = ctx.current_value.unwrap_or(&Value::NONE);
-		// Evaluate the index expression against the document root (if available)
-		// so that dynamic key references like `[field]` or `[$param]` resolve
-		// against the full document rather than the chain's current position.
-		// This matches the old compute path where Part::Value evaluates the
-		// expression with `doc` (the full cursor document).
-		let index_ctx = if let Some(doc) = ctx.document_root {
-			ctx.with_value(doc)
-		} else {
-			ctx
-		};
-		let index = self.expr.evaluate(index_ctx).await?;
-		Ok(evaluate_index(value, &index)?)
+	fn evaluate<'a>(&'a self, ctx: EvalContext<'a>) -> BoxFut<'a, FlowResult<Value>> {
+		Box::pin(async move {
+			let value = ctx.current_value.unwrap_or(&Value::NONE);
+			// Evaluate the index expression against the document root (if available)
+			// so that dynamic key references like `[field]` or `[$param]` resolve
+			// against the full document rather than the chain's current position.
+			// This matches the old compute path where Part::Value evaluates the
+			// expression with `doc` (the full cursor document).
+			let index_ctx = if let Some(doc) = ctx.document_root {
+				ctx.with_value(doc)
+			} else {
+				ctx
+			};
+			let index = self.expr.evaluate(index_ctx).await?;
+			Ok(evaluate_index(value, &index)?)
+		})
 	}
 
 	fn access_mode(&self) -> AccessMode {

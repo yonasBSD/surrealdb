@@ -18,14 +18,15 @@ use futures::future::try_join_all;
 use futures::stream::Stream;
 use tokio::sync::{Mutex, Notify};
 use tokio::time::sleep;
+use tracing::Instrument;
 use uuid::Uuid;
 use web_time::Instant;
 
 use super::batch::Batch;
 use super::{Key, LockType, TransactionFactory, TransactionType, Val, util};
 use crate::catalog::providers::{
-	ApiProvider, AuthorisationProvider, BucketProvider, CatalogProvider, DatabaseProvider,
-	NamespaceProvider, NodeProvider, RootProvider, TableProvider, UserProvider,
+	ApiProvider, AuthorisationProvider, BoxProviderFut, BucketProvider, CatalogProvider,
+	DatabaseProvider, NamespaceProvider, NodeProvider, RootProvider, TableProvider, UserProvider,
 };
 use crate::catalog::{
 	self, ApiDefinition, ConfigDefinition, DatabaseDefinition, DatabaseId, DefaultConfig, IndexId,
@@ -1537,1489 +1538,1662 @@ impl Transaction {
 	}
 }
 
-#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl NodeProvider for Transaction {
 	/// Retrieve all nodes belonging to this cluster.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_nodes(&self) -> Result<Arc<[Node]>> {
-		let qey = cache::tx::Lookup::Nds;
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_nds(),
-			None => {
-				let beg = crate::key::root::nd::prefix();
-				let end = crate::key::root::nd::suffix();
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Nds(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	fn all_nodes(&self) -> BoxProviderFut<'_, Result<Arc<[Node]>>> {
+		Box::pin(
+			async move {
+				let qey = cache::tx::Lookup::Nds;
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_nds(),
+					None => {
+						let beg = crate::key::root::nd::prefix();
+						let end = crate::key::root::nd::suffix();
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Nds(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_nodes")),
+		)
 	}
 
 	/// Retrieve a specific node in the cluster.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_node(&self, id: Uuid) -> Result<Arc<Node>> {
-		let qey = cache::tx::Lookup::Nd(id);
-		match self.cache.get(&qey) {
-			Some(val) => val,
-			None => {
-				let key = crate::key::root::nd::new(id);
-				let val = self.get(&key, None).await?.ok_or_else(|| Error::NdNotFound {
-					uuid: id.to_string(),
-				})?;
-				let val = cache::tx::Entry::Any(Arc::new(val));
-				self.cache.insert(qey, val.clone());
-				val
+	fn get_node(&self, id: Uuid) -> BoxProviderFut<'_, Result<Arc<Node>>> {
+		Box::pin(
+			async move {
+				let qey = cache::tx::Lookup::Nd(id);
+				match self.cache.get(&qey) {
+					Some(val) => val,
+					None => {
+						let key = crate::key::root::nd::new(id);
+						let val = self.get(&key, None).await?.ok_or_else(|| Error::NdNotFound {
+							uuid: id.to_string(),
+						})?;
+						let val = cache::tx::Entry::Any(Arc::new(val));
+						self.cache.insert(qey, val.clone());
+						val
+					}
+				}
+				.try_into_type()
 			}
-		}
-		.try_into_type()
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_node")),
+		)
 	}
 }
 
-#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl RootProvider for Transaction {
-	async fn get_default_config(&self) -> Result<Option<Arc<DefaultConfig>>> {
-		let qey = cache::tx::Lookup::Rcg("default");
-		match self.cache.get(&qey) {
-			Some(val) => val,
-			None => {
-				let key = crate::key::root::root_config::new("default");
-				let Some(val) = self.get(&key, None).await? else {
-					return Ok(None);
-				};
-				let ConfigDefinition::Default(val) = val else {
-					fail!("Expected a default config but found {val:?} instead");
-				};
-				let val = cache::tx::Entry::Any(Arc::new(val));
-				self.cache.insert(qey, val.clone());
-				val
+	fn get_default_config(&self) -> BoxProviderFut<'_, Result<Option<Arc<DefaultConfig>>>> {
+		Box::pin(async move {
+			let qey = cache::tx::Lookup::Rcg("default");
+			match self.cache.get(&qey) {
+				Some(val) => val,
+				None => {
+					let key = crate::key::root::root_config::new("default");
+					let Some(val) = self.get(&key, None).await? else {
+						return Ok(None);
+					};
+					let ConfigDefinition::Default(val) = val else {
+						fail!("Expected a default config but found {val:?} instead");
+					};
+					let val = cache::tx::Entry::Any(Arc::new(val));
+					self.cache.insert(qey, val.clone());
+					val
+				}
 			}
-		}
-		.try_into_type()
-		.map(Option::Some)
+			.try_into_type()
+			.map(Option::Some)
+		})
 	}
 
 	/// Retrieve a specific config definition from the root.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_root_config(&self, cg: &str) -> Result<Option<Arc<ConfigDefinition>>> {
-		let qey = cache::tx::Lookup::Rcg(cg);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type().map(Option::Some),
-			None => {
-				let key = crate::key::root::root_config::new(cg);
-				if let Some(val) = self.get(&key, None).await? {
-					let val = Arc::new(val);
-					let entr = cache::tx::Entry::Any(val.clone());
-					self.cache.insert(qey, entr);
-					Ok(Some(val))
-				} else {
-					Ok(None)
+	fn get_root_config<'a>(
+		&'a self,
+		cg: &'a str,
+	) -> BoxProviderFut<'a, Result<Option<Arc<ConfigDefinition>>>> {
+		Box::pin(
+			async move {
+				let qey = cache::tx::Lookup::Rcg(cg);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_type().map(Option::Some),
+					None => {
+						let key = crate::key::root::root_config::new(cg);
+						if let Some(val) = self.get(&key, None).await? {
+							let val = Arc::new(val);
+							let entr = cache::tx::Entry::Any(val.clone());
+							self.cache.insert(qey, entr);
+							Ok(Some(val))
+						} else {
+							Ok(None)
+						}
+					}
 				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_root_config")),
+		)
 	}
 }
 
-#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl NamespaceProvider for Transaction {
 	/// Retrieve all namespace definitions in a datastore.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_ns(&self, version: Option<u64>) -> Result<Arc<[NamespaceDefinition]>> {
-		if version.is_some() {
-			let beg = crate::key::root::ns::prefix();
-			let end = crate::key::root::ns::suffix();
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Nss;
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_nss(),
-			None => {
-				let beg = crate::key::root::ns::prefix();
-				let end = crate::key::root::ns::suffix();
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Nss(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	fn all_ns(
+		&self,
+		version: Option<u64>,
+	) -> BoxProviderFut<'_, Result<Arc<[NamespaceDefinition]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = crate::key::root::ns::prefix();
+					let end = crate::key::root::ns::suffix();
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Nss;
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_nss(),
+					None => {
+						let beg = crate::key::root::ns::prefix();
+						let end = crate::key::root::ns::suffix();
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Nss(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_ns")),
+		)
 	}
 
-	async fn get_ns_by_name(
-		&self,
-		ns: &str,
+	fn get_ns_by_name<'a>(
+		&'a self,
+		ns: &'a str,
 		version: Option<u64>,
-	) -> Result<Option<Arc<NamespaceDefinition>>> {
-		if version.is_some() {
-			let key = crate::key::root::ns::new(ns);
-			let Some(ns) = self.get(&key, version).await? else {
-				return Ok(None);
-			};
-			return Ok(Some(Arc::new(ns)));
-		}
-		let qey = cache::tx::Lookup::NsByName(ns);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type().map(Some),
-			None => {
+	) -> BoxProviderFut<'a, Result<Option<Arc<NamespaceDefinition>>>> {
+		Box::pin(async move {
+			if version.is_some() {
 				let key = crate::key::root::ns::new(ns);
-				let Some(ns) = self.get(&key, None).await? else {
+				let Some(ns) = self.get(&key, version).await? else {
 					return Ok(None);
 				};
-
-				let ns = Arc::new(ns);
-				let entr = cache::tx::Entry::Any(ns.clone());
-				self.cache.insert(qey, entr);
-				Ok(Some(ns))
+				return Ok(Some(Arc::new(ns)));
 			}
-		}
+			let qey = cache::tx::Lookup::NsByName(ns);
+			match self.cache.get(&qey) {
+				Some(val) => val.try_into_type().map(Some),
+				None => {
+					let key = crate::key::root::ns::new(ns);
+					let Some(ns) = self.get(&key, None).await? else {
+						return Ok(None);
+					};
+
+					let ns = Arc::new(ns);
+					let entr = cache::tx::Entry::Any(ns.clone());
+					self.cache.insert(qey, entr);
+					Ok(Some(ns))
+				}
+			}
+		})
 	}
 
-	async fn expect_ns_by_name(&self, ns: &str) -> Result<Arc<NamespaceDefinition>> {
-		match self.get_ns_by_name(ns, None).await? {
-			Some(val) => Ok(val),
-			None => anyhow::bail!(Error::NsNotFound {
-				name: ns.to_owned(),
-			}),
-		}
+	fn expect_ns_by_name<'a>(
+		&'a self,
+		ns: &'a str,
+	) -> BoxProviderFut<'a, Result<Arc<NamespaceDefinition>>> {
+		Box::pin(async move {
+			match self.get_ns_by_name(ns, None).await? {
+				Some(val) => Ok(val),
+				None => anyhow::bail!(Error::NsNotFound {
+					name: ns.to_owned(),
+				}),
+			}
+		})
 	}
 
-	async fn put_ns(&self, ns: NamespaceDefinition) -> Result<Arc<NamespaceDefinition>> {
-		let key = crate::key::root::ns::new(&ns.name);
-		self.set(&key, &ns).await?;
+	fn put_ns(
+		&self,
+		ns: NamespaceDefinition,
+	) -> BoxProviderFut<'_, Result<Arc<NamespaceDefinition>>> {
+		Box::pin(async move {
+			let key = crate::key::root::ns::new(&ns.name);
+			self.set(&key, &ns).await?;
 
-		// Invalidate the cached list of all namespaces
-		let list_key = cache::tx::Lookup::Nss;
-		self.cache.remove(&list_key);
+			// Invalidate the cached list of all namespaces
+			let list_key = cache::tx::Lookup::Nss;
+			self.cache.remove(&list_key);
 
-		// Populate cache
-		let cached_ns = Arc::new(ns.clone());
+			// Populate cache
+			let cached_ns = Arc::new(ns.clone());
 
-		let entry = cache::tx::Entry::Any(Arc::clone(&cached_ns) as Arc<dyn Any + Send + Sync>);
-		let qey = cache::tx::Lookup::NsByName(&ns.name);
-		self.cache.insert(qey, entry);
+			let entry = cache::tx::Entry::Any(Arc::clone(&cached_ns) as Arc<dyn Any + Send + Sync>);
+			let qey = cache::tx::Lookup::NsByName(&ns.name);
+			self.cache.insert(qey, entry);
 
-		Ok(cached_ns)
+			Ok(cached_ns)
+		})
 	}
 
-	async fn get_next_ns_id(&self, ctx: Option<&Context>) -> Result<NamespaceId> {
-		self.sequences.next_namespace_id(ctx).await
+	fn get_next_ns_id<'a>(
+		&'a self,
+		ctx: Option<&'a Context>,
+	) -> BoxProviderFut<'a, Result<NamespaceId>> {
+		Box::pin(async move { self.sequences.next_namespace_id(ctx).await })
 	}
 }
 
-#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl DatabaseProvider for Transaction {
 	/// Retrieve all database definitions for a specific namespace.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_db(
+	fn all_db(
 		&self,
 		ns: NamespaceId,
 		version: Option<u64>,
-	) -> Result<Arc<[DatabaseDefinition]>> {
-		if version.is_some() {
-			let beg = crate::key::namespace::db::prefix(ns)?;
-			let end = crate::key::namespace::db::suffix(ns)?;
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Dbs(ns);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_dbs(),
-			None => {
-				let beg = crate::key::namespace::db::prefix(ns)?;
-				let end = crate::key::namespace::db::suffix(ns)?;
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Dbs(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'_, Result<Arc<[DatabaseDefinition]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = crate::key::namespace::db::prefix(ns)?;
+					let end = crate::key::namespace::db::suffix(ns)?;
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Dbs(ns);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_dbs(),
+					None => {
+						let beg = crate::key::namespace::db::prefix(ns)?;
+						let end = crate::key::namespace::db::suffix(ns)?;
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Dbs(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_db")),
+		)
 	}
 
 	/// Retrieve a specific database definition.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_db_by_name(
-		&self,
-		ns: &str,
-		db: &str,
+	fn get_db_by_name<'a>(
+		&'a self,
+		ns: &'a str,
+		db: &'a str,
 		version: Option<u64>,
-	) -> Result<Option<Arc<DatabaseDefinition>>> {
-		if version.is_some() {
-			let Some(ns) = self.get_ns_by_name(ns, version).await? else {
-				return Ok(None);
-			};
-			let key = crate::key::namespace::db::new(ns.namespace_id, db);
-			let Some(db_def) = self.get(&key, version).await? else {
-				return Ok(None);
-			};
-			return Ok(Some(Arc::new(db_def)));
-		}
-		let qey = cache::tx::Lookup::DbByName(ns, db);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type().map(Some),
-			None => {
-				let Some(ns) = self.get_ns_by_name(ns, None).await? else {
-					return Ok(None);
-				};
+	) -> BoxProviderFut<'a, Result<Option<Arc<DatabaseDefinition>>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let Some(ns) = self.get_ns_by_name(ns, version).await? else {
+						return Ok(None);
+					};
+					let key = crate::key::namespace::db::new(ns.namespace_id, db);
+					let Some(db_def) = self.get(&key, version).await? else {
+						return Ok(None);
+					};
+					return Ok(Some(Arc::new(db_def)));
+				}
+				let qey = cache::tx::Lookup::DbByName(ns, db);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_type().map(Some),
+					None => {
+						let Some(ns) = self.get_ns_by_name(ns, None).await? else {
+							return Ok(None);
+						};
 
-				let key = crate::key::namespace::db::new(ns.namespace_id, db);
-				let Some(db_def) = self.get(&key, None).await? else {
-					return Ok(None);
-				};
+						let key = crate::key::namespace::db::new(ns.namespace_id, db);
+						let Some(db_def) = self.get(&key, None).await? else {
+							return Ok(None);
+						};
 
-				let val = Arc::new(db_def);
-				let entry = cache::tx::Entry::Any(val.clone());
-				self.cache.insert(qey, entry);
-				Ok(Some(val))
+						let val = Arc::new(db_def);
+						let entry = cache::tx::Entry::Any(val.clone());
+						self.cache.insert(qey, entry);
+						Ok(Some(val))
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_db_by_name")),
+		)
 	}
 
 	/// Get or add a database with a default configuration, only if we are in
 	/// dynamic mode.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self, ctx))]
-	async fn get_or_add_db_upwards(
-		&self,
-		ctx: Option<&Context>,
-		ns: &str,
-		db: &str,
+	fn get_or_add_db_upwards<'a>(
+		&'a self,
+		ctx: Option<&'a Context>,
+		ns: &'a str,
+		db: &'a str,
 		upwards: bool,
-	) -> Result<Arc<DatabaseDefinition>> {
-		let qey = cache::tx::Lookup::DbByName(ns, db);
-		match self.cache.get(&qey) {
-			// The entry is in the cache
-			Some(val) => {
-				let t = val.try_into_type()?;
-				Ok(t)
-			}
-			// The entry is not in the cache
-			None => {
-				let db_def = self.get_db_by_name(ns, db, None).await?;
-				if let Some(db_def) = db_def {
-					return Ok(db_def);
-				}
-
-				let ns_def = if upwards {
-					self.get_or_add_ns(ctx, ns).await?
-				} else {
-					match self.get_ns_by_name(ns, None).await? {
-						Some(ns_def) => ns_def,
-						None => {
-							return Err(Error::NsNotFound {
-								name: ns.to_owned(),
-							}
-							.into());
-						}
+	) -> BoxProviderFut<'a, Result<Arc<DatabaseDefinition>>> {
+		Box::pin(
+			async move {
+				let qey = cache::tx::Lookup::DbByName(ns, db);
+				match self.cache.get(&qey) {
+					// The entry is in the cache
+					Some(val) => {
+						let t = val.try_into_type()?;
+						Ok(t)
 					}
-				};
+					// The entry is not in the cache
+					None => {
+						let db_def = self.get_db_by_name(ns, db, None).await?;
+						if let Some(db_def) = db_def {
+							return Ok(db_def);
+						}
 
-				let db_def = DatabaseDefinition {
-					namespace_id: ns_def.namespace_id,
-					database_id: self.get_next_db_id(ctx, ns_def.namespace_id).await?,
-					name: db.into(),
-					comment: None,
-					changefeed: None,
-					strict: false,
-				};
+						let ns_def = if upwards {
+							self.get_or_add_ns(ctx, ns).await?
+						} else {
+							match self.get_ns_by_name(ns, None).await? {
+								Some(ns_def) => ns_def,
+								None => {
+									return Err(Error::NsNotFound {
+										name: ns.to_owned(),
+									}
+									.into());
+								}
+							}
+						};
 
-				return self.put_db(ns_def.name.as_str(), db_def).await;
+						let db_def = DatabaseDefinition {
+							namespace_id: ns_def.namespace_id,
+							database_id: self.get_next_db_id(ctx, ns_def.namespace_id).await?,
+							name: db.into(),
+							comment: None,
+							changefeed: None,
+							strict: false,
+						};
+
+						return self.put_db(ns_def.name.as_str(), db_def).await;
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_or_add_db_upwards")),
+		)
 	}
 
-	async fn get_next_db_id(&self, ctx: Option<&Context>, ns: NamespaceId) -> Result<DatabaseId> {
-		self.sequences.next_database_id(ctx, ns).await
+	fn get_next_db_id<'a>(
+		&'a self,
+		ctx: Option<&'a Context>,
+		ns: NamespaceId,
+	) -> BoxProviderFut<'a, Result<DatabaseId>> {
+		Box::pin(async move { self.sequences.next_database_id(ctx, ns).await })
 	}
 
-	async fn put_db(&self, ns: &str, db: DatabaseDefinition) -> Result<Arc<DatabaseDefinition>> {
-		let key = crate::key::namespace::db::new(db.namespace_id, &db.name);
-		self.set(&key, &db).await?;
+	fn put_db<'a>(
+		&'a self,
+		ns: &'a str,
+		db: DatabaseDefinition,
+	) -> BoxProviderFut<'a, Result<Arc<DatabaseDefinition>>> {
+		Box::pin(async move {
+			let key = crate::key::namespace::db::new(db.namespace_id, &db.name);
+			self.set(&key, &db).await?;
 
-		// Invalidate the cached list of all databases for this namespace
-		let list_key = cache::tx::Lookup::Dbs(db.namespace_id);
-		self.cache.remove(&list_key);
+			// Invalidate the cached list of all databases for this namespace
+			let list_key = cache::tx::Lookup::Dbs(db.namespace_id);
+			self.cache.remove(&list_key);
 
-		// Populate cache
-		let cached_db = Arc::new(db.clone());
+			// Populate cache
+			let cached_db = Arc::new(db.clone());
 
-		let entry = cache::tx::Entry::Any(Arc::clone(&cached_db) as Arc<dyn Any + Send + Sync>);
-		let qey = cache::tx::Lookup::DbByName(ns, &db.name);
-		self.cache.insert(qey, entry);
+			let entry = cache::tx::Entry::Any(Arc::clone(&cached_db) as Arc<dyn Any + Send + Sync>);
+			let qey = cache::tx::Lookup::DbByName(ns, &db.name);
+			self.cache.insert(qey, entry);
 
-		Ok(cached_db)
+			Ok(cached_db)
+		})
 	}
 
-	async fn del_db(&self, ns: &str, db: &str, expunge: bool) -> Result<Option<()>> {
-		let Some(db) = self.get_db_by_name(ns, db, None).await? else {
-			return Ok(None);
-		};
-		let key = crate::key::namespace::db::new(db.namespace_id, &db.name);
-		let database_root = crate::key::database::all::new(db.namespace_id, db.database_id);
-		if expunge {
-			self.clr(&key).await?;
-			self.clrp(&database_root).await?;
-		} else {
-			self.del(&key).await?;
-			self.delp(&database_root).await?
-		};
+	fn del_db<'a>(
+		&'a self,
+		ns: &'a str,
+		db: &'a str,
+		expunge: bool,
+	) -> BoxProviderFut<'a, Result<Option<()>>> {
+		Box::pin(async move {
+			let Some(db) = self.get_db_by_name(ns, db, None).await? else {
+				return Ok(None);
+			};
+			let key = crate::key::namespace::db::new(db.namespace_id, &db.name);
+			let database_root = crate::key::database::all::new(db.namespace_id, db.database_id);
+			if expunge {
+				self.clr(&key).await?;
+				self.clrp(&database_root).await?;
+			} else {
+				self.del(&key).await?;
+				self.delp(&database_root).await?
+			};
 
-		// Invalidate the cached list of all databases for this namespace
-		let list_key = cache::tx::Lookup::Dbs(db.namespace_id);
-		self.cache.remove(&list_key);
+			// Invalidate the cached list of all databases for this namespace
+			let list_key = cache::tx::Lookup::Dbs(db.namespace_id);
+			self.cache.remove(&list_key);
 
-		// Invalidate the cached database entry
-		let db_key = cache::tx::Lookup::DbByName(ns, &db.name);
-		self.cache.remove(&db_key);
+			// Invalidate the cached database entry
+			let db_key = cache::tx::Lookup::DbByName(ns, &db.name);
+			self.cache.remove(&db_key);
 
-		Ok(Some(()))
+			Ok(Some(()))
+		})
 	}
 
 	/// Retrieve all analyzer definitions for a specific database.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_db_analyzers(
+	fn all_db_analyzers(
 		&self,
 		ns: NamespaceId,
 		db: DatabaseId,
 		version: Option<u64>,
-	) -> Result<Arc<[catalog::AnalyzerDefinition]>> {
-		if version.is_some() {
-			let beg = crate::key::database::az::prefix(ns, db)?;
-			let end = crate::key::database::az::suffix(ns, db)?;
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Azs(ns, db);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_azs(),
-			None => {
-				let beg = crate::key::database::az::prefix(ns, db)?;
-				let end = crate::key::database::az::suffix(ns, db)?;
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Azs(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'_, Result<Arc<[catalog::AnalyzerDefinition]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = crate::key::database::az::prefix(ns, db)?;
+					let end = crate::key::database::az::suffix(ns, db)?;
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Azs(ns, db);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_azs(),
+					None => {
+						let beg = crate::key::database::az::prefix(ns, db)?;
+						let end = crate::key::database::az::suffix(ns, db)?;
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Azs(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_db_analyzers")),
+		)
 	}
 
 	/// Retrieve all sequences definitions for a specific database.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_db_sequences(
+	fn all_db_sequences(
 		&self,
 		ns: NamespaceId,
 		db: DatabaseId,
 		version: Option<u64>,
-	) -> Result<Arc<[catalog::SequenceDefinition]>> {
-		if version.is_some() {
-			let beg = crate::key::database::sq::prefix(ns, db)?;
-			let end = crate::key::database::sq::suffix(ns, db)?;
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Sqs(ns, db);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_sqs(),
-			None => {
-				let beg = crate::key::database::sq::prefix(ns, db)?;
-				let end = crate::key::database::sq::suffix(ns, db)?;
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Sqs(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'_, Result<Arc<[catalog::SequenceDefinition]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = crate::key::database::sq::prefix(ns, db)?;
+					let end = crate::key::database::sq::suffix(ns, db)?;
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Sqs(ns, db);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_sqs(),
+					None => {
+						let beg = crate::key::database::sq::prefix(ns, db)?;
+						let end = crate::key::database::sq::suffix(ns, db)?;
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Sqs(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_db_sequences")),
+		)
 	}
 
 	/// Retrieve all function definitions for a specific database.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_db_functions(
+	fn all_db_functions(
 		&self,
 		ns: NamespaceId,
 		db: DatabaseId,
 		version: Option<u64>,
-	) -> Result<Arc<[catalog::FunctionDefinition]>> {
-		if version.is_some() {
-			let beg = crate::key::database::fc::prefix(ns, db)?;
-			let end = crate::key::database::fc::suffix(ns, db)?;
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Fcs(ns, db);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_fcs(),
-			None => {
-				let beg = crate::key::database::fc::prefix(ns, db)?;
-				let end = crate::key::database::fc::suffix(ns, db)?;
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Fcs(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'_, Result<Arc<[catalog::FunctionDefinition]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = crate::key::database::fc::prefix(ns, db)?;
+					let end = crate::key::database::fc::suffix(ns, db)?;
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Fcs(ns, db);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_fcs(),
+					None => {
+						let beg = crate::key::database::fc::prefix(ns, db)?;
+						let end = crate::key::database::fc::suffix(ns, db)?;
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Fcs(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_db_functions")),
+		)
 	}
 
 	/// Retrieve all module definitions for a specific database.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_db_modules(
+	fn all_db_modules(
 		&self,
 		ns: NamespaceId,
 		db: DatabaseId,
 		version: Option<u64>,
-	) -> Result<Arc<[catalog::ModuleDefinition]>> {
-		if version.is_some() {
-			let beg = crate::key::database::md::prefix(ns, db)?;
-			let end = crate::key::database::md::suffix(ns, db)?;
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Mds(ns, db);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_mds(),
-			None => {
-				let beg = crate::key::database::md::prefix(ns, db)?;
-				let end = crate::key::database::md::suffix(ns, db)?;
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Mds(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'_, Result<Arc<[catalog::ModuleDefinition]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = crate::key::database::md::prefix(ns, db)?;
+					let end = crate::key::database::md::suffix(ns, db)?;
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Mds(ns, db);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_mds(),
+					None => {
+						let beg = crate::key::database::md::prefix(ns, db)?;
+						let end = crate::key::database::md::suffix(ns, db)?;
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Mds(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_db_modules")),
+		)
 	}
 
 	/// Retrieve all param definitions for a specific database.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_db_params(
+	fn all_db_params(
 		&self,
 		ns: NamespaceId,
 		db: DatabaseId,
 		version: Option<u64>,
-	) -> Result<Arc<[catalog::ParamDefinition]>> {
-		if version.is_some() {
-			let beg = crate::key::database::pa::prefix(ns, db)?;
-			let end = crate::key::database::pa::suffix(ns, db)?;
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Pas(ns, db);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_pas(),
-			None => {
-				let beg = crate::key::database::pa::prefix(ns, db)?;
-				let end = crate::key::database::pa::suffix(ns, db)?;
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Pas(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'_, Result<Arc<[catalog::ParamDefinition]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = crate::key::database::pa::prefix(ns, db)?;
+					let end = crate::key::database::pa::suffix(ns, db)?;
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Pas(ns, db);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_pas(),
+					None => {
+						let beg = crate::key::database::pa::prefix(ns, db)?;
+						let end = crate::key::database::pa::suffix(ns, db)?;
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Pas(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_db_params")),
+		)
 	}
 
 	/// Retrieve all model definitions for a specific database.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_db_models(
+	fn all_db_models(
 		&self,
 		ns: NamespaceId,
 		db: DatabaseId,
 		version: Option<u64>,
-	) -> Result<Arc<[catalog::MlModelDefinition]>> {
-		if version.is_some() {
-			let beg = crate::key::database::ml::prefix(ns, db)?;
-			let end = crate::key::database::ml::suffix(ns, db)?;
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Mls(ns, db);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_mls(),
-			None => {
-				let beg = crate::key::database::ml::prefix(ns, db)?;
-				let end = crate::key::database::ml::suffix(ns, db)?;
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Mls(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'_, Result<Arc<[catalog::MlModelDefinition]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = crate::key::database::ml::prefix(ns, db)?;
+					let end = crate::key::database::ml::suffix(ns, db)?;
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Mls(ns, db);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_mls(),
+					None => {
+						let beg = crate::key::database::ml::prefix(ns, db)?;
+						let end = crate::key::database::ml::suffix(ns, db)?;
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Mls(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_db_models")),
+		)
 	}
 
 	/// Retrieve all config definitions for a specific database.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_db_configs(
+	fn all_db_configs(
 		&self,
 		ns: NamespaceId,
 		db: DatabaseId,
 		version: Option<u64>,
-	) -> Result<Arc<[ConfigDefinition]>> {
-		if version.is_some() {
-			let beg = crate::key::database::cg::prefix(ns, db)?;
-			let end = crate::key::database::cg::suffix(ns, db)?;
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Cgs(ns, db);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_cgs(),
-			None => {
-				let beg = crate::key::database::cg::prefix(ns, db)?;
-				let end = crate::key::database::cg::suffix(ns, db)?;
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Cgs(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'_, Result<Arc<[ConfigDefinition]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = crate::key::database::cg::prefix(ns, db)?;
+					let end = crate::key::database::cg::suffix(ns, db)?;
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Cgs(ns, db);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_cgs(),
+					None => {
+						let beg = crate::key::database::cg::prefix(ns, db)?;
+						let end = crate::key::database::cg::suffix(ns, db)?;
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Cgs(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_db_configs")),
+		)
 	}
 
 	/// Retrieve a specific model definition from a database.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_db_model(
-		&self,
+	fn get_db_model<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		ml: &str,
-		vn: &str,
+		ml: &'a str,
+		vn: &'a str,
 		version: Option<u64>,
-	) -> Result<Option<Arc<catalog::MlModelDefinition>>> {
-		if version.is_some() {
-			let key = crate::key::database::ml::new(ns, db, ml, vn);
-			let Some(val) = self.get(&key, version).await? else {
-				return Ok(None);
-			};
-			return Ok(Some(Arc::new(val)));
-		}
-		let qey = cache::tx::Lookup::Ml(ns, db, ml, vn);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type().map(Some),
-			None => {
-				let key = crate::key::database::ml::new(ns, db, ml, vn);
-				let Some(val) = self.get(&key, None).await? else {
-					return Ok(None);
-				};
-				let val = Arc::new(val);
-				let entry = cache::tx::Entry::Any(val.clone());
-				self.cache.insert(qey, entry);
-				Ok(Some(val))
+	) -> BoxProviderFut<'a, Result<Option<Arc<catalog::MlModelDefinition>>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let key = crate::key::database::ml::new(ns, db, ml, vn);
+					let Some(val) = self.get(&key, version).await? else {
+						return Ok(None);
+					};
+					return Ok(Some(Arc::new(val)));
+				}
+				let qey = cache::tx::Lookup::Ml(ns, db, ml, vn);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_type().map(Some),
+					None => {
+						let key = crate::key::database::ml::new(ns, db, ml, vn);
+						let Some(val) = self.get(&key, None).await? else {
+							return Ok(None);
+						};
+						let val = Arc::new(val);
+						let entry = cache::tx::Entry::Any(val.clone());
+						self.cache.insert(qey, entry);
+						Ok(Some(val))
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_db_model")),
+		)
 	}
 
 	/// Retrieve a specific analyzer definition from a database.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_db_analyzer(
-		&self,
+	fn get_db_analyzer<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		az: &str,
+		az: &'a str,
 		version: Option<u64>,
-	) -> Result<Arc<catalog::AnalyzerDefinition>> {
-		if version.is_some() {
-			let key = crate::key::database::az::new(ns, db, az);
-			let val = self.get(&key, version).await?.ok_or_else(|| Error::AzNotFound {
-				name: az.to_owned(),
-			})?;
-			return Ok(Arc::new(val));
-		}
-		let qey = cache::tx::Lookup::Az(ns, db, az);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type(),
-			None => {
-				let key = crate::key::database::az::new(ns, db, az);
-				let val = self.get(&key, None).await?.ok_or_else(|| Error::AzNotFound {
-					name: az.to_owned(),
-				})?;
-				let val = Arc::new(val);
-				let entry = cache::tx::Entry::Any(val.clone());
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'a, Result<Arc<catalog::AnalyzerDefinition>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let key = crate::key::database::az::new(ns, db, az);
+					let val = self.get(&key, version).await?.ok_or_else(|| Error::AzNotFound {
+						name: az.to_owned(),
+					})?;
+					return Ok(Arc::new(val));
+				}
+				let qey = cache::tx::Lookup::Az(ns, db, az);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_type(),
+					None => {
+						let key = crate::key::database::az::new(ns, db, az);
+						let val = self.get(&key, None).await?.ok_or_else(|| Error::AzNotFound {
+							name: az.to_owned(),
+						})?;
+						let val = Arc::new(val);
+						let entry = cache::tx::Entry::Any(val.clone());
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_db_analyzer")),
+		)
 	}
 
 	/// Retrieve a specific sequence definition from a database.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_db_sequence(
-		&self,
+	fn get_db_sequence<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		sq: &str,
+		sq: &'a str,
 		version: Option<u64>,
-	) -> Result<Arc<catalog::SequenceDefinition>> {
-		if version.is_some() {
-			let key = Sq::new(ns, db, sq);
-			let val = self.get(&key, version).await?.ok_or_else(|| Error::SeqNotFound {
-				name: sq.to_owned(),
-			})?;
-			return Ok(Arc::new(val));
-		}
-		let qey = cache::tx::Lookup::Sq(ns, db, sq);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type(),
-			None => {
-				let key = Sq::new(ns, db, sq);
-				let val = self.get(&key, None).await?.ok_or_else(|| Error::SeqNotFound {
-					name: sq.to_owned(),
-				})?;
-				let val = Arc::new(val);
-				let entry = cache::tx::Entry::Any(val.clone());
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'a, Result<Arc<catalog::SequenceDefinition>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let key = Sq::new(ns, db, sq);
+					let val = self.get(&key, version).await?.ok_or_else(|| Error::SeqNotFound {
+						name: sq.to_owned(),
+					})?;
+					return Ok(Arc::new(val));
+				}
+				let qey = cache::tx::Lookup::Sq(ns, db, sq);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_type(),
+					None => {
+						let key = Sq::new(ns, db, sq);
+						let val =
+							self.get(&key, None).await?.ok_or_else(|| Error::SeqNotFound {
+								name: sq.to_owned(),
+							})?;
+						let val = Arc::new(val);
+						let entry = cache::tx::Entry::Any(val.clone());
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_db_sequence")),
+		)
 	}
 
 	/// Retrieve a specific function definition from a database.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_db_function(
-		&self,
+	fn get_db_function<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		fc: &str,
+		fc: &'a str,
 		version: Option<u64>,
-	) -> Result<Arc<catalog::FunctionDefinition>> {
-		if version.is_some() {
-			let key = crate::key::database::fc::new(ns, db, fc);
-			let val = self.get(&key, version).await?.ok_or_else(|| Error::FcNotFound {
-				name: fc.to_owned(),
-			})?;
-			return Ok(Arc::new(val));
-		}
-		let qey = cache::tx::Lookup::Fc(ns, db, fc);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type(),
-			None => {
-				let key = crate::key::database::fc::new(ns, db, fc);
-				let val = self.get(&key, None).await?.ok_or_else(|| Error::FcNotFound {
-					name: fc.to_owned(),
-				})?;
-				let val = Arc::new(val);
-				let entry = cache::tx::Entry::Any(val.clone());
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'a, Result<Arc<catalog::FunctionDefinition>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let key = crate::key::database::fc::new(ns, db, fc);
+					let val = self.get(&key, version).await?.ok_or_else(|| Error::FcNotFound {
+						name: fc.to_owned(),
+					})?;
+					return Ok(Arc::new(val));
+				}
+				let qey = cache::tx::Lookup::Fc(ns, db, fc);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_type(),
+					None => {
+						let key = crate::key::database::fc::new(ns, db, fc);
+						let val = self.get(&key, None).await?.ok_or_else(|| Error::FcNotFound {
+							name: fc.to_owned(),
+						})?;
+						let val = Arc::new(val);
+						let entry = cache::tx::Entry::Any(val.clone());
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_db_function")),
+		)
 	}
 
 	/// Retrieve a specific module definition from a database.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_db_module(
-		&self,
+	fn get_db_module<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		md: &str,
+		md: &'a str,
 		version: Option<u64>,
-	) -> Result<Arc<catalog::ModuleDefinition>> {
-		if version.is_some() {
-			let key = crate::key::database::md::new(ns, db, md);
-			let val = self.get(&key, version).await?.ok_or_else(|| Error::MdNotFound {
-				name: md.to_owned(),
-			})?;
-			return Ok(Arc::new(val));
-		}
-		let qey = cache::tx::Lookup::Md(ns, db, md);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type(),
-			None => {
-				let key = crate::key::database::md::new(ns, db, md);
-				let val = self.get(&key, None).await?.ok_or_else(|| Error::MdNotFound {
-					name: md.to_owned(),
-				})?;
-				let val = Arc::new(val);
-				let entry = cache::tx::Entry::Any(val.clone());
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'a, Result<Arc<catalog::ModuleDefinition>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let key = crate::key::database::md::new(ns, db, md);
+					let val = self.get(&key, version).await?.ok_or_else(|| Error::MdNotFound {
+						name: md.to_owned(),
+					})?;
+					return Ok(Arc::new(val));
+				}
+				let qey = cache::tx::Lookup::Md(ns, db, md);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_type(),
+					None => {
+						let key = crate::key::database::md::new(ns, db, md);
+						let val = self.get(&key, None).await?.ok_or_else(|| Error::MdNotFound {
+							name: md.to_owned(),
+						})?;
+						let val = Arc::new(val);
+						let entry = cache::tx::Entry::Any(val.clone());
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_db_module")),
+		)
 	}
 
 	/// Retrieve a specific param definition from a database.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_db_param(
-		&self,
+	fn get_db_param<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		pa: &str,
+		pa: &'a str,
 		version: Option<u64>,
-	) -> Result<Arc<catalog::ParamDefinition>> {
-		if version.is_some() {
-			let key = crate::key::database::pa::new(ns, db, pa);
-			let val = self.get(&key, version).await?.ok_or_else(|| Error::PaNotFound {
-				name: pa.to_owned(),
-			})?;
-			return Ok(Arc::new(val));
-		}
-		let qey = cache::tx::Lookup::Pa(ns, db, pa);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type(),
-			None => {
-				let key = crate::key::database::pa::new(ns, db, pa);
-				let val = self.get(&key, None).await?.ok_or_else(|| Error::PaNotFound {
-					name: pa.to_owned(),
-				})?;
-				let val = Arc::new(val);
-				let entry = cache::tx::Entry::Any(val.clone());
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'a, Result<Arc<catalog::ParamDefinition>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let key = crate::key::database::pa::new(ns, db, pa);
+					let val = self.get(&key, version).await?.ok_or_else(|| Error::PaNotFound {
+						name: pa.to_owned(),
+					})?;
+					return Ok(Arc::new(val));
+				}
+				let qey = cache::tx::Lookup::Pa(ns, db, pa);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_type(),
+					None => {
+						let key = crate::key::database::pa::new(ns, db, pa);
+						let val = self.get(&key, None).await?.ok_or_else(|| Error::PaNotFound {
+							name: pa.to_owned(),
+						})?;
+						let val = Arc::new(val);
+						let entry = cache::tx::Entry::Any(val.clone());
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_db_param")),
+		)
 	}
 
 	/// Retrieve a specific config definition from a database.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_db_config(
-		&self,
+	fn get_db_config<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		cg: &str,
+		cg: &'a str,
 		version: Option<u64>,
-	) -> Result<Option<Arc<ConfigDefinition>>> {
-		if version.is_some() {
-			let key = crate::key::database::cg::new(ns, db, cg);
-			if let Some(val) = self.get(&key, version).await? {
-				return Ok(Some(Arc::new(val)));
-			} else {
-				return Ok(None);
-			}
-		}
-		let qey = cache::tx::Lookup::Cg(ns, db, cg);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type().map(Option::Some),
-			None => {
-				let key = crate::key::database::cg::new(ns, db, cg);
-				if let Some(val) = self.get(&key, None).await? {
-					let val = Arc::new(val);
-					let entr = cache::tx::Entry::Any(val.clone());
-					self.cache.insert(qey, entr);
-					Ok(Some(val))
-				} else {
-					Ok(None)
+	) -> BoxProviderFut<'a, Result<Option<Arc<ConfigDefinition>>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let key = crate::key::database::cg::new(ns, db, cg);
+					if let Some(val) = self.get(&key, version).await? {
+						return Ok(Some(Arc::new(val)));
+					} else {
+						return Ok(None);
+					}
+				}
+				let qey = cache::tx::Lookup::Cg(ns, db, cg);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_type().map(Option::Some),
+					None => {
+						let key = crate::key::database::cg::new(ns, db, cg);
+						if let Some(val) = self.get(&key, None).await? {
+							let val = Arc::new(val);
+							let entr = cache::tx::Entry::Any(val.clone());
+							self.cache.insert(qey, entr);
+							Ok(Some(val))
+						} else {
+							Ok(None)
+						}
+					}
 				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_db_config")),
+		)
 	}
 
-	async fn put_db_function(
-		&self,
+	fn put_db_function<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		fc: &catalog::FunctionDefinition,
-	) -> Result<()> {
-		let key = crate::key::database::fc::new(ns, db, &fc.name);
-		self.set(&key, fc).await?;
+		fc: &'a catalog::FunctionDefinition,
+	) -> BoxProviderFut<'a, Result<()>> {
+		Box::pin(async move {
+			let key = crate::key::database::fc::new(ns, db, &fc.name);
+			self.set(&key, fc).await?;
 
-		// Invalidate the cached list of all functions for this database
-		let list_key = cache::tx::Lookup::Fcs(ns, db);
-		self.cache.remove(&list_key);
+			// Invalidate the cached list of all functions for this database
+			let list_key = cache::tx::Lookup::Fcs(ns, db);
+			self.cache.remove(&list_key);
 
-		// Set the entry in the cache
-		let qey = cache::tx::Lookup::Fc(ns, db, &fc.name);
-		let entry = cache::tx::Entry::Any(Arc::new(fc.clone()));
-		self.cache.insert(qey, entry);
+			// Set the entry in the cache
+			let qey = cache::tx::Lookup::Fc(ns, db, &fc.name);
+			let entry = cache::tx::Entry::Any(Arc::new(fc.clone()));
+			self.cache.insert(qey, entry);
 
-		Ok(())
+			Ok(())
+		})
 	}
 
-	async fn put_db_module(
-		&self,
+	fn put_db_module<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		md: &catalog::ModuleDefinition,
-	) -> Result<()> {
-		let name = md.get_storage_name()?;
-		let key = crate::key::database::md::new(ns, db, &name);
-		self.set(&key, md).await?;
+		md: &'a catalog::ModuleDefinition,
+	) -> BoxProviderFut<'a, Result<()>> {
+		Box::pin(async move {
+			let name = md.get_storage_name()?;
+			let key = crate::key::database::md::new(ns, db, &name);
+			self.set(&key, md).await?;
 
-		// Invalidate the cached list of all modules for this database
-		let list_key = cache::tx::Lookup::Mds(ns, db);
-		self.cache.remove(&list_key);
+			// Invalidate the cached list of all modules for this database
+			let list_key = cache::tx::Lookup::Mds(ns, db);
+			self.cache.remove(&list_key);
 
-		// Set the entry in the cache
-		let qey = cache::tx::Lookup::Md(ns, db, &name);
-		let entry = cache::tx::Entry::Any(Arc::new(md.clone()));
-		self.cache.insert(qey, entry);
+			// Set the entry in the cache
+			let qey = cache::tx::Lookup::Md(ns, db, &name);
+			let entry = cache::tx::Entry::Any(Arc::new(md.clone()));
+			self.cache.insert(qey, entry);
 
-		Ok(())
+			Ok(())
+		})
 	}
 
-	async fn put_db_param(
-		&self,
+	fn put_db_param<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		pa: &catalog::ParamDefinition,
-	) -> Result<()> {
-		let key = crate::key::database::pa::new(ns, db, &pa.name);
-		self.set(&key, pa).await?;
+		pa: &'a catalog::ParamDefinition,
+	) -> BoxProviderFut<'a, Result<()>> {
+		Box::pin(async move {
+			let key = crate::key::database::pa::new(ns, db, &pa.name);
+			self.set(&key, pa).await?;
 
-		// Invalidate the cached list of all params for this database
-		let list_key = cache::tx::Lookup::Pas(ns, db);
-		self.cache.remove(&list_key);
+			// Invalidate the cached list of all params for this database
+			let list_key = cache::tx::Lookup::Pas(ns, db);
+			self.cache.remove(&list_key);
 
-		// Set the entry in the cache
-		let qey = cache::tx::Lookup::Pa(ns, db, &pa.name);
-		let entry = cache::tx::Entry::Any(Arc::new(pa.clone()));
-		self.cache.insert(qey, entry);
+			// Set the entry in the cache
+			let qey = cache::tx::Lookup::Pa(ns, db, &pa.name);
+			let entry = cache::tx::Entry::Any(Arc::new(pa.clone()));
+			self.cache.insert(qey, entry);
 
-		Ok(())
+			Ok(())
+		})
 	}
 }
 
-#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl TableProvider for Transaction {
 	/// Retrieve all table definitions for a specific database.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_tb(
+	fn all_tb(
 		&self,
 		ns: NamespaceId,
 		db: DatabaseId,
 		version: Option<u64>,
-	) -> Result<Arc<[TableDefinition]>> {
-		if version.is_some() {
-			let beg = crate::key::database::tb::prefix(ns, db)?;
-			let end = crate::key::database::tb::suffix(ns, db)?;
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Tbs(ns, db);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_tbs(),
-			None => {
-				let beg = crate::key::database::tb::prefix(ns, db)?;
-				let end = crate::key::database::tb::suffix(ns, db)?;
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Tbs(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'_, Result<Arc<[TableDefinition]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = crate::key::database::tb::prefix(ns, db)?;
+					let end = crate::key::database::tb::suffix(ns, db)?;
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Tbs(ns, db);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_tbs(),
+					None => {
+						let beg = crate::key::database::tb::prefix(ns, db)?;
+						let end = crate::key::database::tb::suffix(ns, db)?;
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Tbs(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_tb")),
+		)
 	}
 
 	/// Retrieve all view definitions for a specific table.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_tb_views(
-		&self,
+	fn all_tb_views<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		tb: &TableName,
+		tb: &'a TableName,
 		version: Option<u64>,
-	) -> Result<Arc<[catalog::TableDefinition]>> {
-		if version.is_some() {
-			let beg = crate::key::table::ft::prefix(ns, db, tb)?;
-			let end = crate::key::table::ft::suffix(ns, db, tb)?;
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Fts(ns, db, tb);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_fts(),
-			None => {
-				let beg = crate::key::table::ft::prefix(ns, db, tb)?;
-				let end = crate::key::table::ft::suffix(ns, db, tb)?;
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Fts(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'a, Result<Arc<[catalog::TableDefinition]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = crate::key::table::ft::prefix(ns, db, tb)?;
+					let end = crate::key::table::ft::suffix(ns, db, tb)?;
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Fts(ns, db, tb);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_fts(),
+					None => {
+						let beg = crate::key::table::ft::prefix(ns, db, tb)?;
+						let end = crate::key::table::ft::suffix(ns, db, tb)?;
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Fts(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_tb_views")),
+		)
 	}
 
 	/// Get or add a table with a default configuration, only if we are in
 	/// dynamic mode. When a version is specified, skips the auto-create path.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self, ctx))]
-	async fn get_or_add_tb(
-		&self,
-		ctx: Option<&Context>,
-		ns: &str,
-		db: &str,
-		tb: &TableName,
+	fn get_or_add_tb<'a>(
+		&'a self,
+		ctx: Option<&'a Context>,
+		ns: &'a str,
+		db: &'a str,
+		tb: &'a TableName,
 		version: Option<u64>,
-	) -> Result<Arc<TableDefinition>> {
-		if version.is_some() {
-			let Some(db_def) = self.get_db_by_name(ns, db, version).await? else {
-				return Err(anyhow::anyhow!(Error::DbNotFound {
-					name: db.to_owned(),
-				}));
-			};
-			let table_key =
-				crate::key::database::tb::new(db_def.namespace_id, db_def.database_id, tb);
-			if let Some(tb_def) = self.get(&table_key, version).await? {
-				return Ok(Arc::new(tb_def));
-			}
-			return Err(Error::TbNotFound {
-				name: tb.to_owned(),
-			}
-			.into());
-		}
-		let qey = cache::tx::Lookup::TbByName(ns, db, tb);
-		match self.cache.get(&qey) {
-			// The entry is in the cache
-			Some(val) => val.try_into_type(),
-			// The entry is not in the cache
-			None => {
-				let Some(db_def) = self.get_db_by_name(ns, db, None).await? else {
-					return Err(anyhow::anyhow!(Error::DbNotFound {
-						name: db.to_owned(),
-					}));
-				};
-
-				let table_key =
-					crate::key::database::tb::new(db_def.namespace_id, db_def.database_id, tb);
-				if let Some(tb_def) = self.get(&table_key, None).await? {
-					let cached_tb = Arc::new(tb_def);
-					let cached_entry =
-						cache::tx::Entry::Any(Arc::clone(&cached_tb) as Arc<dyn Any + Send + Sync>);
-					self.cache.insert(qey, cached_entry);
-					return Ok(cached_tb);
-				}
-
-				if db_def.strict {
+	) -> BoxProviderFut<'a, Result<Arc<TableDefinition>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let Some(db_def) = self.get_db_by_name(ns, db, version).await? else {
+						return Err(anyhow::anyhow!(Error::DbNotFound {
+							name: db.to_owned(),
+						}));
+					};
+					let table_key =
+						crate::key::database::tb::new(db_def.namespace_id, db_def.database_id, tb);
+					if let Some(tb_def) = self.get(&table_key, version).await? {
+						return Ok(Arc::new(tb_def));
+					}
 					return Err(Error::TbNotFound {
 						name: tb.to_owned(),
 					}
 					.into());
 				}
+				let qey = cache::tx::Lookup::TbByName(ns, db, tb);
+				match self.cache.get(&qey) {
+					// The entry is in the cache
+					Some(val) => val.try_into_type(),
+					// The entry is not in the cache
+					None => {
+						let Some(db_def) = self.get_db_by_name(ns, db, None).await? else {
+							return Err(anyhow::anyhow!(Error::DbNotFound {
+								name: db.to_owned(),
+							}));
+						};
 
-				let tb_def = TableDefinition::new(
-					db_def.namespace_id,
-					db_def.database_id,
-					self.get_next_tb_id(ctx, db_def.namespace_id, db_def.database_id).await?,
-					tb.clone(),
-				);
-				self.put_tb(ns, db, &tb_def).await
-			}
-		}
-	}
+						let table_key = crate::key::database::tb::new(
+							db_def.namespace_id,
+							db_def.database_id,
+							tb,
+						);
+						if let Some(tb_def) = self.get(&table_key, None).await? {
+							let cached_tb = Arc::new(tb_def);
+							let cached_entry = cache::tx::Entry::Any(
+								Arc::clone(&cached_tb) as Arc<dyn Any + Send + Sync>
+							);
+							self.cache.insert(qey, cached_entry);
+							return Ok(cached_tb);
+						}
 
-	async fn get_tb_by_name(
-		&self,
-		ns: &str,
-		db: &str,
-		tb: &TableName,
-		version: Option<u64>,
-	) -> Result<Option<Arc<TableDefinition>>> {
-		if version.is_some() {
-			let Some(db) = self.get_db_by_name(ns, db, version).await? else {
-				return Ok(None);
-			};
-			let key = crate::key::database::tb::new(db.namespace_id, db.database_id, tb);
-			let Some(tb) = self.get(&key, version).await? else {
-				return Ok(None);
-			};
-			return Ok(Some(Arc::new(tb)));
-		}
-		let qey = cache::tx::Lookup::TbByName(ns, db, tb);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type().map(Some),
-			None => {
-				let Some(db) = self.get_db_by_name(ns, db, None).await? else {
-					return Ok(None);
-				};
+						if db_def.strict {
+							return Err(Error::TbNotFound {
+								name: tb.to_owned(),
+							}
+							.into());
+						}
 
-				let key = crate::key::database::tb::new(db.namespace_id, db.database_id, tb);
-				let Some(tb) = self.get(&key, None).await? else {
-					return Ok(None);
-				};
-
-				let tb = Arc::new(tb);
-				let entr = cache::tx::Entry::Any(tb.clone());
-				self.cache.insert(qey, entr);
-				Ok(Some(tb))
-			}
-		}
-	}
-
-	async fn put_tb(
-		&self,
-		ns: &str,
-		db: &str,
-		tb: &TableDefinition,
-	) -> Result<Arc<TableDefinition>> {
-		let key = crate::key::database::tb::new(tb.namespace_id, tb.database_id, &tb.name);
-		match self.set(&key, tb).await {
-			Ok(_) => {}
-			Err(e) => {
-				if matches!(
-					e.downcast_ref(),
-					Some(Error::Kvs(crate::kvs::Error::TransactionReadonly))
-				) {
-					return Err(Error::TbNotFound {
-						name: tb.name.clone(),
+						let tb_def = TableDefinition::new(
+							db_def.namespace_id,
+							db_def.database_id,
+							self.get_next_tb_id(ctx, db_def.namespace_id, db_def.database_id)
+								.await?,
+							tb.clone(),
+						);
+						self.put_tb(ns, db, &tb_def).await
 					}
-					.into());
 				}
-				return Err(e);
 			}
-		}
-
-		// Invalidate the cached list of all tables for this database
-		let list_key = cache::tx::Lookup::Tbs(tb.namespace_id, tb.database_id);
-		self.cache.remove(&list_key);
-
-		// Populate cache
-		let cached_tb = Arc::new(tb.clone());
-		let cached_entry =
-			cache::tx::Entry::Any(Arc::clone(&cached_tb) as Arc<dyn Any + Send + Sync>);
-
-		let qey = cache::tx::Lookup::Tb(tb.namespace_id, tb.database_id, &tb.name);
-		self.cache.insert(qey, cached_entry.clone());
-
-		let qey = cache::tx::Lookup::TbByName(ns, db, &tb.name);
-		self.cache.insert(qey, cached_entry);
-
-		Ok(cached_tb)
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_or_add_tb")),
+		)
 	}
 
-	async fn del_tb(&self, ns: &str, db: &str, tb: &TableName) -> Result<()> {
-		let Some(tb) = self.get_tb_by_name(ns, db, tb, None).await? else {
-			return Err(Error::TbNotFound {
-				name: tb.clone(),
+	fn get_tb_by_name<'a>(
+		&'a self,
+		ns: &'a str,
+		db: &'a str,
+		tb: &'a TableName,
+		version: Option<u64>,
+	) -> BoxProviderFut<'a, Result<Option<Arc<TableDefinition>>>> {
+		Box::pin(async move {
+			if version.is_some() {
+				let Some(db) = self.get_db_by_name(ns, db, version).await? else {
+					return Ok(None);
+				};
+				let key = crate::key::database::tb::new(db.namespace_id, db.database_id, tb);
+				let Some(tb) = self.get(&key, version).await? else {
+					return Ok(None);
+				};
+				return Ok(Some(Arc::new(tb)));
 			}
-			.into());
-		};
+			let qey = cache::tx::Lookup::TbByName(ns, db, tb);
+			match self.cache.get(&qey) {
+				Some(val) => val.try_into_type().map(Some),
+				None => {
+					let Some(db) = self.get_db_by_name(ns, db, None).await? else {
+						return Ok(None);
+					};
 
-		let key = crate::key::database::tb::new(tb.namespace_id, tb.database_id, &tb.name);
-		self.del(&key).await?;
+					let key = crate::key::database::tb::new(db.namespace_id, db.database_id, tb);
+					let Some(tb) = self.get(&key, None).await? else {
+						return Ok(None);
+					};
 
-		// Invalidate the cached list of all tables for this database
-		let list_key = cache::tx::Lookup::Tbs(tb.namespace_id, tb.database_id);
-		self.cache.remove(&list_key);
-
-		// Clear the cache
-		let qey = cache::tx::Lookup::Tb(tb.namespace_id, tb.database_id, &tb.name);
-		self.cache.remove(&qey);
-		let qey = cache::tx::Lookup::TbByName(ns, db, &tb.name);
-		self.cache.remove(&qey);
-
-		Ok(())
+					let tb = Arc::new(tb);
+					let entr = cache::tx::Entry::Any(tb.clone());
+					self.cache.insert(qey, entr);
+					Ok(Some(tb))
+				}
+			}
+		})
 	}
 
-	async fn clr_tb(&self, ns: &str, db: &str, tb: &TableName) -> Result<()> {
-		let Some(tb) = self.get_tb_by_name(ns, db, tb, None).await? else {
-			return Err(Error::TbNotFound {
-				name: tb.clone(),
+	fn put_tb<'a>(
+		&'a self,
+		ns: &'a str,
+		db: &'a str,
+		tb: &'a TableDefinition,
+	) -> BoxProviderFut<'a, Result<Arc<TableDefinition>>> {
+		Box::pin(async move {
+			let key = crate::key::database::tb::new(tb.namespace_id, tb.database_id, &tb.name);
+			match self.set(&key, tb).await {
+				Ok(_) => {}
+				Err(e) => {
+					if matches!(
+						e.downcast_ref(),
+						Some(Error::Kvs(crate::kvs::Error::TransactionReadonly))
+					) {
+						return Err(Error::TbNotFound {
+							name: tb.name.clone(),
+						}
+						.into());
+					}
+					return Err(e);
+				}
 			}
-			.into());
-		};
 
-		let key = crate::key::database::tb::new(tb.namespace_id, tb.database_id, &tb.name);
-		self.clr(&key).await?;
+			// Invalidate the cached list of all tables for this database
+			let list_key = cache::tx::Lookup::Tbs(tb.namespace_id, tb.database_id);
+			self.cache.remove(&list_key);
 
-		// Invalidate the cached list of all tables for this database
-		let list_key = cache::tx::Lookup::Tbs(tb.namespace_id, tb.database_id);
-		self.cache.remove(&list_key);
+			// Populate cache
+			let cached_tb = Arc::new(tb.clone());
+			let cached_entry =
+				cache::tx::Entry::Any(Arc::clone(&cached_tb) as Arc<dyn Any + Send + Sync>);
 
-		// Clear the cache
-		let qey = cache::tx::Lookup::Tb(tb.namespace_id, tb.database_id, &tb.name);
-		self.cache.remove(&qey);
-		let qey = cache::tx::Lookup::TbByName(ns, db, &tb.name);
-		self.cache.remove(&qey);
+			let qey = cache::tx::Lookup::Tb(tb.namespace_id, tb.database_id, &tb.name);
+			self.cache.insert(qey, cached_entry.clone());
 
-		Ok(())
+			let qey = cache::tx::Lookup::TbByName(ns, db, &tb.name);
+			self.cache.insert(qey, cached_entry);
+
+			Ok(cached_tb)
+		})
+	}
+
+	fn del_tb<'a>(
+		&'a self,
+		ns: &'a str,
+		db: &'a str,
+		tb: &'a TableName,
+	) -> BoxProviderFut<'a, Result<()>> {
+		Box::pin(async move {
+			let Some(tb) = self.get_tb_by_name(ns, db, tb, None).await? else {
+				return Err(Error::TbNotFound {
+					name: tb.clone(),
+				}
+				.into());
+			};
+
+			let key = crate::key::database::tb::new(tb.namespace_id, tb.database_id, &tb.name);
+			self.del(&key).await?;
+
+			// Invalidate the cached list of all tables for this database
+			let list_key = cache::tx::Lookup::Tbs(tb.namespace_id, tb.database_id);
+			self.cache.remove(&list_key);
+
+			// Clear the cache
+			let qey = cache::tx::Lookup::Tb(tb.namespace_id, tb.database_id, &tb.name);
+			self.cache.remove(&qey);
+			let qey = cache::tx::Lookup::TbByName(ns, db, &tb.name);
+			self.cache.remove(&qey);
+
+			Ok(())
+		})
+	}
+
+	fn clr_tb<'a>(
+		&'a self,
+		ns: &'a str,
+		db: &'a str,
+		tb: &'a TableName,
+	) -> BoxProviderFut<'a, Result<()>> {
+		Box::pin(async move {
+			let Some(tb) = self.get_tb_by_name(ns, db, tb, None).await? else {
+				return Err(Error::TbNotFound {
+					name: tb.clone(),
+				}
+				.into());
+			};
+
+			let key = crate::key::database::tb::new(tb.namespace_id, tb.database_id, &tb.name);
+			self.clr(&key).await?;
+
+			// Invalidate the cached list of all tables for this database
+			let list_key = cache::tx::Lookup::Tbs(tb.namespace_id, tb.database_id);
+			self.cache.remove(&list_key);
+
+			// Clear the cache
+			let qey = cache::tx::Lookup::Tb(tb.namespace_id, tb.database_id, &tb.name);
+			self.cache.remove(&qey);
+			let qey = cache::tx::Lookup::TbByName(ns, db, &tb.name);
+			self.cache.remove(&qey);
+
+			Ok(())
+		})
 	}
 
 	/// Retrieve all event definitions for a specific table.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_tb_events(
-		&self,
+	fn all_tb_events<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		tb: &TableName,
+		tb: &'a TableName,
 		version: Option<u64>,
-	) -> Result<Arc<[catalog::EventDefinition]>> {
-		if version.is_some() {
-			let beg = crate::key::table::ev::prefix(ns, db, tb)?;
-			let end = crate::key::table::ev::suffix(ns, db, tb)?;
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Evs(ns, db, tb);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_evs(),
-			None => {
-				let beg = crate::key::table::ev::prefix(ns, db, tb)?;
-				let end = crate::key::table::ev::suffix(ns, db, tb)?;
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Evs(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'a, Result<Arc<[catalog::EventDefinition]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = crate::key::table::ev::prefix(ns, db, tb)?;
+					let end = crate::key::table::ev::suffix(ns, db, tb)?;
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Evs(ns, db, tb);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_evs(),
+					None => {
+						let beg = crate::key::table::ev::prefix(ns, db, tb)?;
+						let end = crate::key::table::ev::suffix(ns, db, tb)?;
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Evs(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_tb_events")),
+		)
 	}
 
 	/// Retrieve all field definitions for a specific table.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_tb_fields(
-		&self,
+	fn all_tb_fields<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		tb: &TableName,
+		tb: &'a TableName,
 		version: Option<u64>,
-	) -> Result<Arc<[catalog::FieldDefinition]>> {
-		if version.is_some() {
-			let beg = crate::key::table::fd::prefix(ns, db, tb)?;
-			let end = crate::key::table::fd::suffix(ns, db, tb)?;
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Fds(ns, db, tb);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_fds(),
-			None => {
-				let beg = crate::key::table::fd::prefix(ns, db, tb)?;
-				let end = crate::key::table::fd::suffix(ns, db, tb)?;
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Fds(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'a, Result<Arc<[catalog::FieldDefinition]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = crate::key::table::fd::prefix(ns, db, tb)?;
+					let end = crate::key::table::fd::suffix(ns, db, tb)?;
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Fds(ns, db, tb);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_fds(),
+					None => {
+						let beg = crate::key::table::fd::prefix(ns, db, tb)?;
+						let end = crate::key::table::fd::suffix(ns, db, tb)?;
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Fds(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_tb_fields")),
+		)
 	}
 
 	/// Retrieve all index definitions for a specific table.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_tb_indexes(
-		&self,
+	fn all_tb_indexes<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		tb: &TableName,
+		tb: &'a TableName,
 		version: Option<u64>,
-	) -> Result<Arc<[catalog::IndexDefinition]>> {
-		if version.is_some() {
-			let beg = table_ix::prefix(ns, db, tb)?;
-			let end = table_ix::suffix(ns, db, tb)?;
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Ixs(ns, db, tb);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_ixs(),
-			None => {
-				let beg = table_ix::prefix(ns, db, tb)?;
-				let end = table_ix::suffix(ns, db, tb)?;
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Ixs(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'a, Result<Arc<[catalog::IndexDefinition]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = table_ix::prefix(ns, db, tb)?;
+					let end = table_ix::suffix(ns, db, tb)?;
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Ixs(ns, db, tb);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_ixs(),
+					None => {
+						let beg = table_ix::prefix(ns, db, tb)?;
+						let end = table_ix::suffix(ns, db, tb)?;
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Ixs(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_tb_indexes")),
+		)
 	}
 
 	/// Retrieve all live definitions for a specific table.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_tb_lives(
-		&self,
+	fn all_tb_lives<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		tb: &TableName,
+		tb: &'a TableName,
 		version: Option<u64>,
-	) -> Result<Arc<[catalog::SubscriptionDefinition]>> {
-		if version.is_some() {
-			let beg = crate::key::table::lq::prefix(ns, db, tb)?;
-			let end = crate::key::table::lq::suffix(ns, db, tb)?;
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Lvs(ns, db, tb);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_lvs(),
-			None => {
-				let beg = crate::key::table::lq::prefix(ns, db, tb)?;
-				let end = crate::key::table::lq::suffix(ns, db, tb)?;
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Lvs(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'a, Result<Arc<[catalog::SubscriptionDefinition]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = crate::key::table::lq::prefix(ns, db, tb)?;
+					let end = crate::key::table::lq::suffix(ns, db, tb)?;
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Lvs(ns, db, tb);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_lvs(),
+					None => {
+						let beg = crate::key::table::lq::prefix(ns, db, tb)?;
+						let end = crate::key::table::lq::suffix(ns, db, tb)?;
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Lvs(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_tb_lives")),
+		)
 	}
 
 	/// Retrieve a specific table definition.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_tb(
-		&self,
+	fn get_tb<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		tb: &TableName,
+		tb: &'a TableName,
 		version: Option<u64>,
-	) -> Result<Option<Arc<TableDefinition>>> {
-		if version.is_some() {
-			let key = crate::key::database::tb::new(ns, db, tb);
-			let Some(val) = self.get(&key, version).await? else {
-				return Ok(None);
-			};
-			return Ok(Some(Arc::new(val)));
-		}
-		let qey = cache::tx::Lookup::Tb(ns, db, tb);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type().map(Some),
-			None => {
-				let key = crate::key::database::tb::new(ns, db, tb);
-				let Some(val) = self.get(&key, None).await? else {
-					return Ok(None);
-				};
-				let val = Arc::new(val);
-				let entry = cache::tx::Entry::Any(val.clone());
-				self.cache.insert(qey, entry);
-				Ok(Some(val))
+	) -> BoxProviderFut<'a, Result<Option<Arc<TableDefinition>>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let key = crate::key::database::tb::new(ns, db, tb);
+					let Some(val) = self.get(&key, version).await? else {
+						return Ok(None);
+					};
+					return Ok(Some(Arc::new(val)));
+				}
+				let qey = cache::tx::Lookup::Tb(ns, db, tb);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_type().map(Some),
+					None => {
+						let key = crate::key::database::tb::new(ns, db, tb);
+						let Some(val) = self.get(&key, None).await? else {
+							return Ok(None);
+						};
+						let val = Arc::new(val);
+						let entry = cache::tx::Entry::Any(val.clone());
+						self.cache.insert(qey, entry);
+						Ok(Some(val))
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_tb")),
+		)
 	}
 
 	/// Retrieve an event for a table.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_tb_event(
-		&self,
+	fn get_tb_event<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		tb: &TableName,
-		ev: &str,
+		tb: &'a TableName,
+		ev: &'a str,
 		version: Option<u64>,
-	) -> Result<Arc<catalog::EventDefinition>> {
-		if version.is_some() {
-			let key = crate::key::table::ev::new(ns, db, tb, ev);
-			let val = self.get(&key, version).await?.ok_or_else(|| Error::EvNotFound {
-				name: ev.to_owned(),
-			})?;
-			return Ok(Arc::new(val));
-		}
-		let qey = cache::tx::Lookup::Ev(ns, db, tb, ev);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type(),
-			None => {
-				let key = crate::key::table::ev::new(ns, db, tb, ev);
-				let val = self.get(&key, None).await?.ok_or_else(|| Error::EvNotFound {
-					name: ev.to_owned(),
-				})?;
-				let val = Arc::new(val);
-				let entry = cache::tx::Entry::Any(val.clone());
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'a, Result<Arc<catalog::EventDefinition>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let key = crate::key::table::ev::new(ns, db, tb, ev);
+					let val = self.get(&key, version).await?.ok_or_else(|| Error::EvNotFound {
+						name: ev.to_owned(),
+					})?;
+					return Ok(Arc::new(val));
+				}
+				let qey = cache::tx::Lookup::Ev(ns, db, tb, ev);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_type(),
+					None => {
+						let key = crate::key::table::ev::new(ns, db, tb, ev);
+						let val = self.get(&key, None).await?.ok_or_else(|| Error::EvNotFound {
+							name: ev.to_owned(),
+						})?;
+						let val = Arc::new(val);
+						let entry = cache::tx::Entry::Any(val.clone());
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_tb_event")),
+		)
 	}
 
 	/// Retrieve a field for a table.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_tb_field(
-		&self,
+	fn get_tb_field<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		tb: &TableName,
-		fd: &str,
+		tb: &'a TableName,
+		fd: &'a str,
 		version: Option<u64>,
-	) -> Result<Option<Arc<catalog::FieldDefinition>>> {
-		if version.is_some() {
-			let key = crate::key::table::fd::new(ns, db, tb, fd);
-			let Some(val) = self.get(&key, version).await? else {
-				return Ok(None);
-			};
-			return Ok(Some(Arc::new(val)));
-		}
-		let qey = cache::tx::Lookup::Fd(ns, db, tb, fd);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type().map(Some),
-			None => {
-				let key = crate::key::table::fd::new(ns, db, tb, fd);
-				let Some(val) = self.get(&key, None).await? else {
-					return Ok(None);
-				};
-				let val = Arc::new(val);
-				let entry = cache::tx::Entry::Any(val.clone());
-				self.cache.insert(qey, entry);
-				Ok(Some(val))
+	) -> BoxProviderFut<'a, Result<Option<Arc<catalog::FieldDefinition>>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let key = crate::key::table::fd::new(ns, db, tb, fd);
+					let Some(val) = self.get(&key, version).await? else {
+						return Ok(None);
+					};
+					return Ok(Some(Arc::new(val)));
+				}
+				let qey = cache::tx::Lookup::Fd(ns, db, tb, fd);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_type().map(Some),
+					None => {
+						let key = crate::key::table::fd::new(ns, db, tb, fd);
+						let Some(val) = self.get(&key, None).await? else {
+							return Ok(None);
+						};
+						let val = Arc::new(val);
+						let entry = cache::tx::Entry::Any(val.clone());
+						self.cache.insert(qey, entry);
+						Ok(Some(val))
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_tb_field")),
+		)
 	}
 
-	async fn put_tb_field(
-		&self,
+	fn put_tb_field<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		tb: &TableName,
-		fd: &catalog::FieldDefinition,
-	) -> Result<()> {
-		let name = fd.name.to_raw_string();
-		let key = crate::key::table::fd::new(ns, db, tb, &name);
-		self.set(&key, fd).await?;
+		tb: &'a TableName,
+		fd: &'a catalog::FieldDefinition,
+	) -> BoxProviderFut<'a, Result<()>> {
+		Box::pin(async move {
+			let name = fd.name.to_raw_string();
+			let key = crate::key::table::fd::new(ns, db, tb, &name);
+			self.set(&key, fd).await?;
 
-		// Invalidate the cached list of all fields for this table
-		let list_key = cache::tx::Lookup::Fds(ns, db, tb.as_ref());
-		self.cache.remove(&list_key);
+			// Invalidate the cached list of all fields for this table
+			let list_key = cache::tx::Lookup::Fds(ns, db, tb.as_ref());
+			self.cache.remove(&list_key);
 
-		// Set the entry in the cache
-		let qey = cache::tx::Lookup::Fd(ns, db, tb, &name);
-		let entry = cache::tx::Entry::Any(Arc::new(fd.clone()));
-		self.cache.insert(qey, entry);
-		Ok(())
+			// Set the entry in the cache
+			let qey = cache::tx::Lookup::Fd(ns, db, tb, &name);
+			let entry = cache::tx::Entry::Any(Arc::new(fd.clone()));
+			self.cache.insert(qey, entry);
+			Ok(())
+		})
 	}
 
 	/// Retrieve an index for a table.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_tb_index(
-		&self,
+	fn get_tb_index<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		tb: &TableName,
-		ix: &str,
+		tb: &'a TableName,
+		ix: &'a str,
 		version: Option<u64>,
-	) -> Result<Option<Arc<catalog::IndexDefinition>>> {
-		if version.is_some() {
-			let key = table_ix::new(ns, db, tb, ix);
-			let Some(val) = self.get(&key, version).await? else {
-				return Ok(None);
-			};
-			return Ok(Some(Arc::new(val)));
-		}
-		let qey = cache::tx::Lookup::Ix(ns, db, tb, ix);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type().map(Some),
-			None => {
-				let key = table_ix::new(ns, db, tb, ix);
-				let Some(val) = self.get(&key, None).await? else {
-					return Ok(None);
-				};
-				let val = Arc::new(val);
-				let entry = cache::tx::Entry::Any(val.clone());
-				self.cache.insert(qey, entry);
-				Ok(Some(val))
+	) -> BoxProviderFut<'a, Result<Option<Arc<catalog::IndexDefinition>>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let key = table_ix::new(ns, db, tb, ix);
+					let Some(val) = self.get(&key, version).await? else {
+						return Ok(None);
+					};
+					return Ok(Some(Arc::new(val)));
+				}
+				let qey = cache::tx::Lookup::Ix(ns, db, tb, ix);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_type().map(Some),
+					None => {
+						let key = table_ix::new(ns, db, tb, ix);
+						let Some(val) = self.get(&key, None).await? else {
+							return Ok(None);
+						};
+						let val = Arc::new(val);
+						let entry = cache::tx::Entry::Any(val.clone());
+						self.cache.insert(qey, entry);
+						Ok(Some(val))
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_tb_index")),
+		)
 	}
 
-	async fn get_tb_index_by_id(
-		&self,
+	fn get_tb_index_by_id<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		tb: &TableName,
+		tb: &'a TableName,
 		ix: IndexId,
 		version: Option<u64>,
-	) -> Result<Option<Arc<catalog::IndexDefinition>>> {
-		let key = table_ix::IndexNameLookupKey::new(ns, db, tb, ix);
-		let Some(index_name) = self.get(&key, version).await? else {
-			return Ok(None);
-		};
+	) -> BoxProviderFut<'a, Result<Option<Arc<catalog::IndexDefinition>>>> {
+		Box::pin(async move {
+			let key = table_ix::IndexNameLookupKey::new(ns, db, tb, ix);
+			let Some(index_name) = self.get(&key, version).await? else {
+				return Ok(None);
+			};
 
-		self.get_tb_index(ns, db, tb, &index_name, version).await
+			self.get_tb_index(ns, db, tb, &index_name, version).await
+		})
 	}
 
-	async fn put_tb_index(
-		&self,
+	fn put_tb_index<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		tb: &TableName,
-		ix: &catalog::IndexDefinition,
-	) -> Result<()> {
-		let key = table_ix::new(ns, db, tb, &ix.name);
-		self.set(&key, ix).await?;
+		tb: &'a TableName,
+		ix: &'a catalog::IndexDefinition,
+	) -> BoxProviderFut<'a, Result<()>> {
+		Box::pin(async move {
+			let key = table_ix::new(ns, db, tb, &ix.name);
+			self.set(&key, ix).await?;
 
-		let name_lookup_key = table_ix::IndexNameLookupKey::new(ns, db, tb, ix.index_id);
-		self.set(&name_lookup_key, &ix.name.to_string()).await?;
+			let name_lookup_key = table_ix::IndexNameLookupKey::new(ns, db, tb, ix.index_id);
+			self.set(&name_lookup_key, &ix.name.to_string()).await?;
 
-		// Invalidate the cached list of all indexes for this table
-		let list_key = cache::tx::Lookup::Ixs(ns, db, tb.as_ref());
-		self.cache.remove(&list_key);
+			// Invalidate the cached list of all indexes for this table
+			let list_key = cache::tx::Lookup::Ixs(ns, db, tb.as_ref());
+			self.cache.remove(&list_key);
 
-		// Set the entry in the cache
-		let qey = cache::tx::Lookup::Ix(ns, db, tb, &ix.name);
-		let entry = cache::tx::Entry::Any(Arc::new(ix.clone()));
-		self.cache.insert(qey, entry);
-		Ok(())
+			// Set the entry in the cache
+			let qey = cache::tx::Lookup::Ix(ns, db, tb, &ix.name);
+			let entry = cache::tx::Entry::Any(Arc::new(ix.clone()));
+			self.cache.insert(qey, entry);
+			Ok(())
+		})
 	}
 
-	async fn del_tb_index(
-		&self,
+	fn del_tb_index<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		tb: &TableName,
-		ix: &str,
-	) -> Result<()> {
-		// Get the index definition
-		let Some(ix) = self.get_tb_index(ns, db, tb, ix, None).await? else {
-			return Ok(());
-		};
+		tb: &'a TableName,
+		ix: &'a str,
+	) -> BoxProviderFut<'a, Result<()>> {
+		Box::pin(async move {
+			// Get the index definition
+			let Some(ix) = self.get_tb_index(ns, db, tb, ix, None).await? else {
+				return Ok(());
+			};
 
-		// Remove the index data
-		let key = index_all::new(ns, db, tb, ix.index_id);
-		self.delp(&key).await?;
+			// Remove the index data
+			let key = index_all::new(ns, db, tb, ix.index_id);
+			self.delp(&key).await?;
 
-		// Delete the definition
-		let key = table_ix::new(ns, db, tb, &ix.name);
-		self.del(&key).await?;
+			// Delete the definition
+			let key = table_ix::new(ns, db, tb, &ix.name);
+			self.del(&key).await?;
 
-		// Delete the id-to-name lookup
-		let name_lookup_key = table_ix::IndexNameLookupKey::new(ns, db, tb, ix.index_id);
-		self.del(&name_lookup_key).await?;
+			// Delete the id-to-name lookup
+			let name_lookup_key = table_ix::IndexNameLookupKey::new(ns, db, tb, ix.index_id);
+			self.del(&name_lookup_key).await?;
 
-		// Invalidate the cached list of all indexes for this table
-		let list_key = cache::tx::Lookup::Ixs(ns, db, tb.as_ref());
-		self.cache.remove(&list_key);
+			// Invalidate the cached list of all indexes for this table
+			let list_key = cache::tx::Lookup::Ixs(ns, db, tb.as_ref());
+			self.cache.remove(&list_key);
 
-		// Invalidate the cached index entry
-		let index_key = cache::tx::Lookup::Ix(ns, db, tb.as_ref(), &ix.name);
-		self.cache.remove(&index_key);
+			// Invalidate the cached index entry
+			let index_key = cache::tx::Lookup::Ix(ns, db, tb.as_ref(), &ix.name);
+			self.cache.remove(&index_key);
 
-		Ok(())
+			Ok(())
+		})
 	}
 
 	/// Fetch a specific record value.
 	///
 	/// This function will return a new default initialized record if non exists.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_record(
-		&self,
+	fn get_record<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		tb: &TableName,
-		id: &RecordIdKey,
+		tb: &'a TableName,
+		id: &'a RecordIdKey,
 		version: Option<u64>,
-	) -> Result<Arc<Record>> {
-		// Cache is not versioned
-		if version.is_some() {
-			// Fetch the record from the datastore
-			let key = crate::key::record::new(ns, db, tb, id);
-			match self.get(&key, version).await? {
-				// The value exists in the datastore
-				Some(mut record) => {
-					// Inject the id field into the document
-					let rid = RecordId {
-						table: tb.to_owned(),
-						key: id.clone(),
-					};
-					record.data.def(rid);
-					// Convert to read-only format for better sharing and performance
-					Ok(record.into_read_only())
-				}
-				// The value is not in the datastore
-				None => Ok(Arc::new(Default::default())),
-			}
-		} else {
-			let qey = cache::tx::Lookup::Record(ns, db, tb, id);
-			match self.cache.get(&qey) {
-				// The entry is in the cache
-				Some(val) => val.try_into_record(),
-				// The entry is not in the cache
-				None => {
+	) -> BoxProviderFut<'a, Result<Arc<Record>>> {
+		Box::pin(
+			async move {
+				// Cache is not versioned
+				if version.is_some() {
 					// Fetch the record from the datastore
 					let key = crate::key::record::new(ns, db, tb, id);
-					match self.get(&key, None).await? {
+					match self.get(&key, version).await? {
 						// The value exists in the datastore
 						Some(mut record) => {
 							// Inject the id field into the document
@@ -3029,905 +3203,1061 @@ impl TableProvider for Transaction {
 							};
 							record.data.def(rid);
 							// Convert to read-only format for better sharing and performance
-							let record = record.into_read_only();
-							let entry = cache::tx::Entry::Val(Arc::clone(&record));
-							self.cache.insert(qey, entry);
-							Ok(record)
+							Ok(record.into_read_only())
 						}
 						// The value is not in the datastore
 						None => Ok(Arc::new(Default::default())),
 					}
+				} else {
+					let qey = cache::tx::Lookup::Record(ns, db, tb, id);
+					match self.cache.get(&qey) {
+						// The entry is in the cache
+						Some(val) => val.try_into_record(),
+						// The entry is not in the cache
+						None => {
+							// Fetch the record from the datastore
+							let key = crate::key::record::new(ns, db, tb, id);
+							match self.get(&key, None).await? {
+								// The value exists in the datastore
+								Some(mut record) => {
+									// Inject the id field into the document
+									let rid = RecordId {
+										table: tb.to_owned(),
+										key: id.clone(),
+									};
+									record.data.def(rid);
+									// Convert to read-only format for better sharing and
+									// performance
+									let record = record.into_read_only();
+									let entry = cache::tx::Entry::Val(Arc::clone(&record));
+									self.cache.insert(qey, entry);
+									Ok(record)
+								}
+								// The value is not in the datastore
+								None => Ok(Arc::new(Default::default())),
+							}
+						}
+					}
 				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_record")),
+		)
 	}
 
-	async fn record_exists(
-		&self,
+	fn record_exists<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		tb: &TableName,
-		id: &RecordIdKey,
+		tb: &'a TableName,
+		id: &'a RecordIdKey,
 		version: Option<u64>,
-	) -> Result<bool> {
-		let key = crate::key::record::new(ns, db, tb, id);
-		Ok(self.exists(&key, version).await?)
+	) -> BoxProviderFut<'a, Result<bool>> {
+		Box::pin(async move {
+			let key = crate::key::record::new(ns, db, tb, id);
+			self.exists(&key, version).await
+		})
 	}
 
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn put_record(
-		&self,
+	fn put_record<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		tb: &TableName,
-		id: &RecordIdKey,
+		tb: &'a TableName,
+		id: &'a RecordIdKey,
 		record: Arc<Record>,
-	) -> Result<()> {
-		let key = crate::key::record::new(ns, db, tb, id);
-		let mut val = record.as_ref().clone();
-		if let crate::val::Value::Object(ref mut obj) = val.data {
-			obj.0.remove("id");
-		}
-		self.put(&key, &val).await?;
-		self.set_record_cache(ns, db, tb, id, record);
-		Ok(())
+	) -> BoxProviderFut<'a, Result<()>> {
+		Box::pin(
+			async move {
+				let key = crate::key::record::new(ns, db, tb, id);
+				let mut val = record.as_ref().clone();
+				if let crate::val::Value::Object(ref mut obj) = val.data {
+					obj.0.remove("id");
+				}
+				self.put(&key, &val).await?;
+				self.set_record_cache(ns, db, tb, id, record);
+				Ok(())
+			}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "put_record")),
+		)
 	}
 
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn set_record(
-		&self,
+	fn set_record<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		tb: &TableName,
-		id: &RecordIdKey,
+		tb: &'a TableName,
+		id: &'a RecordIdKey,
 		record: Arc<Record>,
-	) -> Result<()> {
-		// Set the value in the datastore
-		let key = crate::key::record::new(ns, db, tb, id);
-		let mut val = record.as_ref().clone();
-		if let crate::val::Value::Object(ref mut obj) = val.data {
-			obj.0.remove("id");
-		}
-		self.set(&key, &val).await?;
-		// Set the value in the cache
-		self.set_record_cache(ns, db, tb, id, record);
-		// Return nothing
-		Ok(())
+	) -> BoxProviderFut<'a, Result<()>> {
+		Box::pin(
+			async move {
+				// Set the value in the datastore
+				let key = crate::key::record::new(ns, db, tb, id);
+				let mut val = record.as_ref().clone();
+				if let crate::val::Value::Object(ref mut obj) = val.data {
+					obj.0.remove("id");
+				}
+				self.set(&key, &val).await?;
+				// Set the value in the cache
+				self.set_record_cache(ns, db, tb, id, record);
+				// Return nothing
+				Ok(())
+			}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "set_record")),
+		)
 	}
 
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn del_record(
-		&self,
+	fn del_record<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		tb: &TableName,
-		id: &RecordIdKey,
-	) -> Result<()> {
-		// Delete the value in the datastore
-		let key = crate::key::record::new(ns, db, tb, id);
-		self.del(&key).await?;
-		// Clear the value from the cache
-		let qey = cache::tx::Lookup::Record(ns, db, tb, id);
-		self.cache.remove(&qey);
-		// Return nothing
-		Ok(())
+		tb: &'a TableName,
+		id: &'a RecordIdKey,
+	) -> BoxProviderFut<'a, Result<()>> {
+		Box::pin(
+			async move {
+				// Delete the value in the datastore
+				let key = crate::key::record::new(ns, db, tb, id);
+				self.del(&key).await?;
+				// Clear the value from the cache
+				let qey = cache::tx::Lookup::Record(ns, db, tb, id);
+				self.cache.remove(&qey);
+				// Return nothing
+				Ok(())
+			}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "del_record")),
+		)
 	}
 
-	async fn get_next_tb_id(
-		&self,
-		ctx: Option<&Context>,
+	fn get_next_tb_id<'a>(
+		&'a self,
+		ctx: Option<&'a Context>,
 		ns: NamespaceId,
 		db: DatabaseId,
-	) -> Result<TableId> {
-		self.sequences.next_table_id(ctx, ns, db).await
+	) -> BoxProviderFut<'a, Result<TableId>> {
+		Box::pin(async move { self.sequences.next_table_id(ctx, ns, db).await })
 	}
 }
 
-#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl UserProvider for Transaction {
 	/// Retrieve all ROOT level users in a datastore.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_root_users(&self, version: Option<u64>) -> Result<Arc<[catalog::UserDefinition]>> {
-		if version.is_some() {
-			let beg = crate::key::root::us::prefix();
-			let end = crate::key::root::us::suffix();
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Rus;
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_rus(),
-			None => {
-				let beg = crate::key::root::us::prefix();
-				let end = crate::key::root::us::suffix();
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Rus(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	fn all_root_users(
+		&self,
+		version: Option<u64>,
+	) -> BoxProviderFut<'_, Result<Arc<[catalog::UserDefinition]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = crate::key::root::us::prefix();
+					let end = crate::key::root::us::suffix();
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Rus;
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_rus(),
+					None => {
+						let beg = crate::key::root::us::prefix();
+						let end = crate::key::root::us::suffix();
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Rus(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_root_users")),
+		)
 	}
 
 	/// Retrieve all namespace user definitions for a specific namespace.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_ns_users(
+	fn all_ns_users(
 		&self,
 		ns: NamespaceId,
 		version: Option<u64>,
-	) -> Result<Arc<[catalog::UserDefinition]>> {
-		if version.is_some() {
-			let beg = crate::key::namespace::us::prefix(ns)?;
-			let end = crate::key::namespace::us::suffix(ns)?;
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Nus(ns);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_nus(),
-			None => {
-				let beg = crate::key::namespace::us::prefix(ns)?;
-				let end = crate::key::namespace::us::suffix(ns)?;
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Nus(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'_, Result<Arc<[catalog::UserDefinition]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = crate::key::namespace::us::prefix(ns)?;
+					let end = crate::key::namespace::us::suffix(ns)?;
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Nus(ns);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_nus(),
+					None => {
+						let beg = crate::key::namespace::us::prefix(ns)?;
+						let end = crate::key::namespace::us::suffix(ns)?;
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Nus(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_ns_users")),
+		)
 	}
 
 	/// Retrieve all database user definitions for a specific database.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_db_users(
+	fn all_db_users(
 		&self,
 		ns: NamespaceId,
 		db: DatabaseId,
 		version: Option<u64>,
-	) -> Result<Arc<[catalog::UserDefinition]>> {
-		if version.is_some() {
-			let beg = crate::key::database::us::prefix(ns, db)?;
-			let end = crate::key::database::us::suffix(ns, db)?;
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Dus(ns, db);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_dus(),
-			None => {
-				let beg = crate::key::database::us::prefix(ns, db)?;
-				let end = crate::key::database::us::suffix(ns, db)?;
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Dus(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'_, Result<Arc<[catalog::UserDefinition]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = crate::key::database::us::prefix(ns, db)?;
+					let end = crate::key::database::us::suffix(ns, db)?;
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Dus(ns, db);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_dus(),
+					None => {
+						let beg = crate::key::database::us::prefix(ns, db)?;
+						let end = crate::key::database::us::suffix(ns, db)?;
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Dus(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_db_users")),
+		)
 	}
 
 	/// Retrieve a specific root user definition.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_root_user(
-		&self,
-		us: &str,
+	fn get_root_user<'a>(
+		&'a self,
+		us: &'a str,
 		version: Option<u64>,
-	) -> Result<Option<Arc<catalog::UserDefinition>>> {
-		if version.is_some() {
-			let key = crate::key::root::us::new(us);
-			let Some(val) = self.get(&key, version).await? else {
-				return Ok(None);
-			};
-			return Ok(Some(Arc::new(val)));
-		}
-		let qey = cache::tx::Lookup::Ru(us);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type().map(Some),
-			None => {
-				let key = crate::key::root::us::new(us);
-				let Some(val) = self.get(&key, None).await? else {
-					return Ok(None);
-				};
-				let val = Arc::new(val);
-				let entry = cache::tx::Entry::Any(val.clone());
-				self.cache.insert(qey, entry);
-				Ok(Some(val))
+	) -> BoxProviderFut<'a, Result<Option<Arc<catalog::UserDefinition>>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let key = crate::key::root::us::new(us);
+					let Some(val) = self.get(&key, version).await? else {
+						return Ok(None);
+					};
+					return Ok(Some(Arc::new(val)));
+				}
+				let qey = cache::tx::Lookup::Ru(us);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_type().map(Some),
+					None => {
+						let key = crate::key::root::us::new(us);
+						let Some(val) = self.get(&key, None).await? else {
+							return Ok(None);
+						};
+						let val = Arc::new(val);
+						let entry = cache::tx::Entry::Any(val.clone());
+						self.cache.insert(qey, entry);
+						Ok(Some(val))
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_root_user")),
+		)
 	}
 
 	/// Retrieve a specific namespace user definition.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_ns_user(
-		&self,
+	fn get_ns_user<'a>(
+		&'a self,
 		ns: NamespaceId,
-		us: &str,
+		us: &'a str,
 		version: Option<u64>,
-	) -> Result<Option<Arc<catalog::UserDefinition>>> {
-		if version.is_some() {
-			let key = crate::key::namespace::us::new(ns, us);
-			let Some(val) = self.get(&key, version).await? else {
-				return Ok(None);
-			};
-			return Ok(Some(Arc::new(val)));
-		}
-		let qey = cache::tx::Lookup::Nu(ns, us);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type().map(Some),
-			None => {
-				let key = crate::key::namespace::us::new(ns, us);
-				let Some(val) = self.get(&key, None).await? else {
-					return Ok(None);
-				};
+	) -> BoxProviderFut<'a, Result<Option<Arc<catalog::UserDefinition>>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let key = crate::key::namespace::us::new(ns, us);
+					let Some(val) = self.get(&key, version).await? else {
+						return Ok(None);
+					};
+					return Ok(Some(Arc::new(val)));
+				}
+				let qey = cache::tx::Lookup::Nu(ns, us);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_type().map(Some),
+					None => {
+						let key = crate::key::namespace::us::new(ns, us);
+						let Some(val) = self.get(&key, None).await? else {
+							return Ok(None);
+						};
 
-				let val = Arc::new(val);
-				let entry = cache::tx::Entry::Any(val.clone());
-				self.cache.insert(qey, entry);
-				Ok(Some(val))
+						let val = Arc::new(val);
+						let entry = cache::tx::Entry::Any(val.clone());
+						self.cache.insert(qey, entry);
+						Ok(Some(val))
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_ns_user")),
+		)
 	}
 
 	/// Retrieve a specific user definition from a database.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_db_user(
-		&self,
+	fn get_db_user<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		us: &str,
+		us: &'a str,
 		version: Option<u64>,
-	) -> Result<Option<Arc<catalog::UserDefinition>>> {
-		if version.is_some() {
-			let key = crate::key::database::us::new(ns, db, us);
-			let Some(val) = self.get(&key, version).await? else {
-				return Ok(None);
-			};
-			return Ok(Some(Arc::new(val)));
-		}
-		let qey = cache::tx::Lookup::Du(ns, db, us);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type().map(Some),
-			None => {
-				let key = crate::key::database::us::new(ns, db, us);
-				let Some(val) = self.get(&key, None).await? else {
-					return Ok(None);
-				};
+	) -> BoxProviderFut<'a, Result<Option<Arc<catalog::UserDefinition>>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let key = crate::key::database::us::new(ns, db, us);
+					let Some(val) = self.get(&key, version).await? else {
+						return Ok(None);
+					};
+					return Ok(Some(Arc::new(val)));
+				}
+				let qey = cache::tx::Lookup::Du(ns, db, us);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_type().map(Some),
+					None => {
+						let key = crate::key::database::us::new(ns, db, us);
+						let Some(val) = self.get(&key, None).await? else {
+							return Ok(None);
+						};
 
-				let val = Arc::new(val);
-				let entry = cache::tx::Entry::Any(val.clone());
-				self.cache.insert(qey, entry);
-				Ok(Some(val))
+						let val = Arc::new(val);
+						let entry = cache::tx::Entry::Any(val.clone());
+						self.cache.insert(qey, entry);
+						Ok(Some(val))
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_db_user")),
+		)
 	}
 
-	async fn put_root_user(&self, us: &catalog::UserDefinition) -> Result<()> {
-		let key = crate::key::root::us::new(&us.name);
-		self.set(&key, us).await?;
+	fn put_root_user<'a>(
+		&'a self,
+		us: &'a catalog::UserDefinition,
+	) -> BoxProviderFut<'a, Result<()>> {
+		Box::pin(async move {
+			let key = crate::key::root::us::new(&us.name);
+			self.set(&key, us).await?;
 
-		// Invalidate the cached list of all root users
-		let list_key = cache::tx::Lookup::Rus;
-		self.cache.remove(&list_key);
+			// Invalidate the cached list of all root users
+			let list_key = cache::tx::Lookup::Rus;
+			self.cache.remove(&list_key);
 
-		// Set the entry in the cache
-		let qey = cache::tx::Lookup::Ru(&us.name);
-		let entry = cache::tx::Entry::Any(Arc::new(us.clone()));
-		self.cache.insert(qey, entry);
+			// Set the entry in the cache
+			let qey = cache::tx::Lookup::Ru(&us.name);
+			let entry = cache::tx::Entry::Any(Arc::new(us.clone()));
+			self.cache.insert(qey, entry);
 
-		Ok(())
+			Ok(())
+		})
 	}
 
-	async fn put_ns_user(&self, ns: NamespaceId, us: &catalog::UserDefinition) -> Result<()> {
-		let key = crate::key::namespace::us::new(ns, &us.name);
-		self.set(&key, us).await?;
+	fn put_ns_user<'a>(
+		&'a self,
+		ns: NamespaceId,
+		us: &'a catalog::UserDefinition,
+	) -> BoxProviderFut<'a, Result<()>> {
+		Box::pin(async move {
+			let key = crate::key::namespace::us::new(ns, &us.name);
+			self.set(&key, us).await?;
 
-		// Invalidate the cached list of all namespace users
-		let list_key = cache::tx::Lookup::Nus(ns);
-		self.cache.remove(&list_key);
+			// Invalidate the cached list of all namespace users
+			let list_key = cache::tx::Lookup::Nus(ns);
+			self.cache.remove(&list_key);
 
-		// Set the entry in the cache
-		let qey = cache::tx::Lookup::Nu(ns, &us.name);
-		let entry = cache::tx::Entry::Any(Arc::new(us.clone()));
-		self.cache.insert(qey, entry);
+			// Set the entry in the cache
+			let qey = cache::tx::Lookup::Nu(ns, &us.name);
+			let entry = cache::tx::Entry::Any(Arc::new(us.clone()));
+			self.cache.insert(qey, entry);
 
-		Ok(())
+			Ok(())
+		})
 	}
 
-	async fn put_db_user(
-		&self,
+	fn put_db_user<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		us: &catalog::UserDefinition,
-	) -> Result<()> {
-		let key = crate::key::database::us::new(ns, db, &us.name);
-		self.set(&key, us).await?;
+		us: &'a catalog::UserDefinition,
+	) -> BoxProviderFut<'a, Result<()>> {
+		Box::pin(async move {
+			let key = crate::key::database::us::new(ns, db, &us.name);
+			self.set(&key, us).await?;
 
-		// Invalidate the cached list of all database users
-		let list_key = cache::tx::Lookup::Dus(ns, db);
-		self.cache.remove(&list_key);
+			// Invalidate the cached list of all database users
+			let list_key = cache::tx::Lookup::Dus(ns, db);
+			self.cache.remove(&list_key);
 
-		// Set the entry in the cache
-		let qey = cache::tx::Lookup::Du(ns, db, &us.name);
-		let entry = cache::tx::Entry::Any(Arc::new(us.clone()));
-		self.cache.insert(qey, entry);
+			// Set the entry in the cache
+			let qey = cache::tx::Lookup::Du(ns, db, &us.name);
+			let entry = cache::tx::Entry::Any(Arc::new(us.clone()));
+			self.cache.insert(qey, entry);
 
-		Ok(())
+			Ok(())
+		})
 	}
 }
 
-#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl AuthorisationProvider for Transaction {
 	/// Retrieve all ROOT level accesses in a datastore.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_root_accesses(
+	fn all_root_accesses(
 		&self,
 		version: Option<u64>,
-	) -> Result<Arc<[catalog::AccessDefinition]>> {
-		if version.is_some() {
-			let beg = crate::key::root::ac::prefix();
-			let end = crate::key::root::ac::suffix();
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Ras;
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_ras(),
-			None => {
-				let beg = crate::key::root::ac::prefix();
-				let end = crate::key::root::ac::suffix();
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Ras(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'_, Result<Arc<[catalog::AccessDefinition]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = crate::key::root::ac::prefix();
+					let end = crate::key::root::ac::suffix();
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Ras;
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_ras(),
+					None => {
+						let beg = crate::key::root::ac::prefix();
+						let end = crate::key::root::ac::suffix();
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Ras(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_root_accesses")),
+		)
 	}
 
 	/// Retrieve all root access grants in a datastore.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_root_access_grants(
-		&self,
-		ra: &str,
+	fn all_root_access_grants<'a>(
+		&'a self,
+		ra: &'a str,
 		version: Option<u64>,
-	) -> Result<Arc<[catalog::AccessGrant]>> {
-		if version.is_some() {
-			let beg = crate::key::root::access::gr::prefix(ra)?;
-			let end = crate::key::root::access::gr::suffix(ra)?;
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Rgs(ra);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_rag(),
-			None => {
-				let beg = crate::key::root::access::gr::prefix(ra)?;
-				let end = crate::key::root::access::gr::suffix(ra)?;
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Rag(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'a, Result<Arc<[catalog::AccessGrant]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = crate::key::root::access::gr::prefix(ra)?;
+					let end = crate::key::root::access::gr::suffix(ra)?;
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Rgs(ra);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_rag(),
+					None => {
+						let beg = crate::key::root::access::gr::prefix(ra)?;
+						let end = crate::key::root::access::gr::suffix(ra)?;
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Rag(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_root_access_grants")),
+		)
 	}
 
 	/// Retrieve all namespace access definitions for a specific namespace.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_ns_accesses(
+	fn all_ns_accesses(
 		&self,
 		ns: NamespaceId,
 		version: Option<u64>,
-	) -> Result<Arc<[catalog::AccessDefinition]>> {
-		if version.is_some() {
-			let beg = crate::key::namespace::ac::prefix(ns)?;
-			let end = crate::key::namespace::ac::suffix(ns)?;
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Nas(ns);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_nas(),
-			None => {
-				let beg = crate::key::namespace::ac::prefix(ns)?;
-				let end = crate::key::namespace::ac::suffix(ns)?;
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Nas(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'_, Result<Arc<[catalog::AccessDefinition]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = crate::key::namespace::ac::prefix(ns)?;
+					let end = crate::key::namespace::ac::suffix(ns)?;
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Nas(ns);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_nas(),
+					None => {
+						let beg = crate::key::namespace::ac::prefix(ns)?;
+						let end = crate::key::namespace::ac::suffix(ns)?;
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Nas(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_ns_accesses")),
+		)
 	}
 
 	/// Retrieve all namespace access grants for a specific namespace.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_ns_access_grants(
-		&self,
+	fn all_ns_access_grants<'a>(
+		&'a self,
 		ns: NamespaceId,
-		na: &str,
+		na: &'a str,
 		version: Option<u64>,
-	) -> Result<Arc<[catalog::AccessGrant]>> {
-		if version.is_some() {
-			let beg = crate::key::namespace::access::gr::prefix(ns, na)?;
-			let end = crate::key::namespace::access::gr::suffix(ns, na)?;
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Ngs(ns, na);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_nag(),
-			None => {
-				let beg = crate::key::namespace::access::gr::prefix(ns, na)?;
-				let end = crate::key::namespace::access::gr::suffix(ns, na)?;
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Nag(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'a, Result<Arc<[catalog::AccessGrant]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = crate::key::namespace::access::gr::prefix(ns, na)?;
+					let end = crate::key::namespace::access::gr::suffix(ns, na)?;
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Ngs(ns, na);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_nag(),
+					None => {
+						let beg = crate::key::namespace::access::gr::prefix(ns, na)?;
+						let end = crate::key::namespace::access::gr::suffix(ns, na)?;
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Nag(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_ns_access_grants")),
+		)
 	}
 
 	/// Retrieve all database access definitions for a specific database.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_db_accesses(
+	fn all_db_accesses(
 		&self,
 		ns: NamespaceId,
 		db: DatabaseId,
 		version: Option<u64>,
-	) -> Result<Arc<[catalog::AccessDefinition]>> {
-		if version.is_some() {
-			let beg = crate::key::database::ac::prefix(ns, db)?;
-			let end = crate::key::database::ac::suffix(ns, db)?;
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Das(ns, db);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_das(),
-			None => {
-				let beg = crate::key::database::ac::prefix(ns, db)?;
-				let end = crate::key::database::ac::suffix(ns, db)?;
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Das(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'_, Result<Arc<[catalog::AccessDefinition]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = crate::key::database::ac::prefix(ns, db)?;
+					let end = crate::key::database::ac::suffix(ns, db)?;
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Das(ns, db);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_das(),
+					None => {
+						let beg = crate::key::database::ac::prefix(ns, db)?;
+						let end = crate::key::database::ac::suffix(ns, db)?;
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Das(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_db_accesses")),
+		)
 	}
 
 	/// Retrieve all database access grants for a specific database.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_db_access_grants(
-		&self,
+	fn all_db_access_grants<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		da: &str,
+		da: &'a str,
 		version: Option<u64>,
-	) -> Result<Arc<[catalog::AccessGrant]>> {
-		if version.is_some() {
-			let beg = crate::key::database::access::gr::prefix(ns, db, da)?;
-			let end = crate::key::database::access::gr::suffix(ns, db, da)?;
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Dgs(ns, db, da);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_dag(),
-			None => {
-				let beg = crate::key::database::access::gr::prefix(ns, db, da)?;
-				let end = crate::key::database::access::gr::suffix(ns, db, da)?;
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Dag(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'a, Result<Arc<[catalog::AccessGrant]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = crate::key::database::access::gr::prefix(ns, db, da)?;
+					let end = crate::key::database::access::gr::suffix(ns, db, da)?;
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Dgs(ns, db, da);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_dag(),
+					None => {
+						let beg = crate::key::database::access::gr::prefix(ns, db, da)?;
+						let end = crate::key::database::access::gr::suffix(ns, db, da)?;
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Dag(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_db_access_grants")),
+		)
 	}
 
 	/// Retrieve a specific root access definition.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_root_access(
-		&self,
-		ra: &str,
+	fn get_root_access<'a>(
+		&'a self,
+		ra: &'a str,
 		version: Option<u64>,
-	) -> Result<Option<Arc<catalog::AccessDefinition>>> {
-		if version.is_some() {
-			let key = crate::key::root::ac::new(ra);
-			let Some(val) = self.get(&key, version).await? else {
-				return Ok(None);
-			};
-			return Ok(Some(Arc::new(val)));
-		}
-		let qey = cache::tx::Lookup::Ra(ra);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type().map(Some),
-			None => {
-				let key = crate::key::root::ac::new(ra);
-				let Some(val) = self.get(&key, None).await? else {
-					return Ok(None);
-				};
-				let val = Arc::new(val);
-				let entry = cache::tx::Entry::Any(val.clone());
-				self.cache.insert(qey, entry);
-				Ok(Some(val))
+	) -> BoxProviderFut<'a, Result<Option<Arc<catalog::AccessDefinition>>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let key = crate::key::root::ac::new(ra);
+					let Some(val) = self.get(&key, version).await? else {
+						return Ok(None);
+					};
+					return Ok(Some(Arc::new(val)));
+				}
+				let qey = cache::tx::Lookup::Ra(ra);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_type().map(Some),
+					None => {
+						let key = crate::key::root::ac::new(ra);
+						let Some(val) = self.get(&key, None).await? else {
+							return Ok(None);
+						};
+						let val = Arc::new(val);
+						let entry = cache::tx::Entry::Any(val.clone());
+						self.cache.insert(qey, entry);
+						Ok(Some(val))
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_root_access")),
+		)
 	}
 
 	/// Retrieve a specific root access grant.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_root_access_grant(
-		&self,
-		ac: &str,
-		gr: &str,
+	fn get_root_access_grant<'a>(
+		&'a self,
+		ac: &'a str,
+		gr: &'a str,
 		version: Option<u64>,
-	) -> Result<Option<Arc<catalog::AccessGrant>>> {
-		if version.is_some() {
-			let key = crate::key::root::access::gr::new(ac, gr);
-			let Some(val) = self.get(&key, version).await? else {
-				return Ok(None);
-			};
-			return Ok(Some(Arc::new(val)));
-		}
-		let qey = cache::tx::Lookup::Rg(ac, gr);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type().map(Some),
-			None => {
-				let key = crate::key::root::access::gr::new(ac, gr);
-				let Some(val) = self.get(&key, None).await? else {
-					return Ok(None);
-				};
-				let val = Arc::new(val);
-				let entry = cache::tx::Entry::Any(val.clone());
-				self.cache.insert(qey, entry);
-				Ok(Some(val))
+	) -> BoxProviderFut<'a, Result<Option<Arc<catalog::AccessGrant>>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let key = crate::key::root::access::gr::new(ac, gr);
+					let Some(val) = self.get(&key, version).await? else {
+						return Ok(None);
+					};
+					return Ok(Some(Arc::new(val)));
+				}
+				let qey = cache::tx::Lookup::Rg(ac, gr);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_type().map(Some),
+					None => {
+						let key = crate::key::root::access::gr::new(ac, gr);
+						let Some(val) = self.get(&key, None).await? else {
+							return Ok(None);
+						};
+						let val = Arc::new(val);
+						let entry = cache::tx::Entry::Any(val.clone());
+						self.cache.insert(qey, entry);
+						Ok(Some(val))
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_root_access_grant")),
+		)
 	}
 
 	/// Retrieve a specific namespace access definition.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_ns_access(
-		&self,
+	fn get_ns_access<'a>(
+		&'a self,
 		ns: NamespaceId,
-		na: &str,
+		na: &'a str,
 		version: Option<u64>,
-	) -> Result<Option<Arc<catalog::AccessDefinition>>> {
-		if version.is_some() {
-			let key = crate::key::namespace::ac::new(ns, na);
-			let Some(val) = self.get(&key, version).await? else {
-				return Ok(None);
-			};
-			return Ok(Some(Arc::new(val)));
-		}
-		let qey = cache::tx::Lookup::Na(ns, na);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type().map(Some),
-			None => {
-				let key = crate::key::namespace::ac::new(ns, na);
-				let Some(val) = self.get(&key, None).await? else {
-					return Ok(None);
-				};
-				let val = Arc::new(val);
-				let entry = cache::tx::Entry::Any(val.clone());
-				self.cache.insert(qey, entry);
-				Ok(Some(val))
+	) -> BoxProviderFut<'a, Result<Option<Arc<catalog::AccessDefinition>>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let key = crate::key::namespace::ac::new(ns, na);
+					let Some(val) = self.get(&key, version).await? else {
+						return Ok(None);
+					};
+					return Ok(Some(Arc::new(val)));
+				}
+				let qey = cache::tx::Lookup::Na(ns, na);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_type().map(Some),
+					None => {
+						let key = crate::key::namespace::ac::new(ns, na);
+						let Some(val) = self.get(&key, None).await? else {
+							return Ok(None);
+						};
+						let val = Arc::new(val);
+						let entry = cache::tx::Entry::Any(val.clone());
+						self.cache.insert(qey, entry);
+						Ok(Some(val))
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_ns_access")),
+		)
 	}
 
 	/// Retrieve a specific namespace access grant.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_ns_access_grant(
-		&self,
+	fn get_ns_access_grant<'a>(
+		&'a self,
 		ns: NamespaceId,
-		ac: &str,
-		gr: &str,
+		ac: &'a str,
+		gr: &'a str,
 		version: Option<u64>,
-	) -> Result<Option<Arc<catalog::AccessGrant>>> {
-		if version.is_some() {
-			let key = crate::key::namespace::access::gr::new(ns, ac, gr);
-			let Some(val) = self.get(&key, version).await? else {
-				return Ok(None);
-			};
-			return Ok(Some(Arc::new(val)));
-		}
-		let qey = cache::tx::Lookup::Ng(ns, ac, gr);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type().map(Some),
-			None => {
-				let key = crate::key::namespace::access::gr::new(ns, ac, gr);
-				let Some(val) = self.get(&key, None).await? else {
-					return Ok(None);
-				};
-				let val = Arc::new(val);
-				let entry = cache::tx::Entry::Any(val.clone());
-				self.cache.insert(qey, entry);
-				Ok(Some(val))
+	) -> BoxProviderFut<'a, Result<Option<Arc<catalog::AccessGrant>>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let key = crate::key::namespace::access::gr::new(ns, ac, gr);
+					let Some(val) = self.get(&key, version).await? else {
+						return Ok(None);
+					};
+					return Ok(Some(Arc::new(val)));
+				}
+				let qey = cache::tx::Lookup::Ng(ns, ac, gr);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_type().map(Some),
+					None => {
+						let key = crate::key::namespace::access::gr::new(ns, ac, gr);
+						let Some(val) = self.get(&key, None).await? else {
+							return Ok(None);
+						};
+						let val = Arc::new(val);
+						let entry = cache::tx::Entry::Any(val.clone());
+						self.cache.insert(qey, entry);
+						Ok(Some(val))
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_ns_access_grant")),
+		)
 	}
 
 	/// Retrieve a specific database access definition.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_db_access(
-		&self,
+	fn get_db_access<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		da: &str,
+		da: &'a str,
 		version: Option<u64>,
-	) -> Result<Option<Arc<catalog::AccessDefinition>>> {
-		if version.is_some() {
-			let key = crate::key::database::ac::new(ns, db, da);
-			let Some(val) = self.get(&key, version).await? else {
-				return Ok(None);
-			};
-			return Ok(Some(Arc::new(val)));
-		}
-		let qey = cache::tx::Lookup::Da(ns, db, da);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type().map(Some),
-			None => {
-				let key = crate::key::database::ac::new(ns, db, da);
-				let Some(val) = self.get(&key, None).await? else {
-					return Ok(None);
-				};
-				let val = Arc::new(val);
-				let entry = cache::tx::Entry::Any(val.clone());
-				self.cache.insert(qey, entry);
-				Ok(Some(val))
+	) -> BoxProviderFut<'a, Result<Option<Arc<catalog::AccessDefinition>>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let key = crate::key::database::ac::new(ns, db, da);
+					let Some(val) = self.get(&key, version).await? else {
+						return Ok(None);
+					};
+					return Ok(Some(Arc::new(val)));
+				}
+				let qey = cache::tx::Lookup::Da(ns, db, da);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_type().map(Some),
+					None => {
+						let key = crate::key::database::ac::new(ns, db, da);
+						let Some(val) = self.get(&key, None).await? else {
+							return Ok(None);
+						};
+						let val = Arc::new(val);
+						let entry = cache::tx::Entry::Any(val.clone());
+						self.cache.insert(qey, entry);
+						Ok(Some(val))
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_db_access")),
+		)
 	}
 
 	/// Retrieve a specific database access grant.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_db_access_grant(
-		&self,
+	fn get_db_access_grant<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		ac: &str,
-		gr: &str,
+		ac: &'a str,
+		gr: &'a str,
 		version: Option<u64>,
-	) -> Result<Option<Arc<catalog::AccessGrant>>> {
-		if version.is_some() {
-			let key = crate::key::database::access::gr::new(ns, db, ac, gr);
-			let Some(val) = self.get(&key, version).await? else {
-				return Ok(None);
-			};
-			return Ok(Some(Arc::new(val)));
-		}
-		let qey = cache::tx::Lookup::Dg(ns, db, ac, gr);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type().map(Some),
-			None => {
-				let key = crate::key::database::access::gr::new(ns, db, ac, gr);
-				let Some(val) = self.get(&key, None).await? else {
-					return Ok(None);
-				};
-				let val = Arc::new(val);
-				let entry = cache::tx::Entry::Any(val.clone());
-				self.cache.insert(qey, entry);
-				Ok(Some(val))
+	) -> BoxProviderFut<'a, Result<Option<Arc<catalog::AccessGrant>>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let key = crate::key::database::access::gr::new(ns, db, ac, gr);
+					let Some(val) = self.get(&key, version).await? else {
+						return Ok(None);
+					};
+					return Ok(Some(Arc::new(val)));
+				}
+				let qey = cache::tx::Lookup::Dg(ns, db, ac, gr);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_type().map(Some),
+					None => {
+						let key = crate::key::database::access::gr::new(ns, db, ac, gr);
+						let Some(val) = self.get(&key, None).await? else {
+							return Ok(None);
+						};
+						let val = Arc::new(val);
+						let entry = cache::tx::Entry::Any(val.clone());
+						self.cache.insert(qey, entry);
+						Ok(Some(val))
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_db_access_grant")),
+		)
 	}
 
-	async fn del_root_access(&self, ra: &str) -> Result<()> {
-		// Delete the definition
-		let key = crate::key::root::ac::new(ra);
-		self.del(&key).await?;
-		// Delete any associated data including access grants.
-		let key = crate::key::root::access::all::new(ra);
-		self.delp(&key).await?;
+	fn del_root_access<'a>(&'a self, ra: &'a str) -> BoxProviderFut<'a, Result<()>> {
+		Box::pin(async move {
+			// Delete the definition
+			let key = crate::key::root::ac::new(ra);
+			self.del(&key).await?;
+			// Delete any associated data including access grants.
+			let key = crate::key::root::access::all::new(ra);
+			self.delp(&key).await?;
 
-		// Invalidate the cached list of all root accesses
-		let list_key = cache::tx::Lookup::Ras;
-		self.cache.remove(&list_key);
+			// Invalidate the cached list of all root accesses
+			let list_key = cache::tx::Lookup::Ras;
+			self.cache.remove(&list_key);
 
-		// Invalidate the cached access entry and grants
-		let access_key = cache::tx::Lookup::Ra(ra);
-		self.cache.remove(&access_key);
-		let grants_key = cache::tx::Lookup::Rgs(ra);
-		self.cache.remove(&grants_key);
+			// Invalidate the cached access entry and grants
+			let access_key = cache::tx::Lookup::Ra(ra);
+			self.cache.remove(&access_key);
+			let grants_key = cache::tx::Lookup::Rgs(ra);
+			self.cache.remove(&grants_key);
 
-		Ok(())
+			Ok(())
+		})
 	}
 
-	async fn del_ns_access(&self, ns: NamespaceId, na: &str) -> Result<()> {
-		// Delete the definition
-		let key = crate::key::namespace::ac::new(ns, na);
-		self.del(&key).await?;
-		// Delete any associated data including access grants.
-		let key = crate::key::namespace::access::all::new(ns, na);
-		self.delp(&key).await?;
+	fn del_ns_access<'a>(&'a self, ns: NamespaceId, na: &'a str) -> BoxProviderFut<'a, Result<()>> {
+		Box::pin(async move {
+			// Delete the definition
+			let key = crate::key::namespace::ac::new(ns, na);
+			self.del(&key).await?;
+			// Delete any associated data including access grants.
+			let key = crate::key::namespace::access::all::new(ns, na);
+			self.delp(&key).await?;
 
-		// Invalidate the cached list of all namespace accesses
-		let list_key = cache::tx::Lookup::Nas(ns);
-		self.cache.remove(&list_key);
+			// Invalidate the cached list of all namespace accesses
+			let list_key = cache::tx::Lookup::Nas(ns);
+			self.cache.remove(&list_key);
 
-		// Invalidate the cached access entry and grants
-		let access_key = cache::tx::Lookup::Na(ns, na);
-		self.cache.remove(&access_key);
-		let grants_key = cache::tx::Lookup::Ngs(ns, na);
-		self.cache.remove(&grants_key);
+			// Invalidate the cached access entry and grants
+			let access_key = cache::tx::Lookup::Na(ns, na);
+			self.cache.remove(&access_key);
+			let grants_key = cache::tx::Lookup::Ngs(ns, na);
+			self.cache.remove(&grants_key);
 
-		Ok(())
+			Ok(())
+		})
 	}
 
-	async fn del_db_access(&self, ns: NamespaceId, db: DatabaseId, da: &str) -> Result<()> {
-		// Delete the definition
-		let key = crate::key::database::ac::new(ns, db, da);
-		self.del(&key).await?;
-		// Delete any associated data including access grants.
-		let key = crate::key::database::access::all::new(ns, db, da);
-		self.delp(&key).await?;
+	fn del_db_access<'a>(
+		&'a self,
+		ns: NamespaceId,
+		db: DatabaseId,
+		da: &'a str,
+	) -> BoxProviderFut<'a, Result<()>> {
+		Box::pin(async move {
+			// Delete the definition
+			let key = crate::key::database::ac::new(ns, db, da);
+			self.del(&key).await?;
+			// Delete any associated data including access grants.
+			let key = crate::key::database::access::all::new(ns, db, da);
+			self.delp(&key).await?;
 
-		// Invalidate the cached list of all database accesses
-		let list_key = cache::tx::Lookup::Das(ns, db);
-		self.cache.remove(&list_key);
+			// Invalidate the cached list of all database accesses
+			let list_key = cache::tx::Lookup::Das(ns, db);
+			self.cache.remove(&list_key);
 
-		// Invalidate the cached access entry and grants
-		let access_key = cache::tx::Lookup::Da(ns, db, da);
-		self.cache.remove(&access_key);
-		let grants_key = cache::tx::Lookup::Dgs(ns, db, da);
-		self.cache.remove(&grants_key);
+			// Invalidate the cached access entry and grants
+			let access_key = cache::tx::Lookup::Da(ns, db, da);
+			self.cache.remove(&access_key);
+			let grants_key = cache::tx::Lookup::Dgs(ns, db, da);
+			self.cache.remove(&grants_key);
 
-		Ok(())
+			Ok(())
+		})
 	}
 }
 
-#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl ApiProvider for Transaction {
 	/// Retrieve all api definitions for a specific database.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_db_apis(
+	fn all_db_apis(
 		&self,
 		ns: NamespaceId,
 		db: DatabaseId,
 		version: Option<u64>,
-	) -> Result<Arc<[ApiDefinition]>> {
-		if version.is_some() {
-			let beg = crate::key::database::ap::prefix(ns, db)?;
-			let end = crate::key::database::ap::suffix(ns, db)?;
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Aps(ns, db);
-		match self.cache.get(&qey) {
-			Some(val) => val,
-			None => {
-				let beg = crate::key::database::ap::prefix(ns, db)?;
-				let end = crate::key::database::ap::suffix(ns, db)?;
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let val = cache::tx::Entry::Aps(Arc::clone(&val));
-				self.cache.insert(qey, val.clone());
-				val
+	) -> BoxProviderFut<'_, Result<Arc<[ApiDefinition]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = crate::key::database::ap::prefix(ns, db)?;
+					let end = crate::key::database::ap::suffix(ns, db)?;
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Aps(ns, db);
+				match self.cache.get(&qey) {
+					Some(val) => val,
+					None => {
+						let beg = crate::key::database::ap::prefix(ns, db)?;
+						let end = crate::key::database::ap::suffix(ns, db)?;
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let val = cache::tx::Entry::Aps(Arc::clone(&val));
+						self.cache.insert(qey, val.clone());
+						val
+					}
+				}
+				.try_into_aps()
 			}
-		}
-		.try_into_aps()
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_db_apis")),
+		)
 	}
 
 	/// Retrieve a specific api definition.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_db_api(
-		&self,
+	fn get_db_api<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		ap: &str,
+		ap: &'a str,
 		version: Option<u64>,
-	) -> Result<Option<Arc<ApiDefinition>>> {
-		if version.is_some() {
-			let key = crate::key::database::ap::new(ns, db, ap);
-			let Some(val) = self.get(&key, version).await? else {
-				return Ok(None);
-			};
-			return Ok(Some(Arc::new(val)));
-		}
-		let qey = cache::tx::Lookup::Ap(ns, db, ap);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type().map(Some),
-			None => {
-				let key = crate::key::database::ap::new(ns, db, ap);
-				let Some(val) = self.get(&key, None).await? else {
-					return Ok(None);
-				};
-				let val = Arc::new(val);
-				let entry = cache::tx::Entry::Any(val.clone());
-				self.cache.insert(qey, entry);
-				Ok(Some(val))
+	) -> BoxProviderFut<'a, Result<Option<Arc<ApiDefinition>>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let key = crate::key::database::ap::new(ns, db, ap);
+					let Some(val) = self.get(&key, version).await? else {
+						return Ok(None);
+					};
+					return Ok(Some(Arc::new(val)));
+				}
+				let qey = cache::tx::Lookup::Ap(ns, db, ap);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_type().map(Some),
+					None => {
+						let key = crate::key::database::ap::new(ns, db, ap);
+						let Some(val) = self.get(&key, None).await? else {
+							return Ok(None);
+						};
+						let val = Arc::new(val);
+						let entry = cache::tx::Entry::Any(val.clone());
+						self.cache.insert(qey, entry);
+						Ok(Some(val))
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_db_api")),
+		)
 	}
 
-	async fn put_db_api(&self, ns: NamespaceId, db: DatabaseId, ap: &ApiDefinition) -> Result<()> {
-		let name = ap.path.to_string();
-		let key = crate::key::database::ap::new(ns, db, &name);
-		self.set(&key, ap).await?;
+	fn put_db_api<'a>(
+		&'a self,
+		ns: NamespaceId,
+		db: DatabaseId,
+		ap: &'a catalog::ApiDefinition,
+	) -> BoxProviderFut<'a, Result<()>> {
+		Box::pin(async move {
+			let name = ap.path.to_string();
+			let key = crate::key::database::ap::new(ns, db, &name);
+			self.set(&key, ap).await?;
 
-		// Invalidate the cached list of all APIs for this database
-		let list_key = cache::tx::Lookup::Aps(ns, db);
-		self.cache.remove(&list_key);
+			// Invalidate the cached list of all APIs for this database
+			let list_key = cache::tx::Lookup::Aps(ns, db);
+			self.cache.remove(&list_key);
 
-		// Set the entry in the cache
-		let qey = cache::tx::Lookup::Ap(ns, db, &name);
-		let entry = cache::tx::Entry::Any(Arc::new(ap.clone()));
-		self.cache.insert(qey, entry);
+			// Set the entry in the cache
+			let qey = cache::tx::Lookup::Ap(ns, db, &name);
+			let entry = cache::tx::Entry::Any(Arc::new(ap.clone()));
+			self.cache.insert(qey, entry);
 
-		Ok(())
+			Ok(())
+		})
 	}
 }
 
-#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl BucketProvider for Transaction {
 	/// Retrieve all bucket definitions for a specific database.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn all_db_buckets(
+	fn all_db_buckets(
 		&self,
 		ns: NamespaceId,
 		db: DatabaseId,
 		version: Option<u64>,
-	) -> Result<Arc<[catalog::BucketDefinition]>> {
-		if version.is_some() {
-			let beg = crate::key::database::bu::prefix(ns, db)?;
-			let end = crate::key::database::bu::suffix(ns, db)?;
-			let val = self.getr(beg..end, version).await?;
-			return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
-		}
-		let qey = cache::tx::Lookup::Bus(ns, db);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_bus(),
-			None => {
-				let beg = crate::key::database::bu::prefix(ns, db)?;
-				let end = crate::key::database::bu::suffix(ns, db)?;
-				let val = self.getr(beg..end, None).await?;
-				let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
-				let entry = cache::tx::Entry::Bus(Arc::clone(&val));
-				self.cache.insert(qey, entry);
-				Ok(val)
+	) -> BoxProviderFut<'_, Result<Arc<[catalog::BucketDefinition]>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let beg = crate::key::database::bu::prefix(ns, db)?;
+					let end = crate::key::database::bu::suffix(ns, db)?;
+					let val = self.getr(beg..end, version).await?;
+					return util::deserialize_cache(val.iter().map(|x| x.1.as_slice()));
+				}
+				let qey = cache::tx::Lookup::Bus(ns, db);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_bus(),
+					None => {
+						let beg = crate::key::database::bu::prefix(ns, db)?;
+						let end = crate::key::database::bu::suffix(ns, db)?;
+						let val = self.getr(beg..end, None).await?;
+						let val = util::deserialize_cache(val.iter().map(|x| x.1.as_slice()))?;
+						let entry = cache::tx::Entry::Bus(Arc::clone(&val));
+						self.cache.insert(qey, entry);
+						Ok(val)
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "all_db_buckets")),
+		)
 	}
 
 	/// Retrieve a specific bucket definition from a database.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	async fn get_db_bucket(
-		&self,
+	fn get_db_bucket<'a>(
+		&'a self,
 		ns: NamespaceId,
 		db: DatabaseId,
-		bu: &str,
+		bu: &'a str,
 		version: Option<u64>,
-	) -> Result<Option<Arc<catalog::BucketDefinition>>> {
-		if version.is_some() {
-			let key = crate::key::database::bu::new(ns, db, bu);
-			let Some(val) = self.get(&key, version).await? else {
-				return Ok(None);
-			};
-			return Ok(Some(Arc::new(val)));
-		}
-		let qey = cache::tx::Lookup::Bu(ns, db, bu);
-		match self.cache.get(&qey) {
-			Some(val) => val.try_into_type().map(Some),
-			None => {
-				let key = crate::key::database::bu::new(ns, db, bu);
-				let Some(val) = self.get(&key, None).await? else {
-					return Ok(None);
-				};
-				let bucket_def = Arc::new(val);
-				let entr = cache::tx::Entry::Any(bucket_def.clone());
-				self.cache.insert(qey, entr);
-				Ok(Some(bucket_def))
+	) -> BoxProviderFut<'a, Result<Option<Arc<catalog::BucketDefinition>>>> {
+		Box::pin(
+			async move {
+				if version.is_some() {
+					let key = crate::key::database::bu::new(ns, db, bu);
+					let Some(val) = self.get(&key, version).await? else {
+						return Ok(None);
+					};
+					return Ok(Some(Arc::new(val)));
+				}
+				let qey = cache::tx::Lookup::Bu(ns, db, bu);
+				match self.cache.get(&qey) {
+					Some(val) => val.try_into_type().map(Some),
+					None => {
+						let key = crate::key::database::bu::new(ns, db, bu);
+						let Some(val) = self.get(&key, None).await? else {
+							return Ok(None);
+						};
+						let bucket_def = Arc::new(val);
+						let entr = cache::tx::Entry::Any(bucket_def.clone());
+						self.cache.insert(qey, entr);
+						Ok(Some(bucket_def))
+					}
+				}
 			}
-		}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_db_bucket")),
+		)
 	}
 }
 

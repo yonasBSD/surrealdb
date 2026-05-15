@@ -7,7 +7,6 @@
 use std::fmt::Write;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use futures::{StreamExt, stream};
 use surrealdb_types::ToSql;
 
@@ -33,9 +32,6 @@ pub struct ExplainPlan {
 	/// The output format (currently only Text is supported)
 	pub format: ExplainFormat,
 }
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl ExecOperator for ExplainPlan {
 	fn name(&self) -> &'static str {
 		"Explain"
@@ -109,9 +105,6 @@ pub struct AnalyzePlan {
 	/// it deterministic for test assertions.
 	pub redact_volatile_explain_attrs: bool,
 }
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl ExecOperator for AnalyzePlan {
 	fn name(&self) -> &'static str {
 		"ExplainAnalyze"

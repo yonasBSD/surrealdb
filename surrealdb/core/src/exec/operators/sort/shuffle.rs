@@ -7,7 +7,6 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use futures::StreamExt;
 use rand::Rng;
 use rand::seq::SliceRandom;
@@ -46,9 +45,6 @@ impl RandomShuffle {
 		}
 	}
 }
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl ExecOperator for RandomShuffle {
 	fn name(&self) -> &'static str {
 		"RandomShuffle"

@@ -7,7 +7,6 @@
 use std::ops::Bound;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use futures::StreamExt;
 
 use super::common::{evaluate_bound_key, extract_record_ids_into, resolve_record_batch};
@@ -97,9 +96,6 @@ impl ReferenceScan {
 		}
 	}
 }
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl ExecOperator for ReferenceScan {
 	fn name(&self) -> &'static str {
 		"ReferenceScan"

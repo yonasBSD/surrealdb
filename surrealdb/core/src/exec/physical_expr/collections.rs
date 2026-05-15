@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use crate::exec::physical_expr::{EvalContext, PhysicalExpr};
-use crate::exec::{AccessMode, CombineAccessModes};
+use crate::exec::{AccessMode, BoxFut, CombineAccessModes};
 use crate::expr::FlowResult;
 use crate::val::Value;
 
@@ -14,9 +13,6 @@ use crate::val::Value;
 pub struct ArrayLiteral {
 	pub(crate) elements: Vec<Arc<dyn PhysicalExpr>>,
 }
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl PhysicalExpr for ArrayLiteral {
 	fn name(&self) -> &'static str {
 		"ArrayLiteral"
@@ -34,13 +30,15 @@ impl PhysicalExpr for ArrayLiteral {
 			.unwrap_or(crate::exec::ContextLevel::Root)
 	}
 
-	async fn evaluate(&self, ctx: EvalContext<'_>) -> FlowResult<Value> {
-		let mut values = Vec::with_capacity(self.elements.len());
-		for elem in &self.elements {
-			let value = elem.evaluate(ctx.clone()).await?;
-			values.push(value);
-		}
-		Ok(Value::Array(crate::val::Array::from(values)))
+	fn evaluate<'a>(&'a self, ctx: EvalContext<'a>) -> BoxFut<'a, FlowResult<Value>> {
+		Box::pin(async move {
+			let mut values = Vec::with_capacity(self.elements.len());
+			for elem in &self.elements {
+				let value = elem.evaluate(ctx.clone()).await?;
+				values.push(value);
+			}
+			Ok(Value::Array(crate::val::Array::from(values)))
+		})
 	}
 
 	fn access_mode(&self) -> AccessMode {
@@ -66,9 +64,6 @@ impl ToSql for ArrayLiteral {
 pub struct ObjectLiteral {
 	pub(crate) entries: Vec<(Strand, Arc<dyn PhysicalExpr>)>,
 }
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl PhysicalExpr for ObjectLiteral {
 	fn name(&self) -> &'static str {
 		"ObjectLiteral"
@@ -86,13 +81,15 @@ impl PhysicalExpr for ObjectLiteral {
 			.unwrap_or(crate::exec::ContextLevel::Root)
 	}
 
-	async fn evaluate(&self, ctx: EvalContext<'_>) -> FlowResult<Value> {
-		let mut map = std::collections::BTreeMap::new();
-		for (key, expr) in &self.entries {
-			let value = expr.evaluate(ctx.clone()).await?;
-			map.insert(key.clone(), value);
-		}
-		Ok(Value::Object(crate::val::Object::from(map)))
+	fn evaluate<'a>(&'a self, ctx: EvalContext<'a>) -> BoxFut<'a, FlowResult<Value>> {
+		Box::pin(async move {
+			let mut map = std::collections::BTreeMap::new();
+			for (key, expr) in &self.entries {
+				let value = expr.evaluate(ctx.clone()).await?;
+				map.insert(key.clone(), value);
+			}
+			Ok(Value::Object(crate::val::Object::from(map)))
+		})
 	}
 
 	fn access_mode(&self) -> AccessMode {
@@ -118,9 +115,6 @@ impl ToSql for ObjectLiteral {
 pub struct SetLiteral {
 	pub(crate) elements: Vec<Arc<dyn PhysicalExpr>>,
 }
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl PhysicalExpr for SetLiteral {
 	fn name(&self) -> &'static str {
 		"SetLiteral"
@@ -138,13 +132,15 @@ impl PhysicalExpr for SetLiteral {
 			.unwrap_or(crate::exec::ContextLevel::Root)
 	}
 
-	async fn evaluate(&self, ctx: EvalContext<'_>) -> FlowResult<Value> {
-		let mut set = crate::val::Set::new();
-		for elem in &self.elements {
-			let value = elem.evaluate(ctx.clone()).await?;
-			set.insert(value);
-		}
-		Ok(Value::Set(set))
+	fn evaluate<'a>(&'a self, ctx: EvalContext<'a>) -> BoxFut<'a, FlowResult<Value>> {
+		Box::pin(async move {
+			let mut set = crate::val::Set::new();
+			for elem in &self.elements {
+				let value = elem.evaluate(ctx.clone()).await?;
+				set.insert(value);
+			}
+			Ok(Value::Set(set))
+		})
 	}
 
 	fn access_mode(&self) -> AccessMode {

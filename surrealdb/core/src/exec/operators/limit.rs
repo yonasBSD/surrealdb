@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use futures::StreamExt;
 use tracing::instrument;
 
@@ -58,9 +57,6 @@ impl Limit {
 		}
 	}
 }
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl ExecOperator for Limit {
 	fn name(&self) -> &'static str {
 		"Limit"

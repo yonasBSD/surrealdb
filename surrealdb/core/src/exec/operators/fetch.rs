@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use futures::StreamExt;
 
 use crate::catalog::providers::TableProvider;
@@ -41,9 +40,6 @@ impl Fetch {
 		}
 	}
 }
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl ExecOperator for Fetch {
 	fn name(&self) -> &'static str {
 		"Fetch"

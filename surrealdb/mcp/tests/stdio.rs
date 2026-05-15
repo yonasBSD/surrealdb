@@ -9,6 +9,7 @@
 //! exercised for real.
 
 #![allow(clippy::unwrap_used)]
+#![recursion_limit = "256"]
 
 mod common;
 

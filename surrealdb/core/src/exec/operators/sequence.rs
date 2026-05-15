@@ -11,7 +11,6 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use futures::stream;
 use surrealdb_types::{SqlFormat, ToSql};
 
@@ -21,7 +20,7 @@ use crate::exec::context::{ContextLevel, ExecutionContext};
 use crate::exec::plan_or_compute::{block_required_context, collect_stream, legacy_compute};
 use crate::exec::planner::try_plan_expr;
 use crate::exec::{
-	AccessMode, CardinalityHint, ExecOperator, FlowResult, OperatorMetrics, ValueBatch,
+	AccessMode, BoxFut, CardinalityHint, ExecOperator, FlowResult, OperatorMetrics, ValueBatch,
 	ValueBatchStream,
 };
 use crate::expr::{Block, ControlFlow, ControlFlowExt, Expr};
@@ -56,9 +55,6 @@ impl SequencePlan {
 		}
 	}
 }
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl ExecOperator for SequencePlan {
 	fn name(&self) -> &'static str {
 		"Sequence"
@@ -103,16 +99,22 @@ impl ExecOperator for SequencePlan {
 		self.block.0.iter().any(|expr| matches!(expr, Expr::Let(_)))
 	}
 
-	async fn output_context(&self, input: &ExecutionContext) -> Result<ExecutionContext, Error> {
-		let (_result, final_ctx) =
-			execute_block_with_context(&self.block, input).await.map_err(|ctrl| match ctrl {
-				ControlFlow::Break | ControlFlow::Continue | ControlFlow::Return(_) => {
-					// BREAK/CONTINUE/RETURN at top-level LET binding context is invalid
-					Error::InvalidControlFlow
-				}
-				ControlFlow::Err(e) => Error::Thrown(e.to_string()),
-			})?;
-		Ok(final_ctx)
+	fn output_context<'a>(
+		&'a self,
+		input: &'a ExecutionContext,
+	) -> BoxFut<'a, Result<ExecutionContext, Error>> {
+		Box::pin(async move {
+			let (_result, final_ctx) = execute_block_with_context(&self.block, input)
+				.await
+				.map_err(|ctrl| match ctrl {
+					ControlFlow::Break | ControlFlow::Continue | ControlFlow::Return(_) => {
+						// BREAK/CONTINUE/RETURN at top-level LET binding context is invalid
+						Error::InvalidControlFlow
+					}
+					ControlFlow::Err(e) => Error::Thrown(e.to_string()),
+				})?;
+			Ok(final_ctx)
+		})
 	}
 
 	fn children(&self) -> Vec<&Arc<dyn ExecOperator>> {

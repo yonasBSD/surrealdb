@@ -13,7 +13,6 @@ use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use futures::StreamExt;
 
 use super::common::{OrderByField, SortDirection, SortKey, compare_keys, compare_records_by_keys};
@@ -93,9 +92,6 @@ impl SortTopK {
 		}
 	}
 }
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl ExecOperator for SortTopK {
 	fn name(&self) -> &'static str {
 		"SortTopK"
@@ -347,9 +343,6 @@ impl SortTopKByKey {
 		}
 	}
 }
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl ExecOperator for SortTopKByKey {
 	fn name(&self) -> &'static str {
 		"SortTopKByKey"

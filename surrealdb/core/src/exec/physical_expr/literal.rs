@@ -1,15 +1,14 @@
 use std::sync::Arc;
 
 use anyhow::bail;
-use async_trait::async_trait;
 use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use crate::catalog::providers::DatabaseProvider;
 use crate::catalog::{DatabaseId, NamespaceId, Permission};
 use crate::err::Error;
-use crate::exec::AccessMode;
 use crate::exec::physical_expr::{EvalContext, PhysicalExpr};
+use crate::exec::{AccessMode, BoxFut};
 use crate::expr::FlowResult;
 use crate::expr::mock::Mock;
 use crate::iam::Action;
@@ -19,9 +18,6 @@ use crate::val::{Array, Value};
 /// Literal value - "foo", 42, true
 #[derive(Debug, Clone)]
 pub struct Literal(pub(crate) Value);
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl PhysicalExpr for Literal {
 	fn name(&self) -> &'static str {
 		"Literal"
@@ -36,8 +32,8 @@ impl PhysicalExpr for Literal {
 		crate::exec::ContextLevel::Root
 	}
 
-	async fn evaluate(&self, _ctx: EvalContext<'_>) -> FlowResult<Value> {
-		Ok(self.0.clone())
+	fn evaluate<'a>(&'a self, _ctx: EvalContext<'a>) -> BoxFut<'a, FlowResult<Value>> {
+		Box::pin(async move { Ok(self.0.clone()) })
 	}
 
 	fn access_mode(&self) -> AccessMode {
@@ -130,9 +126,6 @@ impl Param {
 		}
 	}
 }
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl PhysicalExpr for Param {
 	fn name(&self) -> &'static str {
 		"Param"
@@ -150,91 +143,93 @@ impl PhysicalExpr for Param {
 		crate::exec::ContextLevel::Root
 	}
 
-	async fn evaluate(&self, ctx: EvalContext<'_>) -> FlowResult<Value> {
-		// Handle special params $this and $self.
-		// When current_value is available (per-row context), use it directly.
-		// When it's None (scalar context, e.g. a subquery's FROM clause),
-		// check if $this was explicitly bound as a parameter (by ScalarSubquery)
-		// before defaulting to NONE. This avoids database lookups for $this.
-		match self.0.as_str() {
-			"this" | "self" => {
-				if let Some(v) = ctx.current_value {
-					return Ok(v.clone());
+	fn evaluate<'a>(&'a self, ctx: EvalContext<'a>) -> BoxFut<'a, FlowResult<Value>> {
+		Box::pin(async move {
+			// Handle special params $this and $self.
+			// When current_value is available (per-row context), use it directly.
+			// When it's None (scalar context, e.g. a subquery's FROM clause),
+			// check if $this was explicitly bound as a parameter (by ScalarSubquery)
+			// before defaulting to NONE. This avoids database lookups for $this.
+			match self.0.as_str() {
+				"this" | "self" => {
+					if let Some(v) = ctx.current_value {
+						return Ok(v.clone());
+					}
+					// Check if $this was explicitly bound as a parameter (e.g. by subquery)
+					if let Some(local_params) = ctx.local_params
+						&& let Some(v) = local_params.get(self.0.as_str())
+					{
+						return Ok(v.clone());
+					}
+					if let Some(v) = ctx.exec_ctx.value(self.0.as_str()) {
+						return Ok(v.clone());
+					}
+					return Ok(Value::None);
 				}
-				// Check if $this was explicitly bound as a parameter (e.g. by subquery)
-				if let Some(local_params) = ctx.local_params
-					&& let Some(v) = local_params.get(self.0.as_str())
-				{
-					return Ok(v.clone());
-				}
-				if let Some(v) = ctx.exec_ctx.value(self.0.as_str()) {
-					return Ok(v.clone());
-				}
-				return Ok(Value::None);
+				_ => {}
 			}
-			_ => {}
-		}
 
-		// Check block-local parameters (they shadow global params)
-		if let Some(local_params) = ctx.local_params
-			&& let Some(value) = local_params.get(self.0.as_str())
-		{
-			return Ok(value.clone());
-		}
-
-		// FrozenContext handles scoped parameter lookup via parent-chain,
-		// including protected params ($auth, $access, $token, $session)
-		if let Some(v) = ctx.exec_ctx.value(self.0.as_str()) {
-			return Ok(v.clone());
-		}
-
-		// $parent falls back to document_root when not explicitly bound.
-		// This allows `->edge[WHERE $parent.field]` and similar idiom-level
-		// WHERE clauses to reference the enclosing row being projected/filtered.
-		if self.0.as_str() == "parent"
-			&& let Some(v) = ctx.document_root
-		{
-			return Ok(v.clone());
-		}
-
-		// Try to fetch from database
-		// First check if we have database context directly
-		if let Ok(db_ctx) = ctx.exec_ctx.database() {
-			let txn = ctx.exec_ctx.txn();
-			let ns_id = db_ctx.ns_ctx.ns.namespace_id;
-			let db_id = db_ctx.db.database_id;
-
-			return Ok(self.fetch_db_param(ctx, &txn, ns_id, db_id).await?);
-		}
-
-		// If no database context but we have options with ns/db set, look up by name
-		if let Some(opts) = ctx.exec_ctx.options() {
-			// Check if namespace/database are set - if not, throw appropriate error
-			let ns_name = match opts.ns() {
-				Ok(ns) => ns,
-				Err(_) => return Err(Error::NsEmpty.into()),
-			};
-			let db_name = match opts.db() {
-				Ok(db) => db,
-				Err(_) => return Err(Error::DbEmpty.into()),
-			};
-
-			let txn = ctx.exec_ctx.txn();
-			// Look up database definition by name to get the IDs
-			if let Ok(Some(db_def)) =
-				txn.get_db_by_name(ns_name, db_name, ctx.exec_ctx.version_stamp()).await
+			// Check block-local parameters (they shadow global params)
+			if let Some(local_params) = ctx.local_params
+				&& let Some(value) = local_params.get(self.0.as_str())
 			{
-				let ns_id = db_def.namespace_id;
-				let db_id = db_def.database_id;
+				return Ok(value.clone());
+			}
+
+			// FrozenContext handles scoped parameter lookup via parent-chain,
+			// including protected params ($auth, $access, $token, $session)
+			if let Some(v) = ctx.exec_ctx.value(self.0.as_str()) {
+				return Ok(v.clone());
+			}
+
+			// $parent falls back to document_root when not explicitly bound.
+			// This allows `->edge[WHERE $parent.field]` and similar idiom-level
+			// WHERE clauses to reference the enclosing row being projected/filtered.
+			if self.0.as_str() == "parent"
+				&& let Some(v) = ctx.document_root
+			{
+				return Ok(v.clone());
+			}
+
+			// Try to fetch from database
+			// First check if we have database context directly
+			if let Ok(db_ctx) = ctx.exec_ctx.database() {
+				let txn = ctx.exec_ctx.txn();
+				let ns_id = db_ctx.ns_ctx.ns.namespace_id;
+				let db_id = db_ctx.db.database_id;
 
 				return Ok(self.fetch_db_param(ctx, &txn, ns_id, db_id).await?);
 			}
-			// Database doesn't exist yet, param cannot be found
-			return Ok(Value::None);
-		}
 
-		// No options available and param not found locally - throw error
-		Err(anyhow::anyhow!("Parameter not found: ${}", self.0).into())
+			// If no database context but we have options with ns/db set, look up by name
+			if let Some(opts) = ctx.exec_ctx.options() {
+				// Check if namespace/database are set - if not, throw appropriate error
+				let ns_name = match opts.ns() {
+					Ok(ns) => ns,
+					Err(_) => return Err(Error::NsEmpty.into()),
+				};
+				let db_name = match opts.db() {
+					Ok(db) => db,
+					Err(_) => return Err(Error::DbEmpty.into()),
+				};
+
+				let txn = ctx.exec_ctx.txn();
+				// Look up database definition by name to get the IDs
+				if let Ok(Some(db_def)) =
+					txn.get_db_by_name(ns_name, db_name, ctx.exec_ctx.version_stamp()).await
+				{
+					let ns_id = db_def.namespace_id;
+					let db_id = db_def.database_id;
+
+					return Ok(self.fetch_db_param(ctx, &txn, ns_id, db_id).await?);
+				}
+				// Database doesn't exist yet, param cannot be found
+				return Ok(Value::None);
+			}
+
+			// No options available and param not found locally - throw error
+			Err(anyhow::anyhow!("Parameter not found: ${}", self.0).into())
+		})
 	}
 
 	fn access_mode(&self) -> AccessMode {
@@ -256,9 +251,6 @@ impl ToSql for Param {
 /// the old executor's `Expr::Mock` compute path.
 #[derive(Debug, Clone)]
 pub struct MockExpr(pub(crate) Mock);
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl PhysicalExpr for MockExpr {
 	fn name(&self) -> &'static str {
 		"Mock"
@@ -273,21 +265,23 @@ impl PhysicalExpr for MockExpr {
 		crate::exec::ContextLevel::Root
 	}
 
-	async fn evaluate(&self, ctx: EvalContext<'_>) -> FlowResult<Value> {
-		let iter = self.0.clone().into_iter();
-		if iter
-			.size_hint()
-			.1
-			.map(|x| {
-				x.saturating_mul(std::mem::size_of::<Value>())
-					> ctx.exec_ctx.root().ctx.config.generation_allocation_limit
-			})
-			.unwrap_or(true)
-		{
-			return Err(anyhow::Error::msg("Mock range exceeds allocation limit").into());
-		}
-		let record_ids = iter.map(Value::RecordId).collect();
-		Ok(Value::Array(Array(record_ids)))
+	fn evaluate<'a>(&'a self, ctx: EvalContext<'a>) -> BoxFut<'a, FlowResult<Value>> {
+		Box::pin(async move {
+			let iter = self.0.clone().into_iter();
+			if iter
+				.size_hint()
+				.1
+				.map(|x| {
+					x.saturating_mul(std::mem::size_of::<Value>())
+						> ctx.exec_ctx.root().ctx.config.generation_allocation_limit
+				})
+				.unwrap_or(true)
+			{
+				return Err(anyhow::Error::msg("Mock range exceeds allocation limit").into());
+			}
+			let record_ids = iter.map(Value::RecordId).collect();
+			Ok(Value::Array(Array(record_ids)))
+		})
 	}
 
 	fn access_mode(&self) -> AccessMode {

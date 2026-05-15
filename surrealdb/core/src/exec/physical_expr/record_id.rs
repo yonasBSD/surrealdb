@@ -1,12 +1,11 @@
 use std::ops::Bound;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 
 use crate::exec::physical_expr::{EvalContext, PhysicalExpr};
-use crate::exec::{AccessMode, CombineAccessModes, ContextLevel};
+use crate::exec::{AccessMode, BoxFut, CombineAccessModes, ContextLevel};
 use crate::expr::FlowResult;
 use crate::expr::record_id::RecordIdKeyGen;
 use crate::fmt::EscapeRidKey;
@@ -172,9 +171,6 @@ pub struct RecordIdExpr {
 	pub(crate) table: TableName,
 	pub(crate) key: PhysicalRecordIdKey,
 }
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl PhysicalExpr for RecordIdExpr {
 	fn name(&self) -> &'static str {
 		"RecordIdExpr"
@@ -188,12 +184,14 @@ impl PhysicalExpr for RecordIdExpr {
 		self.key.required_context()
 	}
 
-	async fn evaluate(&self, ctx: EvalContext<'_>) -> FlowResult<Value> {
-		let key = self.key.evaluate(ctx).await?;
-		Ok(Value::RecordId(RecordId {
-			table: self.table.clone(),
-			key,
-		}))
+	fn evaluate<'a>(&'a self, ctx: EvalContext<'a>) -> BoxFut<'a, FlowResult<Value>> {
+		Box::pin(async move {
+			let key = self.key.evaluate(ctx).await?;
+			Ok(Value::RecordId(RecordId {
+				table: self.table.clone(),
+				key,
+			}))
+		})
 	}
 
 	fn access_mode(&self) -> AccessMode {

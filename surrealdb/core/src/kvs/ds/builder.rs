@@ -296,8 +296,6 @@ mod tests {
 
 	impl TransactionBuilderFactoryRequirements for TestComposer {}
 
-	#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
-	#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 	impl TransactionBuilderFactory for TestComposer {
 		type RouterState = TestRouterState;
 

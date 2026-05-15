@@ -1,5 +1,7 @@
 //! Integration tests for the MCP server.
 
+#![recursion_limit = "256"]
+
 mod common;
 
 use common::{content_text, init_service, root_session, test_datastore};

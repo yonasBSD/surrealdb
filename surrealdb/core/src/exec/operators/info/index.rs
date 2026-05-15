@@ -8,7 +8,6 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use futures::stream;
 use surrealdb_types::ToSql;
 
@@ -51,9 +50,6 @@ impl IndexInfoPlan {
 		}
 	}
 }
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl ExecOperator for IndexInfoPlan {
 	fn name(&self) -> &'static str {
 		"InfoIndex"

@@ -7,7 +7,6 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
 
 use crate::exec::{
@@ -41,9 +40,6 @@ impl Union {
 		}
 	}
 }
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl ExecOperator for Union {
 	fn name(&self) -> &'static str {
 		"Union"

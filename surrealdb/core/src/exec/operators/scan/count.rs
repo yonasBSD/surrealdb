@@ -17,7 +17,6 @@
 use std::ops::Bound;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use tracing::instrument;
 
 use crate::catalog::{DatabaseId, Index, NamespaceId, Permission};
@@ -73,9 +72,6 @@ impl CountScan {
 		}
 	}
 }
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl ExecOperator for CountScan {
 	fn name(&self) -> &'static str {
 		"CountScan"

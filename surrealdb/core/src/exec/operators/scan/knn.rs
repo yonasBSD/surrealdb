@@ -7,7 +7,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use reblessive::TreeStack;
 
 use super::common::fetch_and_filter_records_batch;
@@ -108,9 +107,6 @@ impl KnnScan {
 		self
 	}
 }
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl ExecOperator for KnnScan {
 	fn name(&self) -> &'static str {
 		"KnnScan"

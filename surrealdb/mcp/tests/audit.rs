@@ -15,6 +15,7 @@
 
 #![cfg(feature = "server-http")]
 #![allow(clippy::unwrap_used)]
+#![recursion_limit = "256"]
 
 use std::sync::Arc;
 

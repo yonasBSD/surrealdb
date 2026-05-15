@@ -446,8 +446,6 @@ impl TransactionBuilderParts<()> {
 	}
 }
 
-#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 /// Factory that parses a datastore path and returns a concrete `TransactionBuilder`.
 ///
 /// Implementations can decide how to interpret connection strings (e.g. "memory",
@@ -465,12 +463,22 @@ pub trait TransactionBuilderFactory: TransactionBuilderFactoryRequirements {
 	/// # Parameters
 	/// - `path`: Database connection path string
 	/// - `canceller`: Token for graceful shutdown and cancellation of long-running operations
-	async fn new_transaction_builder(
+	#[cfg(not(target_family = "wasm"))]
+	fn new_transaction_builder(
 		&self,
 		path: &str,
 		canceller: CancellationToken,
 		config: ConfigMap,
-	) -> Result<TransactionBuilderParts<Self::RouterState>>;
+	) -> impl Future<Output = Result<TransactionBuilderParts<Self::RouterState>>> + Send;
+
+	/// Create a new transaction builder for the datastore (WASM: no `Send` bound on the future).
+	#[cfg(target_family = "wasm")]
+	fn new_transaction_builder(
+		&self,
+		path: &str,
+		canceller: CancellationToken,
+		config: ConfigMap,
+	) -> impl Future<Output = Result<TransactionBuilderParts<Self::RouterState>>>;
 
 	/// Validate a datastore path string.
 	fn path_valid(v: &str) -> Result<String>;
@@ -507,8 +515,6 @@ pub enum DatastoreFlavor {
 
 impl TransactionBuilderFactoryRequirements for CommunityComposer {}
 
-#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl TransactionBuilderFactory for CommunityComposer {
 	type RouterState = ();
 

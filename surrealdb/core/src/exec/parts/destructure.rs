@@ -2,13 +2,12 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql};
 
 use super::evaluate_physical_path;
 use crate::exec::physical_expr::{EvalContext, PhysicalExpr};
-use crate::exec::{AccessMode, CombineAccessModes, ContextLevel};
+use crate::exec::{AccessMode, BoxFut, CombineAccessModes, ContextLevel};
 use crate::expr::FlowResult;
 use crate::val::Value;
 
@@ -36,9 +35,6 @@ pub enum DestructureField {
 		parts: Vec<DestructureField>,
 	},
 }
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl PhysicalExpr for DestructurePart {
 	fn name(&self) -> &'static str {
 		"Destructure"
@@ -74,9 +70,11 @@ impl PhysicalExpr for DestructurePart {
 		ContextLevel::Database.max(field_context(&self.fields))
 	}
 
-	async fn evaluate(&self, ctx: EvalContext<'_>) -> FlowResult<Value> {
-		let value = ctx.current_value.unwrap_or(&Value::NONE);
-		evaluate_destructure(value, &self.fields, ctx).await
+	fn evaluate<'a>(&'a self, ctx: EvalContext<'a>) -> BoxFut<'a, FlowResult<Value>> {
+		Box::pin(async move {
+			let value = ctx.current_value.unwrap_or(&Value::NONE);
+			evaluate_destructure(value, &self.fields, ctx).await
+		})
 	}
 
 	fn access_mode(&self) -> AccessMode {

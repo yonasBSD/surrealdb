@@ -5,7 +5,6 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use futures::{StreamExt, stream};
 use surrealdb_strand::Strand;
 use surrealdb_types::{SqlFormat, ToSql};
@@ -13,8 +12,8 @@ use surrealdb_types::{SqlFormat, ToSql};
 use crate::err::Error;
 use crate::exec::context::{ContextLevel, ExecutionContext};
 use crate::exec::{
-	AccessMode, CardinalityHint, ExecOperator, FlowResult, OperatorMetrics, ValueBatchStream,
-	buffer_stream,
+	AccessMode, BoxFut, CardinalityHint, ExecOperator, FlowResult, OperatorMetrics,
+	ValueBatchStream, buffer_stream,
 };
 use crate::expr::Kind;
 use crate::val::{Array, Value};
@@ -62,9 +61,6 @@ impl LetPlan {
 		}
 	}
 }
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl ExecOperator for LetPlan {
 	fn name(&self) -> &'static str {
 		"Let"
@@ -99,43 +95,48 @@ impl ExecOperator for LetPlan {
 		true
 	}
 
-	async fn output_context(&self, input: &ExecutionContext) -> Result<ExecutionContext, Error> {
-		// Execute the value plan and collect results
-		// Handle control flow signals explicitly
-		let stream = match self.value.execute(input) {
-			Ok(s) => buffer_stream(
-				s,
-				self.value.access_mode(),
-				self.value.cardinality_hint(),
-				input.root().ctx.config.operator_buffer_size,
-			),
-			Err(crate::expr::ControlFlow::Return(v)) => {
-				// If value expression returns early, use that value
-				let coerced = self.coerce(v)?;
-				return Ok(input.with_param(self.name.clone(), coerced));
-			}
-			Err(crate::expr::ControlFlow::Break | crate::expr::ControlFlow::Continue) => {
-				return Err(Error::InvalidControlFlow);
-			}
-			Err(crate::expr::ControlFlow::Err(e)) => {
-				return Err(Error::Thrown(e.to_string()));
-			}
-		};
-		let results = collect_stream(stream).await.map_err(|e| Error::Thrown(e.to_string()))?;
+	fn output_context<'a>(
+		&'a self,
+		input: &'a ExecutionContext,
+	) -> BoxFut<'a, Result<ExecutionContext, Error>> {
+		Box::pin(async move {
+			// Execute the value plan and collect results
+			// Handle control flow signals explicitly
+			let stream = match self.value.execute(input) {
+				Ok(s) => buffer_stream(
+					s,
+					self.value.access_mode(),
+					self.value.cardinality_hint(),
+					input.root().ctx.config.operator_buffer_size,
+				),
+				Err(crate::expr::ControlFlow::Return(v)) => {
+					// If value expression returns early, use that value
+					let coerced = self.coerce(v)?;
+					return Ok(input.with_param(self.name.clone(), coerced));
+				}
+				Err(crate::expr::ControlFlow::Break | crate::expr::ControlFlow::Continue) => {
+					return Err(Error::InvalidControlFlow);
+				}
+				Err(crate::expr::ControlFlow::Err(e)) => {
+					return Err(Error::Thrown(e.to_string()));
+				}
+			};
+			let results = collect_stream(stream).await.map_err(|e| Error::Thrown(e.to_string()))?;
 
-		// If the value is a scalar expression, use the single result directly
-		// Otherwise, wrap the results in an array
-		let computed_value = if self.value.is_scalar() {
-			// Scalar expressions return exactly one value
-			results.into_iter().next().unwrap_or(Value::None)
-		} else {
-			// Queries return results as an array
-			Value::Array(Array(results))
-		};
+			// If the value is a scalar expression, use the single result directly
+			// Otherwise, wrap the results in an array
+			let computed_value = if self.value.is_scalar() {
+				// Scalar expressions return exactly one value
+				results.into_iter().next().unwrap_or(Value::None)
+			} else {
+				// Queries return results as an array
+				Value::Array(Array(results))
+			};
 
-		// Apply declared type coercion (mirrors `SetStatement::compute`).
-		let coerced = self.coerce(computed_value)?;
-		Ok(input.with_param(self.name.clone(), coerced))
+			// Apply declared type coercion (mirrors `SetStatement::compute`).
+			let coerced = self.coerce(computed_value)?;
+			Ok(input.with_param(self.name.clone(), coerced))
+		})
 	}
 
 	fn children(&self) -> Vec<&Arc<dyn ExecOperator>> {

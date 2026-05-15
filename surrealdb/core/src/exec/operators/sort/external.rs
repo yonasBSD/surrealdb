@@ -10,7 +10,6 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use ext_sort::{ExternalSorter, ExternalSorterBuilder, LimitedBufferBuilder};
 use futures::StreamExt;
 use tempfile::Builder;
@@ -57,9 +56,6 @@ impl ExternalSort {
 		}
 	}
 }
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl ExecOperator for ExternalSort {
 	fn name(&self) -> &'static str {
 		"ExternalSort"

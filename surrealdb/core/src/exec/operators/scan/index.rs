@@ -6,7 +6,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use surrealdb_types::ToSql;
 
 use super::common::fetch_and_filter_records_batch;
@@ -126,9 +125,6 @@ impl IndexScan {
 		self
 	}
 }
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl ExecOperator for IndexScan {
 	fn name(&self) -> &'static str {
 		"IndexScan"
