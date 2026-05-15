@@ -50,8 +50,8 @@ pub use r#return::ReturnPlan;
 // Scan operators (storage I/O)
 pub use scan::CountScan;
 pub use scan::{
-	DynamicScan, EdgeTableSpec, FullTextScan, GraphEdgeScan, GraphScanOutput, IndexScan, KnnScan,
-	RecordIdScan, ReferenceScan, ReferenceScanOutput, TableScan, UnionIndexScan,
+	DynamicScan, EdgeTableSpec, EmptyScan, FullTextScan, GraphEdgeScan, GraphScanOutput, IndexScan,
+	KnnScan, RecordIdScan, ReferenceScan, ReferenceScanOutput, TableScan, UnionIndexScan,
 };
 pub use sequence::SequencePlan;
 pub use sleep::SleepPlan;

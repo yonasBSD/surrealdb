@@ -231,11 +231,14 @@ impl IndexConditionMatcher<'_> {
 		use crate::exec::index::access_path::BTreeAccess;
 
 		// Extract idiom, value, and the effective operator (normalized so the
-		// idiom is always on the left side of the comparison).
-		let (idiom, value, effective_op) = match (left, right) {
+		// idiom is always on the left side of the comparison). `idiom_on_left`
+		// tracks the original position because some operator rewrites are
+		// only valid when the idiom was the left operand (see the Inside
+		// normalisation below).
+		let (idiom, value, effective_op, idiom_on_left) = match (left, right) {
 			(Expr::Idiom(i), Expr::Literal(lit)) => {
 				if let Some(v) = try_literal_to_value(lit) {
-					(i, v, op.clone())
+					(i, v, op.clone(), true)
 				} else {
 					return false;
 				}
@@ -249,12 +252,32 @@ impl IndexConditionMatcher<'_> {
 						BinaryOperator::MoreThanEqual => BinaryOperator::LessThanEqual,
 						other => other.clone(),
 					};
-					(i, v, flipped)
+					(i, v, flipped, false)
 				} else {
 					return false;
 				}
 			}
 			_ => return false,
+		};
+
+		use crate::val::Value;
+
+		// Normalise the leaf so the strip path sees the same canonical
+		// form the analyzer produced: a single-element `field IN [v]` is
+		// rewritten by `extract_simple_condition` (analyzer side) to
+		// `field = v`, but ONLY when the idiom is on the left.
+		// `[v] IN field` (Right-position) has different runtime
+		// semantics — `[v].contains(field)` — and the analyzer correctly
+		// produces no candidate for it, so we must not strip it from the
+		// residual filter either. Gate the rewrite on `idiom_on_left`.
+		let (effective_op, value) = if idiom_on_left
+			&& matches!(effective_op, BinaryOperator::Inside)
+			&& let Value::Array(arr) = &value
+			&& arr.len() == 1
+		{
+			(BinaryOperator::Equal, arr[0].clone())
+		} else {
+			(effective_op, value)
 		};
 
 		let is_equality =
@@ -276,10 +299,22 @@ impl IndexConditionMatcher<'_> {
 				// Check range condition on the column after the prefix.
 				if let Some((range_op, range_val)) = range
 					&& let Some(col) = self.cols.get(prefix.len())
-					&& idiom == col && effective_op == *range_op
-					&& value == *range_val
+					&& idiom == col
 				{
-					return true;
+					if effective_op == *range_op && value == *range_val {
+						return true;
+					}
+					// `field != NONE` after an equality prefix is encoded
+					// as `Some((MoreThan, NONE))` by
+					// `analyze_compound_conditions`. Mirror the Range arm
+					// so the residual Filter doesn't keep this leaf.
+					if matches!(range_op, BinaryOperator::MoreThan)
+						&& matches!(range_val, Value::None)
+						&& effective_op == BinaryOperator::NotEqual
+						&& matches!(value, Value::None)
+					{
+						return true;
+					}
 				}
 				false
 			}
@@ -308,6 +343,19 @@ impl IndexConditionMatcher<'_> {
 						BinaryOperator::MoreThan
 					};
 					if effective_op == expected_op && value == from.value {
+						return true;
+					}
+					// `field != NONE` is equivalent to an exclusive lower bound
+					// at NONE because NONE sorts first in the BTree key
+					// ordering. `!= NULL` is NOT recognised here — that
+					// pushdown is unsafe (it would also drop NONE rows). See
+					// the matching note in
+					// `IndexAnalyzer::match_operator_to_access`.
+					if !from.inclusive
+						&& matches!(from.value, Value::None)
+						&& effective_op == BinaryOperator::NotEqual
+						&& value == from.value
+					{
 						return true;
 					}
 				}

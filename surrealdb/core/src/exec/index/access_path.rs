@@ -75,6 +75,15 @@ pub enum AccessPath {
 	/// Full table scan - iterate all records in storage order.
 	TableScan,
 
+	/// Produces no rows.
+	///
+	/// Selected when the analyzer can statically prove the WHERE cannot
+	/// match — for example a contradictory range (`a > 10 AND a < 5`),
+	/// an empty `IN []`, or a fully false-folded predicate. Surfaces as
+	/// the [`crate::exec::operators::EmptyScan`] operator and short-circuits
+	/// the rest of the SELECT pipeline.
+	EmptyScan,
+
 	/// B-tree index scan (Idx or Uniq).
 	///
 	/// Supports equality lookups, range scans, and compound key access.
@@ -217,13 +226,22 @@ pub fn select_access_path(
 	}
 
 	// WITH INDEX names - find the hinted index
-	if let Some(With::Index(names)) = with_hints
-		&& let Some(candidate) = find_hinted_index(&candidates, names)
-	{
-		return candidate.to_access_path(direction);
+	if let Some(With::Index(names)) = with_hints {
+		if let Some(candidate) = find_hinted_index(&candidates, names) {
+			return candidate.to_access_path(direction);
+		}
+		// Hint did not match any candidate. The most common cause is that
+		// the user named an index but no WHERE conjunct refers to its
+		// leading column. We log a warning so debugging "why isn't my
+		// index being used" tickets has a signal, then fall through to
+		// best-effort selection / table scan.
+		tracing::warn!(
+			target: "surreal::index",
+			hinted = ?names,
+			candidates = ?candidates.iter().map(|c| c.index_ref.name.as_str()).collect::<Vec<_>>(),
+			"WITH INDEX hint did not match any analyzed candidate; falling back to best-effort plan",
+		);
 	}
-	// If hinted index not found, fall through to best effort
-	// (could also error here, but being lenient)
 
 	// No candidates - table scan
 	if candidates.is_empty() {

@@ -166,18 +166,71 @@ fn try_fold_to_literal(expr: &Expr, registry: &FunctionRegistry) -> Option<Expr>
 			Some(result.into_literal())
 		}
 
-		// Binary operation where both operands are already literals
+		// `x INSIDE []` is provably false — no element can match an empty
+		// array. Folding to `false` lets the surrounding AND/OR collapse
+		// via the short-circuit rules below, ultimately yielding
+		// `AccessPath::EmptyScan` for the whole SELECT.
+		Expr::Binary {
+			op: BinaryOperator::Inside,
+			right,
+			..
+		} if is_empty_array_literal(right) => {
+			Some(Expr::Literal(crate::expr::literal::Literal::Bool(false)))
+		}
+
+		// AND / OR short-circuits when one side is a constant boolean.
+		// Without this, `field IN [] AND ...` would never simplify because
+		// the AND's left operand is not a literal.
 		Expr::Binary {
 			left,
 			op,
 			right,
 		} => {
+			if let Some(short) = try_short_circuit_bool(left, op, right) {
+				return Some(short);
+			}
 			let left_val = try_expr_to_value(left)?;
 			let right_val = try_expr_to_value(right)?;
 			let result = try_eval_binary(op, left_val, right_val)?;
 			Some(result.into_literal())
 		}
 
+		_ => None,
+	}
+}
+
+/// Returns `true` if `expr` is a literal array with no elements.
+fn is_empty_array_literal(expr: &Expr) -> bool {
+	matches!(expr, Expr::Literal(crate::expr::literal::Literal::Array(arr)) if arr.is_empty())
+}
+
+/// Try to short-circuit a logical AND/OR when one operand is a constant bool.
+///
+/// - `false AND _` and `_ AND false` → `false`
+/// - `true AND x`  and `x AND true`  → the other operand
+/// - `true OR _`   and `_ OR true`   → `true`
+/// - `false OR x`  and `x OR false`  → the other operand
+fn try_short_circuit_bool(left: &Expr, op: &BinaryOperator, right: &Expr) -> Option<Expr> {
+	use crate::expr::literal::Literal;
+	let l_bool = match left {
+		Expr::Literal(Literal::Bool(b)) => Some(*b),
+		_ => None,
+	};
+	let r_bool = match right {
+		Expr::Literal(Literal::Bool(b)) => Some(*b),
+		_ => None,
+	};
+	match (op, l_bool, r_bool) {
+		(BinaryOperator::And, Some(false), _) | (BinaryOperator::And, _, Some(false)) => {
+			Some(Expr::Literal(Literal::Bool(false)))
+		}
+		(BinaryOperator::And, Some(true), _) => Some(right.clone()),
+		(BinaryOperator::And, _, Some(true)) => Some(left.clone()),
+		(BinaryOperator::Or, Some(true), _) | (BinaryOperator::Or, _, Some(true)) => {
+			Some(Expr::Literal(Literal::Bool(true)))
+		}
+		(BinaryOperator::Or, Some(false), _) => Some(right.clone()),
+		(BinaryOperator::Or, _, Some(false)) => Some(left.clone()),
 		_ => None,
 	}
 }

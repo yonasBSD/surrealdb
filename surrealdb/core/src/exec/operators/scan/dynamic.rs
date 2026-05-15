@@ -594,6 +594,19 @@ async fn resolve_table_scan_stream(
 		None => None,
 	};
 
+	// If the WHERE folded to `false` (e.g. `field IN []` short-circuited by
+	// `fold_condition_expressions`) the SELECT can produce no rows. Skip
+	// index analysis and the KV scan entirely. Mirrors the static planner's
+	// check at `planner/select/mod.rs` so dynamic FROM sources get the same
+	// zero-I/O treatment as static `FROM table` sources.
+	if let Some(c) = resolved_cond.as_ref()
+		&& matches!(&c.0, crate::expr::Expr::Literal(crate::expr::literal::Literal::Bool(false)))
+	{
+		let op = super::EmptyScan::new();
+		let stream = op.execute(ctx)?;
+		return Ok((stream, 0));
+	}
+
 	let access_path = if matches!(&cfg.with, Some(With::NoIndex)) {
 		None
 	} else {
@@ -708,6 +721,13 @@ async fn resolve_table_scan_stream(
 			Ok((stream, 0))
 		}
 
+		// Provably empty result set — short-circuit with no storage I/O.
+		Some(AccessPath::EmptyScan) => {
+			let op = super::EmptyScan::new();
+			let stream = op.execute(ctx)?;
+			Ok((stream, 0))
+		}
+
 		// Fall back to table KV scan (NOINDEX, BTree rejected by ordering
 		// check, etc.)
 		_ => {
@@ -790,6 +810,8 @@ fn create_index_operator(
 				None,
 			))
 		}
+		// Provably empty: emit a single EmptyScan operator.
+		AccessPath::EmptyScan => Arc::new(super::EmptyScan::new()),
 		// TableScan and nested Union should not appear as sub-paths.
 		// Fall back to a table scan operator which will produce all
 		// records (safe but sub-optimal).

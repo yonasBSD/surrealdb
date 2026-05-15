@@ -1306,6 +1306,9 @@ impl<'ctx> Planner<'ctx> {
 							)
 							.await;
 					}
+					AccessPath::EmptyScan => {
+						return Ok(Self::plan_empty_source());
+					}
 				}
 			}
 		}
@@ -1555,6 +1558,20 @@ impl<'ctx> Planner<'ctx> {
 			filter_action: FilterAction::UseOriginal,
 			limit_pushed: false,
 		})
+	}
+
+	/// Build a `EmptyScan` for [`AccessPath::EmptyScan`] — used when the
+	/// analyzer proved the WHERE clause cannot match any rows (e.g. a
+	/// contradictory range or empty `IN []`). Returns a `PlannedSource`
+	/// that reports the predicate as fully consumed and the limit as
+	/// pushed, so the outer pipeline does not add a Filter or Limit.
+	fn plan_empty_source() -> PlannedSource {
+		use crate::exec::operators::EmptyScan;
+		PlannedSource {
+			operator: Arc::new(EmptyScan::new()) as Arc<dyn ExecOperator>,
+			filter_action: FilterAction::FullyConsumed,
+			limit_pushed: true,
+		}
 	}
 
 	/// Build a `TableScan` for [`AccessPath::TableScan`] — the fallback
@@ -2024,6 +2041,15 @@ impl<'ctx> Planner<'ctx> {
 		with: Option<&With>,
 	) -> Result<Option<(AccessPath, ScanDirection)>, Error> {
 		let direction = determine_scan_direction(order);
+
+		// If the entire WHERE clause folded to `false` (e.g. `field IN []`
+		// short-circuited by `fold_condition_expressions`) the SELECT can
+		// produce no rows. Skip index lookup entirely.
+		if let Some(c) = cond
+			&& matches!(&c.0, Expr::Literal(crate::expr::literal::Literal::Bool(false)))
+		{
+			return Ok(Some((AccessPath::EmptyScan, direction)));
+		}
 
 		if matches!(with, Some(With::NoIndex)) {
 			return Ok(Some((AccessPath::TableScan, direction)));
