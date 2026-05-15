@@ -21,6 +21,17 @@ BENCH_FEATURES = { value = "protocol-ws,kv-mem,kv-rocksdb,kv-surrealkv", conditi
 LLVM_PROFILE_FILE = { value = "target/llvm-cov-target/%p-%m.profraw", condition = { env_not_set = [
     "LLVM_PROFILE_FILE",
 ] } }
+# Adjacent-pair upgrade chain for language upgrade tests. Each consecutive
+# pair (3.0.0 -> 3.0.1, 3.0.1 -> 3.0.2, ...) is exercised as a separate hop.
+# The trailing `..` token resolves to a path-based version, which the runner
+# cargo-builds against the current checkout — this is the "main" target.
+#
+# Every numeric entry must have a published binary at
+#   https://download.surrealdb.com/v{ver}/surreal-v{ver}.{platform}.{tgz|exe}
+# Override `LANG_UPGRADE_VERSIONS` to test alternative chains locally.
+LANG_UPGRADE_VERSIONS = { value = "3.0.0,3.0.1,3.0.2,3.0.3,3.0.4,3.0.5,3.1.0-beta.1,3.1.0-beta.2,..", condition = { env_not_set = [
+    "LANG_UPGRADE_VERSIONS",
+] } }
 
 # --------------------------------------------------
 # Quality checks
@@ -612,6 +623,60 @@ run_task = { name = [
     "test-lang",
     "stop-tikv",
 ], fork = true, parallel = false }
+
+# --------------------------------------------------
+# Language upgrade tests
+# --------------------------------------------------
+#
+# These tasks drive the language-tests `upgrade` subcommand through the
+# adjacent-pair chain defined in LANG_UPGRADE_VERSIONS. The runner spawns
+# the from-version surreal binary, replays each test's imports, stops it,
+# spawns the to-version binary against the same data directory, and runs
+# the test query — catching any regression in how on-disk state is read.
+#
+# Binaries for tagged versions are downloaded from download.surrealdb.com
+# into language-tests/.binary_cache/ (cached across CI runs). The trailing
+# `..` token in the version list cargo-builds the current checkout.
+
+[tasks.test-lang-upgrade]
+private = true
+category = "CI - LANGUAGE TESTS"
+description = "Run SurrealQL language upgrade tests, hopping through adjacent version pairs"
+script = """
+#!/bin/bash -ex
+# Override _TEST_LANG_UPGRADE_JOBS to tune per-runner concurrency (default 4).
+cd language-tests
+cargo build --features "${_TEST_LANG_FEATURES}"
+IFS=',' read -ra V <<< "${LANG_UPGRADE_VERSIONS}"
+for ((i=0; i<${#V[@]}-1; i++)); do
+    echo "=== Upgrade hop: ${V[$i]} -> ${V[$((i+1))]} (backend=${_TEST_API_ENGINE}) ==="
+    ./target/debug/surrealql-test --color always upgrade \\
+        --from "${V[$i]}" --to "${V[$((i+1))]}" \\
+        --backend "${_TEST_API_ENGINE}" \\
+        --allow-download --no-wip \\
+        --jobs "${_TEST_LANG_UPGRADE_JOBS:-4}"
+done
+"""
+
+[tasks.ci-lang-upgrade-test-surrealkv]
+category = "CI - LANGUAGE TESTS"
+description = "Run language upgrade tests with the SurrealKV backend"
+env = { _TEST_API_ENGINE = "surrealkv", _TEST_LANG_FEATURES = "upgrade" }
+run_task = "test-lang-upgrade"
+
+[tasks.ci-lang-upgrade-test-rocksdb]
+category = "CI - LANGUAGE TESTS"
+description = "Run language upgrade tests with the RocksDB backend"
+env = { _TEST_API_ENGINE = "rocksdb", _TEST_LANG_FEATURES = "upgrade,backend-rocksdb" }
+run_task = "test-lang-upgrade"
+
+[tasks.ci-lang-upgrade-test-all]
+category = "CI - LANGUAGE TESTS"
+description = "Run language upgrade tests on all supported backends"
+dependencies = [
+    "ci-lang-upgrade-test-surrealkv",
+    "ci-lang-upgrade-test-rocksdb",
+]
 
 # --------------------------------------------------
 # Workspace tests

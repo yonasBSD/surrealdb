@@ -513,6 +513,65 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   # ----------------------------------------
+  # SurrealQL language upgrade tests
+  # ----------------------------------------
+
+  lang-upgrade-tests:
+    name: SurrealQL upgrade tests - ${{ matrix.engine }}
+    runs-on: depot-ubuntu-24.04-8
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [surrealkv, rocksdb]
+    steps:
+
+      - name: Checkout sources
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup environment
+        uses: ./.github/actions/setup-environment
+        with:
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
+          # Both workspaces are cached: `language-tests` for the test harness,
+          # and the root workspace because the final `..` hop builds the
+          # current checkout's surreal binary via cargo.
+          workspaces: |
+            language-tests
+            .
+          cache-key: lang-upgrade-${{ matrix.engine }}
+          free-disk-space: 'false'
+          depot-runner: 'true'
+
+      - name: Resolve upgrade version chain
+        id: vers
+        run: |
+          # Extract the comma-separated chain, then translate commas to '_' so
+          # the value is usable inside an `actions/cache` key (which forbids
+          # commas).
+          chain=$(grep -E '^LANG_UPGRADE_VERSIONS = ' Makefile.ci.toml \
+            | sed -E 's/.*value = "([^"]+)".*/\1/' \
+            | tr ',' '_')
+          echo "chain=$chain" >> "$GITHUB_OUTPUT"
+
+      - name: Cache upgrade binaries
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # (Actions must be pinned by commit hash) v4.2.3
+        with:
+          # Pre-built surreal-vX.Y.Z tarballs from download.surrealdb.com.
+          # Release tarballs are immutable, so stale-key restores are safe.
+          path: language-tests/.binary_cache
+          key: lang-upgrade-binaries-v1-${{ runner.os }}-${{ steps.vers.outputs.chain }}
+          restore-keys: |
+            lang-upgrade-binaries-v1-${{ runner.os }}-
+
+      - name: Install tools
+        uses: ./.github/actions/install-tools
+        with:
+          tools: cargo-make
+
+      - name: Run language upgrade tests
+        run: cargo make ci-lang-upgrade-test-${{ matrix.engine }}
+
+  # ----------------------------------------
   # Required checks
   # ----------------------------------------
 
@@ -545,6 +604,7 @@ jobs:
       - kvs-engines
       # SurrealQL language tests
       - lang-tests
+      - lang-upgrade-tests
     steps:
 
       - name: Check for failures
@@ -570,6 +630,7 @@ jobs:
             "${{ needs.sdk-engines.result }}"
             "${{ needs.kvs-engines.result }}"
             "${{ needs.lang-tests.result }}"
+            "${{ needs.lang-upgrade-tests.result }}"
           )
 
           # Check if any job failed (skipped is ok for conditional jobs)
