@@ -230,13 +230,16 @@ impl Value {
 						if let Value::Number(i) =
 							stk.run(|stk| x.compute(stk, ctx, opt, None)).await.catch_return()?
 						{
+							let Some(idx) = i.as_array_index() else {
+								return Ok(());
+							};
 							if path.len() == 1 {
-								if v.len() > i.to_usize() {
-									v.remove(i.to_usize());
+								if v.len() > idx {
+									v.remove(idx);
 								}
 								Ok(())
 							} else {
-								match v.get_mut(i.to_usize()) {
+								match v.get_mut(idx) {
 									Some(v) => {
 										stk.run(|stk| v.del(stk, ctx, opt, path.next())).await
 									}

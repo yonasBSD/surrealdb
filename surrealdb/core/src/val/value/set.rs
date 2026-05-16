@@ -132,7 +132,10 @@ impl Value {
 								}
 							}
 							Value::Number(i) => {
-								if let Some(v) = arr.get_mut(i.to_usize()) {
+								let Some(idx) = i.as_array_index() else {
+									return Ok(());
+								};
+								if let Some(v) = arr.get_mut(idx) {
 									place = v;
 								} else {
 									return Ok(());

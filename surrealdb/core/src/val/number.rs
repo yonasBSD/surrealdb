@@ -288,11 +288,31 @@ impl Number {
 	// Complex conversion of number
 	// -----------------------------------
 
-	pub fn to_usize(self) -> usize {
+	/// Convert to a `usize` suitable for array indexing.
+	///
+	/// Returns `None` for any value that does not represent an exact
+	/// non-negative integer within `usize` range — including negatives,
+	/// NaN, infinities, fractional values, and out-of-range magnitudes.
+	pub fn as_array_index(self) -> Option<usize> {
 		match self {
-			Number::Int(v) => v as usize,
-			Number::Float(v) => v as usize,
-			Number::Decimal(v) => v.to_usize().unwrap_or_default(),
+			Number::Int(v) => usize::try_from(v).ok(),
+			Number::Float(v) => {
+				if !v.is_finite() || v < 0.0 || v.fract() != 0.0 {
+					return None;
+				}
+				// `f64 as usize` saturates above `usize::MAX`; round-trip back
+				// through f64 to reject any value that couldn't be represented
+				// exactly.
+				let idx = v as usize;
+				(idx as f64 == v).then_some(idx)
+			}
+			Number::Decimal(v) => {
+				if v.fract().is_zero() {
+					v.to_usize()
+				} else {
+					None
+				}
+			}
 		}
 	}
 
@@ -1361,5 +1381,34 @@ mod tests {
 		check(&[Number::Int(1), Number::Float(1.0), Number::Decimal(Decimal::ONE)]);
 		check(&[Number::Int(-1), Number::Float(-1.0), Number::Decimal(Decimal::NEGATIVE_ONE)]);
 		check(&[Number::Float(1.5), Number::Decimal(Decimal::from_str_normalized("1.5").unwrap())]);
+	}
+
+	#[test]
+	fn as_array_index_accepts_valid() {
+		assert_eq!(Number::Int(0).as_array_index(), Some(0));
+		assert_eq!(Number::Int(7).as_array_index(), Some(7));
+		assert_eq!(Number::Float(0.0).as_array_index(), Some(0));
+		assert_eq!(Number::Float(-0.0).as_array_index(), Some(0));
+		assert_eq!(Number::Float(3.0).as_array_index(), Some(3));
+		assert_eq!(Number::Decimal(Decimal::ZERO).as_array_index(), Some(0));
+		assert_eq!(Number::Decimal(Decimal::ONE).as_array_index(), Some(1));
+	}
+
+	#[test]
+	fn as_array_index_rejects_invalid() {
+		assert_eq!(Number::Int(-1).as_array_index(), None);
+		assert_eq!(Number::Int(i64::MIN).as_array_index(), None);
+		assert_eq!(Number::Float(-1.0).as_array_index(), None);
+		assert_eq!(Number::Float(1.5).as_array_index(), None);
+		assert_eq!(Number::Float(f64::NAN).as_array_index(), None);
+		assert_eq!(Number::Float(f64::INFINITY).as_array_index(), None);
+		assert_eq!(Number::Float(f64::NEG_INFINITY).as_array_index(), None);
+		// 1e30 is far beyond usize::MAX and not exactly representable as usize.
+		assert_eq!(Number::Float(1e30).as_array_index(), None);
+		assert_eq!(Number::Decimal(Decimal::NEGATIVE_ONE).as_array_index(), None);
+		assert_eq!(
+			Number::Decimal(Decimal::from_str_normalized("1.5").unwrap()).as_array_index(),
+			None,
+		);
 	}
 }

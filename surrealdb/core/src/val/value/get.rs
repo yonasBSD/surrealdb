@@ -393,8 +393,7 @@ impl Value {
 						.await
 						.catch_return()?
 					{
-						// TODO: Remove to_usize()
-						Value::Number(i) => match v.get(i.to_usize()) {
+						Value::Number(i) => match i.as_array_index().and_then(|i| v.get(i)) {
 							Some(v) => stk.run(|stk| v.get(stk, ctx, opt, doc, path.next())).await,
 							None => Ok(Value::None),
 						},
@@ -604,7 +603,8 @@ impl Value {
 										.catch_return()?
 									{
 										Value::Number(n) => {
-											return match arr.get(n.to_usize()) {
+											return match n.as_array_index().and_then(|i| arr.get(i))
+											{
 												Some(v) => {
 													stk.run(|stk| {
 														v.get(stk, ctx, opt, doc, path.next())

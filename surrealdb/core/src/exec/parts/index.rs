@@ -65,13 +65,11 @@ pub(crate) fn evaluate_index(value: &Value, index: &Value) -> anyhow::Result<Val
 	match (value, index) {
 		// Array with numeric index
 		(Value::Array(arr), Value::Number(n)) => {
-			let idx = n.to_usize();
-			Ok(arr.get(idx).cloned().unwrap_or(Value::None))
+			Ok(n.as_array_index().and_then(|idx| arr.get(idx).cloned()).unwrap_or(Value::None))
 		}
 		// Set with numeric index
 		(Value::Set(set), Value::Number(n)) => {
-			let idx = n.to_usize();
-			Ok(set.nth(idx).cloned().unwrap_or(Value::None))
+			Ok(n.as_array_index().and_then(|idx| set.nth(idx).cloned()).unwrap_or(Value::None))
 		}
 		// Array with range
 		(Value::Array(arr), Value::Range(range)) => {
@@ -97,8 +95,7 @@ pub(crate) fn evaluate_index(value: &Value, index: &Value) -> anyhow::Result<Val
 		// RecordId with numeric index - only array keys support indexing
 		(Value::RecordId(rid), Value::Number(n)) => match &rid.key {
 			RecordIdKey::Array(arr) => {
-				let idx = n.to_usize();
-				Ok(arr.get(idx).cloned().unwrap_or(Value::None))
+				Ok(n.as_array_index().and_then(|idx| arr.get(idx).cloned()).unwrap_or(Value::None))
 			}
 			_ => Ok(Value::None),
 		},
