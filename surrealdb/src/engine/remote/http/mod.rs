@@ -960,13 +960,11 @@ async fn router(
 		}
 		| Command::ImportMl {
 			..
-		} => {
-			// TODO: Better error message here, some backups are supported
-			Err(Error::internal(
-				"The protocol or storage engine does not support backups on this architecture"
-					.to_string(),
-			))
-		}
+		} => Err(Error::internal(
+			"File-based export/import is not supported on this architecture. \
+				 Use the byte-stream variants (e.g. `db.export().await?`) instead."
+				.to_string(),
+		)),
 
 		#[cfg(not(target_family = "wasm"))]
 		Command::ExportFile {
