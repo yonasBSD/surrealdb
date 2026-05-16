@@ -17,7 +17,7 @@ use crate::buc::BucketStoreProvider;
 use crate::buc::manager::BucketsManager;
 use crate::cnf::dynamic::DynamicConfiguration;
 use crate::cnf::{CommonConfig, ConfigMap};
-use crate::dbs::Capabilities;
+use crate::dbs::{Capabilities, MessageBroker};
 use crate::exec::function::FunctionRegistry;
 #[cfg(feature = "http")]
 use crate::http::HttpClient;
@@ -41,7 +41,15 @@ use crate::types::PublicNotification;
 pub struct Builder {
 	capabilities: Capabilities,
 	shutdown: CancellationToken,
+	/// Optional sender for live-query notifications. Wrapped into a [`LocalMessageBroker`]
+	/// when `live_query_broker` is left unset; composers may consume this channel and return a
+	/// custom broker that owns it instead.
 	notify_channel: Option<Sender<PublicNotification>>,
+	live_query_broker: Option<Arc<dyn MessageBroker>>,
+	/// Public HTTP endpoint this datastore publishes for cross-node messaging
+	/// (live-query relay). Surfaced by the composer via
+	/// [`TransactionBuilderFactory::http_endpoint`] when present.
+	http_endpoint: Option<String>,
 	id: Option<Uuid>,
 	slow_log: Option<SlowLog>,
 	transaction_timeout: Option<Duration>,
@@ -66,6 +74,8 @@ impl Builder {
 			capabilities: Default::default(),
 			shutdown: CancellationToken::new(),
 			notify_channel: None,
+			live_query_broker: None,
+			http_endpoint: None,
 			id: None,
 			slow_log: None,
 			transaction_timeout: None,
@@ -99,6 +109,12 @@ impl Builder {
 	/// Adds a channel for receiving notifications from this datastore
 	pub fn with_notify(mut self, channel: Sender<PublicNotification>) -> Self {
 		self.notify_channel = Some(channel);
+		self
+	}
+
+	/// Installs the broker used to deliver buffered live-query notifications after commit.
+	pub fn with_live_query_broker(mut self, broker: Arc<dyn MessageBroker>) -> Self {
+		self.live_query_broker = Some(broker);
 		self
 	}
 
@@ -188,13 +204,50 @@ impl Builder {
 	where
 		F: TransactionBuilderFactory + BucketStoreProvider + 'static,
 	{
+		let mut this = self;
 		let TransactionBuilderParts {
 			builder,
 			router_state,
-		} = composer.new_transaction_builder(path, self.shutdown.clone(), self.config.clone()).await?;
-		let buckets = BucketsManager::new(Box::new(composer), self.config.load());
+		} = composer.new_transaction_builder(path, this.shutdown.clone(), this.config.clone()).await?;
+		if this.id.is_none()
+			&& let Some(id) = composer.datastore_node_id()
+		{
+			this.id = Some(Uuid::from_bytes(id));
+		}
+		// Pull the local node's public HTTP endpoint from the composer (clustered editions
+		// surface it from their topology config). Persisted on every `Node` row this
+		// datastore writes so other cluster members can discover it via the catalog.
+		if this.http_endpoint.is_none() {
+			this.http_endpoint = composer.http_endpoint();
+		}
+		// Resolve the broker once: explicit `with_live_query_broker` wins, otherwise let the
+		// composer decide (community returns a `LocalMessageBroker`, enterprise returns its
+		// relay broker). Skipped when notifications are disabled.
+		if this.live_query_broker.is_none()
+			&& let Some(channel) = this.notify_channel.as_ref()
+		{
+			this.live_query_broker = Some(composer.live_query_broker(channel.clone()));
+		}
+		let buckets = BucketsManager::new(Box::new(composer), this.config.load());
 
-		let datastore = self.build_with_tx_builder_buckets(builder, buckets).await?;
+		let datastore = this.build_with_tx_builder_buckets(builder, buckets).await?;
+
+		// The broker was built before the datastore (because the datastore owns it). Now that
+		// the catalog is reachable, hand the broker a resolver so cross-node routing can
+		// look peer endpoints up from the `node:` keyspace without needing an in-memory
+		// topology table. Brokers that don't need it ignore the call (default no-op).
+		//
+		// WASM doesn't run clustered brokers and its transaction types aren't `Send + Sync`,
+		// so the catalog resolver is non-WASM only.
+		#[cfg(not(target_family = "wasm"))]
+		if let Some(broker) = datastore.live_query_broker.as_ref() {
+			let ctx = crate::dbs::BrokerRoutingContext {
+				local_node_id: *datastore.id.as_bytes(),
+				endpoint_resolver: datastore.endpoint_resolver(),
+			};
+			broker.attach_routing_context(ctx);
+		}
+
 		Ok((datastore, router_state))
 	}
 
@@ -226,7 +279,8 @@ impl Builder {
 			dynamic_configuration,
 			slow_log: self.slow_log,
 			transaction_timeout: self.transaction_timeout,
-			notification_channel: self.notify_channel,
+			live_query_broker: self.live_query_broker,
+			http_endpoint: self.http_endpoint,
 			capabilities,
 			index_stores: IndexStores::new(config.hnsw_cache_size, config.diskann_cache_size),
 			index_builder: IndexBuilder::new(tf.clone()),

@@ -56,7 +56,9 @@ use crate::dbs::capabilities::{
 	ArbitraryQueryTarget, ExperimentalTarget, MethodTarget, RouteTarget,
 };
 use crate::dbs::node::{Node, Timestamp};
-use crate::dbs::{Capabilities, Executor, Options, QueryResult, QueryResultBuilder, Session};
+use crate::dbs::{
+	Capabilities, Executor, MessageBroker, Options, QueryResult, QueryResultBuilder, Session,
+};
 use crate::doc::AsyncEventRecord;
 use crate::err::Error;
 use crate::exec::function::FunctionRegistry;
@@ -218,8 +220,16 @@ pub struct Datastore {
 	transaction_timeout: Option<Duration>,
 	/// The security and feature capabilities for this datastore.
 	capabilities: Arc<Capabilities>,
-	// Whether this datastore enables live query notifications to subscribers.
-	notification_channel: Option<Sender<PublicNotification>>,
+	/// Broker used to deliver live-query notifications after their write commits.
+	///
+	/// `Some` iff live-query subscribers exist for this datastore (the broker owns the sender
+	/// half of the notification channel internally). `None` disables live-query work entirely
+	/// at the executor boundary.
+	live_query_broker: Option<Arc<dyn MessageBroker>>,
+	/// Public HTTP endpoint this datastore publishes on its `Node` catalog row so other
+	/// cluster members can route cross-node messages (e.g. live-query relay) to it.
+	/// `None` in deployments that don't expose such an endpoint.
+	http_endpoint: Option<String>,
 	// The index store cache
 	index_stores: IndexStores,
 	// The cross transaction cache
@@ -482,6 +492,34 @@ pub trait TransactionBuilderFactory: TransactionBuilderFactoryRequirements {
 
 	/// Validate a datastore path string.
 	fn path_valid(v: &str) -> Result<String>;
+
+	/// Returns the stable datastore node id used for live-query ownership metadata.
+	///
+	/// Composers that run SurrealDB inside a clustered product should return a deterministic
+	/// value so remote writers can route notifications back to the node that owns each
+	/// subscriber connection.
+	fn datastore_node_id(&self) -> Option<[u8; 16]> {
+		None
+	}
+
+	/// Creates the broker that receives buffered live-query notifications after commit.
+	///
+	/// The default broker is local-only and preserves community behaviour. Clustered composers
+	/// can return a broker that forwards remote targets without changing transaction results on
+	/// delivery failure.
+	fn live_query_broker(&self, channel: Sender<PublicNotification>) -> Arc<dyn MessageBroker> {
+		crate::dbs::LocalMessageBroker::new(channel)
+	}
+
+	/// Public HTTP endpoint this datastore should publish for cross-node messaging.
+	///
+	/// Clustered composers surface their local node's endpoint here so the [`Datastore`]
+	/// can record it on the `Node` catalog row, making it discoverable by peer nodes
+	/// (e.g. for the live-query relay). Returns `None` in single-node and shared-backend
+	/// deployments that don't expose a cross-node messaging endpoint.
+	fn http_endpoint(&self) -> Option<String> {
+		None
+	}
 }
 
 pub mod requirements {
@@ -900,7 +938,8 @@ impl Datastore {
 			slow_log: self.slow_log,
 			transaction_timeout: self.transaction_timeout,
 			capabilities: Arc::clone(&self.capabilities),
-			notification_channel: self.notification_channel,
+			live_query_broker: self.live_query_broker,
+			http_endpoint: self.http_endpoint,
 			index_stores: IndexStores::new(
 				self.config.hnsw_cache_size,
 				self.config.diskann_cache_size,
@@ -946,7 +985,8 @@ impl Datastore {
 			slow_log: self.slow_log.clone(),
 			transaction_timeout: self.transaction_timeout,
 			capabilities: Arc::clone(&self.capabilities),
-			notification_channel: self.notification_channel.clone(),
+			live_query_broker: self.live_query_broker.clone(),
+			http_endpoint: self.http_endpoint.clone(),
 			index_stores: IndexStores::new(
 				self.config.hnsw_cache_size,
 				self.config.diskann_cache_size,
@@ -988,6 +1028,27 @@ impl Datastore {
 	/// Get the configured transaction timeout, if any
 	pub(crate) fn transaction_timeout(&self) -> Option<Duration> {
 		self.transaction_timeout
+	}
+
+	/// Returns the broker used to flush live-query notifications after commit.
+	pub(crate) fn live_query_broker(&self) -> Option<Arc<dyn MessageBroker>> {
+		self.live_query_broker.clone()
+	}
+
+	/// Looks up the public HTTP endpoint that the cluster member with `node_id`
+	/// has published on its `Node` catalog row.
+	///
+	/// Returns `Ok(None)` when the row exists but no endpoint is set, or when
+	/// no such node has registered. Used by clustered live-query relays to
+	/// resolve the target node's address at delivery time without consulting
+	/// any in-memory cluster topology.
+	pub async fn lookup_node_endpoint(&self, node_id: Uuid) -> Result<Option<String>> {
+		let txn = self.transaction(Read, Optimistic).await?;
+		let key = crate::key::root::nd::Nd::new(node_id);
+		let res = txn.get(&key, None).await?;
+		// Always cancel a read transaction; we don't write through it.
+		let _ = txn.cancel().await;
+		Ok(res.and_then(|node: Node| node.http_endpoint))
 	}
 
 	#[cfg(storage)]
@@ -1494,13 +1555,15 @@ impl Datastore {
 		bail!(Error::Internal(format!("{task} failed after {attempt} attempts due to timeout")));
 	}
 
-	/// Inserts a node for the first time into the cluster.
+	/// Registers this node's cluster membership entry with a fresh heartbeat.
 	///
-	/// This function should be run at server or database startup.
-	///
-	/// This function ensures that this node is entered into the cluster
-	/// membership entries. This function must be run at server or database
-	/// startup, in order to write the initial entry and timestamp to storage.
+	/// Must be run at server or database startup. The write is idempotent:
+	/// the entry at `Nd::new(self.id)` is owned by this node, so the call
+	/// upserts the row whether or not a previous lifetime of the same node
+	/// id left a record behind. This supports deployments where the node id
+	/// is stable across restarts (e.g. a stateful cluster member reusing
+	/// its durable storage) without forcing the operator to clean up state
+	/// between runs.
 	#[instrument(err, level = "trace", target = "surrealdb::core::kvs::ds", skip(self))]
 	pub async fn insert_node(&self) -> Result<()> {
 		// Log when this method is run
@@ -1511,23 +1574,8 @@ impl Datastore {
 		let txn = self.transaction(Write, Optimistic).await?;
 		let key = crate::key::root::nd::Nd::new(self.id);
 		let now = self.clock_now();
-		let node = Node::new(self.id, now, false);
-		let res = run!(txn, txn.put(&key, &node).await);
-		match res {
-			Err(e) => {
-				if matches!(
-					e.downcast_ref::<Error>(),
-					Some(Error::Kvs(crate::kvs::Error::TransactionKeyAlreadyExists))
-				) {
-					Err(anyhow::Error::new(Error::ClAlreadyExists {
-						id: self.id.to_string(),
-					}))
-				} else {
-					Err(e)
-				}
-			}
-			x => x,
-		}
+		let node = Node::new_with_endpoint(self.id, now, false, self.http_endpoint.clone());
+		run!(txn, txn.set(&key, &node).await)
 	}
 
 	/// Updates an already existing node in the cluster.
@@ -1547,7 +1595,7 @@ impl Datastore {
 		let txn = self.transaction(Write, Optimistic).await?;
 		let key = crate::key::root::nd::new(self.id);
 		let now = self.clock_now();
-		let node = Node::new(self.id, now, false);
+		let node = Node::new_with_endpoint(self.id, now, false, self.http_endpoint.clone());
 		run!(txn, txn.replace(&key, &node).await)
 	}
 
@@ -1578,7 +1626,7 @@ impl Datastore {
 		.await?;
 		let key = crate::key::root::nd::new(self.id);
 		let now = self.clock_now();
-		let node = Node::new(self.id, now, false);
+		let node = Node::new_with_endpoint(self.id, now, false, self.http_endpoint.clone());
 
 		await_node_tx_step(
 			&txn,
@@ -3154,8 +3202,6 @@ impl Datastore {
 		if let Some(timeout) = self.dynamic_configuration.get_query_timeout() {
 			ctx.add_timeout(timeout)?;
 		}
-		// Setup the notification channel
-		ctx.add_notifications(self.notification_channel.as_ref());
 
 		let txn_type = if val.read_only() {
 			TransactionType::Read
@@ -3279,7 +3325,7 @@ impl Datastore {
 	}
 
 	pub fn setup_ctx(&self) -> Result<Context> {
-		let mut ctx = Context::from_ds(
+		let ctx = Context::from_ds(
 			self.id,
 			self.auth_enabled,
 			self.dynamic_configuration.clone(),
@@ -3300,8 +3346,6 @@ impl Datastore {
 			#[cfg(feature = "surrealism")]
 			Arc::clone(&self.surrealism_cache),
 		)?;
-		// Setup the notification channel
-		ctx.add_notifications(self.notification_channel.as_ref());
 		Ok(ctx)
 	}
 
@@ -3504,6 +3548,61 @@ impl Datastore {
 	#[cfg(feature = "http")]
 	pub fn http_client(&self) -> Arc<HttpClient> {
 		Arc::clone(&self.http_client)
+	}
+
+	/// Builds a [`NodeEndpointResolver`] backed by this datastore's catalog. Used by the
+	/// builder to hand a resolver to clustered message brokers after the datastore is
+	/// fully constructed.
+	///
+	/// Only available on non-WASM targets: the underlying transaction types are not
+	/// `Send + Sync` under the WASM single-threaded model, and cross-node delivery
+	/// (the only consumer) doesn't apply to in-browser datastores.
+	#[cfg(not(target_family = "wasm"))]
+	pub(crate) fn endpoint_resolver(&self) -> Arc<dyn crate::dbs::NodeEndpointResolver> {
+		Arc::new(CatalogNodeEndpointResolver {
+			transaction_factory: self.transaction_factory.clone(),
+			sequences: self.sequences.clone(),
+		})
+	}
+}
+
+/// Catalog-backed [`NodeEndpointResolver`] handed to clustered brokers post-construction.
+///
+/// Holds clones of the transaction factory and sequences (both cheap `Arc`-based clones) so
+/// it can open read transactions independently of the [`Datastore`] struct, avoiding any
+/// reference cycle between the broker and the datastore.
+#[cfg(not(target_family = "wasm"))]
+#[derive(Clone)]
+struct CatalogNodeEndpointResolver {
+	transaction_factory: TransactionFactory,
+	sequences: Sequences,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl std::fmt::Debug for CatalogNodeEndpointResolver {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("CatalogNodeEndpointResolver").finish_non_exhaustive()
+	}
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl crate::dbs::NodeEndpointResolver for CatalogNodeEndpointResolver {
+	fn resolve(
+		&self,
+		target_node: [u8; 16],
+	) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + '_>> {
+		Box::pin(async move {
+			let uuid = Uuid::from_bytes(target_node);
+			let txn = self
+				.transaction_factory
+				.transaction(Read, Optimistic, self.sequences.clone())
+				.await
+				.ok()?;
+			let key = crate::key::root::nd::Nd::new(uuid);
+			let node: Option<Node> = txn.get(&key, None).await.ok()?;
+			let _ = txn.cancel().await;
+			node.and_then(|n| n.http_endpoint)
+		})
 	}
 }
 

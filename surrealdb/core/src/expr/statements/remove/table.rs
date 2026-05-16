@@ -6,7 +6,7 @@ use super::retire_table_indexes;
 use crate::catalog::providers::TableProvider;
 use crate::catalog::{TableDefinition, ViewDefinition};
 use crate::ctx::FrozenContext;
-use crate::dbs::Options;
+use crate::dbs::{Options, RoutedNotification};
 use crate::doc::CursorDoc;
 use crate::err::Error;
 use crate::expr::parameterize::expr_to_ident;
@@ -138,12 +138,15 @@ impl RemoveTableStatement {
 		if let Some(sender) = ctx.broker() {
 			for lv in lvs.iter() {
 				sender
-					.send(PublicNotification::new(
-						lv.id.into(),
-						None,
-						PublicAction::Killed,
-						PublicValue::None,
-						PublicValue::None,
+					.send(RoutedNotification::new(
+						lv.node,
+						PublicNotification::new(
+							lv.id.into(),
+							None,
+							PublicAction::Killed,
+							PublicValue::None,
+							PublicValue::None,
+						),
 					))
 					.await;
 			}

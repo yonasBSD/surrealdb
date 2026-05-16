@@ -83,6 +83,42 @@ impl RpcState {
 	}
 }
 
+/// Dispatch one live-query notification into the RPC state.
+///
+/// The helper is intentionally independent of the datastore notification channel so embedded
+/// products can inject an already-authenticated notification received over an internal relay.
+/// Unknown live-query ids and disconnected WebSocket sessions are no-ops.
+pub async fn dispatch_live_notification(notification: Notification, state: Arc<RpcState>) {
+	#[cfg(feature = "graphql")]
+	if state.notification_router.has_subscribers() {
+		state.notification_router.dispatch(&notification);
+	}
+	// Copy the lookup result out and drop the `live_queries` read guard BEFORE acquiring
+	// `web_sockets`. Keeping those locks independent prevents cleanup paths from being blocked
+	// by a client send on the hot notification path.
+	let live_query = state.live_queries.read().await.get(&notification.id).cloned();
+	if let Some(entry) = live_query
+		&& let Some(rpc) = state.web_sockets.read().await.get(&entry.websocket_id).cloned()
+	{
+		// Count the notification once we know it will actually be delivered to a client. Drops
+		// (unknown LQ id or disconnected WS) are deliberately not counted.
+		if let Some(obs) = state.metrics_observer.as_ref() {
+			obs.record_live_query_notification(
+				entry.namespace.as_deref(),
+				entry.database.as_deref(),
+			);
+		}
+		// Hide the connection's implicit session UUID from the client: when a LIVE query was
+		// registered without an explicit session_id it resolves to `rpc.id`, which is an
+		// internal connection identifier the client never supplied.
+		let wire_session_id = (entry.session_id != rpc.id).then_some(entry.session_id);
+		let message = DbResponse::success(None, wire_session_id, DbResult::Live(notification));
+		let format = rpc.format;
+		let sender = rpc.channel.clone();
+		crate::rpc::response::send(message, format, sender).await;
+	}
+}
+
 /// Performs notification delivery to the WebSockets.
 ///
 /// This function listens on the datastore's notification channel and forwards
@@ -117,54 +153,7 @@ pub async fn notifications(
 			Some(_) = futures.next() => continue,
 			// Receive a notification on the channel
 			Ok(notification) = channel.recv() => {
-				#[cfg(feature = "graphql")]
-				if state.notification_router.has_subscribers() {
-					state.notification_router.dispatch(&notification);
-				}
-				// Copy the lookup result out and drop the `live_queries`
-				// read guard BEFORE acquiring `web_sockets`. An `if let` /
-				// `&& let` chain would extend the first guard's lifetime
-				// across the second `.read().await`, blocking concurrent
-				// `live_queries.write()` callers (handle_live, handle_kill,
-				// cleanup_lqs, cleanup_all_lqs) on this hot notification
-				// path.
-				let live_query = state
-					.live_queries
-					.read()
-					.await
-					.get(&notification.id)
-					.cloned();
-				if let Some(entry) = live_query
-					&& let Some(rpc) = state.web_sockets.read().await.get(&entry.websocket_id).cloned() {
-						// Count the notification once we know it will
-						// actually be delivered to a client. We
-						// deliberately avoid counting drops (unknown
-						// LQ id or disconnected WS) so the metric
-						// mirrors end-to-end deliveries.
-						if let Some(obs) = state.metrics_observer.as_ref() {
-							obs.record_live_query_notification(
-								entry.namespace.as_deref(),
-								entry.database.as_deref(),
-							);
-						}
-						// Hide the connection's implicit session UUID from the
-						// client: when a LIVE query was registered without an
-						// explicit session_id it resolves to `rpc.id`, which
-						// is an internal connection identifier the client
-						// never supplied. Emit `null` in that case to match
-						// the historical wire protocol.
-						let wire_session_id =
-							(entry.session_id != rpc.id).then_some(entry.session_id);
-						let message = DbResponse::success(
-							None,
-							wire_session_id,
-							DbResult::Live(notification),
-						);
-						let format = rpc.format;
-						let sender = rpc.channel.clone();
-						let future = crate::rpc::response::send(message, format, sender);
-						futures.push(future);
-				}
+				futures.push(dispatch_live_notification(notification, Arc::clone(&state)));
 			},
 		}
 	}

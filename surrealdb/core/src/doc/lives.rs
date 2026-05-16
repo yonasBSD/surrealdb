@@ -12,7 +12,7 @@ use reblessive::tree::Stk;
 use super::IgnoreError;
 use crate::catalog::{Permission, SubscriptionDefinition, SubscriptionFields};
 use crate::ctx::{Context, FrozenContext};
-use crate::dbs::{MessageBroker, Options};
+use crate::dbs::{MessageBroker, Options, RoutedNotification};
 use crate::doc::{Action, CursorDoc, Document};
 use crate::err::Error;
 use crate::expr::FlowResultExt as _;
@@ -262,7 +262,7 @@ impl Document {
 			Err(IgnoreError::Error(e)) => return Err(e),
 			Ok(_) => (),
 		}
-		if !sender.can_be_sent(ctx.node_id(), &live_subscription)? {
+		if !sender.should_emit(*ctx.node_id().as_bytes(), *live_subscription.node.as_bytes())? {
 			return Ok(());
 		}
 		if let Err(e) = lq_check_result {
@@ -274,12 +274,15 @@ impl Document {
 				convert_value_to_public_value(Value::RecordId(rid.as_ref().clone()))
 			{
 				sender
-					.send(PublicNotification::new(
-						live_subscription.id.into(),
-						session_id,
-						PublicAction::Error,
-						rid_public,
-						PublicValue::String(e.to_string()),
+					.send(RoutedNotification::new(
+						live_subscription.node,
+						PublicNotification::new(
+							live_subscription.id.into(),
+							session_id,
+							PublicAction::Error,
+							rid_public,
+							PublicValue::String(e.to_string()),
+						),
 					))
 					.await;
 			}
@@ -412,7 +415,7 @@ impl Document {
 		);
 
 		// Send the notification
-		sender.send(notification).await;
+		sender.send(RoutedNotification::new(live_subscription.node, notification)).await;
 
 		Ok(())
 	}
@@ -497,30 +500,32 @@ impl Document {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct DefaultBroker(Sender<PublicNotification>);
+pub(crate) struct DefaultBroker {
+	sender: Sender<RoutedNotification>,
+	delivery: Arc<dyn MessageBroker>,
+}
 
 impl DefaultBroker {
-	pub(crate) fn new(sender: Sender<PublicNotification>) -> Arc<Self> {
-		Arc::new(Self(sender))
+	pub(crate) fn new(
+		sender: Sender<RoutedNotification>,
+		delivery: Arc<dyn MessageBroker>,
+	) -> Arc<Self> {
+		Arc::new(Self {
+			sender,
+			delivery,
+		})
 	}
 }
 impl MessageBroker for DefaultBroker {
-	fn can_be_sent(
-		&self,
-		node_id: uuid::Uuid,
-		subscription: &SubscriptionDefinition,
-	) -> Result<bool> {
-		Ok(node_id == subscription.node)
+	fn should_emit(&self, node_id: [u8; 16], target_node: [u8; 16]) -> Result<bool> {
+		self.delivery.should_emit(node_id, target_node)
 	}
 
-	fn send(
-		&self,
-		notification: PublicNotification,
-	) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+	fn send(&self, item: RoutedNotification) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
 		Box::pin(async move {
 			// If there is an error, we can just ignore it,
 			// as it means that the channel was closed.
-			let _ = self.0.send(notification).await;
+			let _ = self.sender.send(item).await;
 		})
 	}
 }

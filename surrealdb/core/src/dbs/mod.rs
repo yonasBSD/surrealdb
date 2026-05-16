@@ -25,7 +25,10 @@ pub mod node;
 
 pub(crate) use variables::{ParameterCapturePass, Variables};
 
-pub(crate) use self::broker::MessageBroker;
+pub use self::broker::{
+	BrokerRoutingContext, LocalMessageBroker, MessageBroker, NodeEndpointResolver,
+	RoutedNotification,
+};
 pub use self::capabilities::Capabilities;
 pub(crate) use self::executor::Executor;
 pub(crate) use self::iterator::{Iterable, Iterator, Operable, Processable, Workable};

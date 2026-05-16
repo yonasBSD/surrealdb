@@ -9,7 +9,6 @@ use std::time::Duration;
 #[cfg(feature = "surrealism")]
 use anyhow::Context as _;
 use anyhow::{Result, bail};
-use async_channel::Sender;
 use surrealdb_strand::Strand;
 #[cfg(feature = "surrealism")]
 use surrealism_runtime::package::{SurrealismPackage, UnpackOptions};
@@ -57,7 +56,7 @@ use crate::mem::ALLOC;
 use crate::sql::expression::convert_public_value_to_internal;
 #[cfg(feature = "surrealism")]
 use crate::surrealism::cache::{SurrealismCache, SurrealismCacheLookup, SurrealismCachedModule};
-use crate::types::{PublicNotification, PublicVariables};
+use crate::types::PublicVariables;
 use crate::val::Value;
 
 pub type FrozenContext = Arc<Context>;
@@ -80,8 +79,6 @@ pub struct Context {
 	cancelled: Arc<AtomicBool>,
 	// A collection of read only values stored in this context.
 	values: HashMap<Strand, Arc<Value>>,
-	// Stores the notification channel if available
-	notifications: Option<Sender<PublicNotification>>,
 	// An optional query planner
 	query_planner: Option<Arc<QueryPlanner>>,
 	// An optional query executor
@@ -168,7 +165,6 @@ impl Context {
 			deadline: None,
 			slow_log: None,
 			cancelled: Arc::new(AtomicBool::new(false)),
-			notifications: None,
 			query_planner: None,
 			query_executor: None,
 			iteration_stage: None,
@@ -228,7 +224,6 @@ impl Context {
 			deadline: parent.deadline,
 			slow_log: parent.slow_log.clone(),
 			cancelled: Arc::new(AtomicBool::new(false)),
-			notifications: parent.notifications.clone(),
 			query_planner: parent.query_planner.clone(),
 			query_executor: parent.query_executor.clone(),
 			iteration_stage: parent.iteration_stage.clone(),
@@ -272,7 +267,6 @@ impl Context {
 			deadline: parent.deadline,
 			slow_log: parent.slow_log.clone(),
 			cancelled: Arc::new(AtomicBool::new(false)),
-			notifications: parent.notifications.clone(),
 			query_planner: parent.query_planner.clone(),
 			query_executor: parent.query_executor.clone(),
 			iteration_stage: parent.iteration_stage.clone(),
@@ -323,7 +317,6 @@ impl Context {
 			deadline: from.deadline,
 			slow_log: from.slow_log.clone(),
 			cancelled: Arc::new(AtomicBool::new(false)),
-			notifications: from.notifications.clone(),
 			query_planner: from.query_planner.clone(),
 			query_executor: from.query_executor.clone(),
 			iteration_stage: from.iteration_stage.clone(),
@@ -375,7 +368,6 @@ impl Context {
 			deadline: None,
 			slow_log: from.slow_log.clone(),
 			cancelled: Arc::new(AtomicBool::new(false)),
-			notifications: from.notifications.clone(),
 			query_planner: from.query_planner.clone(),
 			query_executor: from.query_executor.clone(),
 			iteration_stage: from.iteration_stage.clone(),
@@ -437,7 +429,6 @@ impl Context {
 			deadline: None,
 			slow_log,
 			cancelled: Arc::new(AtomicBool::new(false)),
-			notifications: None,
 			query_planner: None,
 			query_executor: None,
 			iteration_stage: None,
@@ -484,7 +475,6 @@ impl Context {
 			deadline: None,
 			slow_log: None,
 			cancelled: Arc::new(AtomicBool::new(false)),
-			notifications: None,
 			query_planner: None,
 			query_executor: None,
 			iteration_stage: None,
@@ -736,12 +726,6 @@ impl Context {
 		}
 	}
 
-	/// Add the LIVE query notification channel to the context, so that we
-	/// can send notifications to any subscribers.
-	pub(crate) fn add_notifications(&mut self, chn: Option<&Sender<PublicNotification>>) {
-		self.notifications = chn.cloned()
-	}
-
 	pub(crate) fn set_query_planner(&mut self, qp: QueryPlanner) {
 		self.query_planner = Some(Arc::new(qp));
 	}
@@ -799,14 +783,6 @@ impl Context {
 	/// The executor consults this to decide whether to emit slow-query log lines.
 	pub(crate) fn slow_log(&self) -> Option<&SlowLog> {
 		self.slow_log.as_ref()
-	}
-
-	pub(crate) fn notifications(&self) -> Option<Sender<PublicNotification>> {
-		self.notifications.clone()
-	}
-
-	pub(crate) fn has_notifications(&self) -> bool {
-		self.notifications.is_some()
 	}
 
 	pub(crate) fn get_query_planner(&self) -> Option<&QueryPlanner> {

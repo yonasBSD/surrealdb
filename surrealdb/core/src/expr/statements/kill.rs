@@ -4,7 +4,7 @@ use surrealdb_types::ToSql;
 
 use crate::catalog::SubscriptionDefinition;
 use crate::ctx::FrozenContext;
-use crate::dbs::Options;
+use crate::dbs::{Options, RoutedNotification};
 use crate::doc::CursorDoc;
 use crate::err::Error;
 use crate::expr::{Expr, FlowResultExt as _};
@@ -116,12 +116,15 @@ impl KillStatement {
 		}
 		if let Some(sender) = ctx.broker() {
 			sender
-				.send(PublicNotification::new(
-					lid.into(),
-					None,
-					PublicAction::Killed,
-					PublicValue::None,
-					PublicValue::None,
+				.send(RoutedNotification::new(
+					nid,
+					PublicNotification::new(
+						lid.into(),
+						None,
+						PublicAction::Killed,
+						PublicValue::None,
+						PublicValue::None,
+					),
 				))
 				.await;
 		}

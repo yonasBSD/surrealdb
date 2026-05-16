@@ -18,7 +18,7 @@ use crate::catalog::providers::{CatalogProvider, NamespaceProvider, RootProvider
 use crate::ctx::reason::Reason;
 use crate::ctx::{Context, FrozenContext};
 use crate::dbs::response::QueryResult;
-use crate::dbs::{Force, Options, QueryType, StatementCounters};
+use crate::dbs::{Force, MessageBroker, Options, QueryType, RoutedNotification, StatementCounters};
 use crate::doc::DefaultBroker;
 use crate::err::Error;
 use crate::exec::planner::try_plan_expr;
@@ -35,11 +35,15 @@ use crate::observe::{
 	StatementEventSafe, StatementType,
 };
 use crate::rpc::types_error_from_anyhow;
-use crate::types::PublicNotification;
 use crate::val::{Array, Value, convert_value_to_public_value};
 use crate::{err, expr, sql};
 
 const TARGET: &str = "surrealdb::core::dbs";
+
+struct PreparedBroker {
+	receiver: async_channel::Receiver<RoutedNotification>,
+	delivery: Arc<dyn MessageBroker>,
+}
 
 /// An executor which relies on the `compute` methods of the logical expressions.
 pub struct Executor {
@@ -64,13 +68,12 @@ impl Executor {
 	fn prepare_broker(
 		&mut self,
 		writable: bool,
-	) -> Option<async_channel::Receiver<PublicNotification>> {
+		delivery: Option<Arc<dyn MessageBroker>>,
+	) -> Option<PreparedBroker> {
 		if !writable {
 			return None;
 		}
-		if !self.ctx.has_notifications() {
-			return None;
-		}
+		let delivery = delivery?;
 		// If a broker is already provided by a higher layer, don't override it here.
 		if self.ctx.broker().is_some() {
 			return None;
@@ -89,9 +92,24 @@ impl Executor {
 			}
 			return None;
 		};
-		ctx.set_broker(Some(DefaultBroker::new(send)));
+		ctx.set_broker(Some(DefaultBroker::new(send, Arc::clone(&delivery))));
 		self.broker_owned_by_executor = true;
-		Some(recv)
+		Some(PreparedBroker {
+			receiver: recv,
+			delivery,
+		})
+	}
+
+	fn flush_live_query_notifications(prepared: PreparedBroker) {
+		let PreparedBroker {
+			receiver,
+			delivery,
+		} = prepared;
+		spawn(async move {
+			while let Ok(item) = receiver.recv().await {
+				delivery.send(item).await;
+			}
+		});
 	}
 
 	#[inline]
@@ -909,7 +927,10 @@ impl Executor {
 				.await?
 				.with_tenant_identity(self.ctx.tenant_identity().cloned()),
 		);
-		let receiver = self.prepare_broker(matches!(transaction_type, TransactionType::Write));
+		let receiver = self.prepare_broker(
+			matches!(transaction_type, TransactionType::Write),
+			kvs.live_query_broker(),
+		);
 
 		let exec_result = match kvs.transaction_timeout() {
 			Some(timeout) => {
@@ -945,18 +966,10 @@ impl Executor {
 					});
 				}
 
-				// flush notifications (`execute_plan_impl` clears the broker only when we installed
-				// it).
-				if let Some(recv) = receiver
-					&& let Some(sink) = self.ctx.notifications()
-				{
-					spawn(async move {
-						while let Ok(x) = recv.recv().await {
-							if sink.send(x).await.is_err() {
-								break;
-							}
-						}
-					});
+				// Flush buffered notifications only after the write is durable. Failed commits and
+				// cancelled transactions drop the receiver without delivery.
+				if let Some(prepared) = receiver {
+					Self::flush_live_query_notifications(prepared);
 				}
 
 				Ok(value)
@@ -1093,7 +1106,7 @@ impl Executor {
 	{
 		// Create a sender for this transaction only if the context allows for
 		// notifications.
-		let receiver = self.prepare_broker(true);
+		let receiver = self.prepare_broker(true, kvs.live_query_broker());
 		let start_results = self.results.len();
 		let mut skip_remaining = false;
 
@@ -1332,17 +1345,10 @@ impl Executor {
 					} else {
 						// Successfully commited. everything is fine.
 
-						// flush notifications (`execute_begin_statement` clears only our broker).
-						if let Some(recv) = receiver
-							&& let Some(sink) = self.ctx.notifications()
-						{
-							spawn(async move {
-								while let Ok(x) = recv.recv().await {
-									if sink.send(x).await.is_err() {
-										break;
-									}
-								}
-							});
+						// Flush buffered notifications only after COMMIT succeeds. Rollback and
+						// failed COMMIT paths drop the receiver without delivery.
+						if let Some(prepared) = receiver {
+							Self::flush_live_query_notifications(prepared);
 						}
 
 						// COMMIT returns NONE
