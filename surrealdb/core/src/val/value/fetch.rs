@@ -130,8 +130,12 @@ impl Value {
 									.await;
 							}
 							let idx = v.coerce_to::<i64>()?;
-							// TODO: i64 here is truncated, should probably be handled differently.
-							let Some(x) = array.get_mut(idx as usize) else {
+							// A negative index does not address any element; skip silently to
+							// match the behaviour of `arr[-1]` returning NONE in expressions.
+							let Ok(idx) = usize::try_from(idx) else {
+								return Ok(());
+							};
+							let Some(x) = array.get_mut(idx) else {
 								return Ok(());
 							};
 							this = x;
