@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use crate::catalog::providers::TableProvider;
 use crate::catalog::{DatabaseId, NamespaceId};
 use crate::exec::{ControlFlowExt, EvalContext, ExecutionContext, PhysicalExpr};
 use crate::expr::ControlFlow;
@@ -134,7 +135,7 @@ pub(crate) async fn resolve_record_batch(
 	}
 
 	let records = txn
-		.getm_records(ns_id, db_id, rids, version, cache_policy)
+		.get_records(ns_id, db_id, rids, version, cache_policy)
 		.await
 		.context("Failed to fetch records")?;
 
@@ -171,12 +172,12 @@ pub(crate) async fn resolve_record_batch(
 /// Fetch full records for a batch of [`RecordId`]s in one batch, applying
 /// permission filtering to each record.
 ///
-/// Uses the transaction's batch multi-get (`getm_records`), which is
+/// Uses the transaction's batch multi-get (`get_records`), which is
 /// cache-aware and uses the store's native batch read (e.g. RocksDB
 /// `multi_get_opt`) for cache misses.  Records that don't exist or that
 /// fail the permission check are silently skipped.
 ///
-/// The record ID is already injected into the data by `getm_records`, so
+/// The record ID is already injected into the data by `get_records`, so
 /// no additional `def()` call is needed.  When the `Arc<Record>` has a
 /// reference count of 1, the data is moved out without cloning.
 ///
@@ -196,7 +197,7 @@ pub(crate) async fn fetch_and_filter_records_batch(
 	cache_policy: CachePolicy,
 ) -> Result<Vec<Value>, ControlFlow> {
 	let records = txn
-		.getm_records(ns_id, db_id, rids, version, cache_policy)
+		.get_records(ns_id, db_id, rids, version, cache_policy)
 		.await
 		.context("Failed to fetch records")?;
 

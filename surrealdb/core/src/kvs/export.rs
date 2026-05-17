@@ -15,7 +15,6 @@ use crate::expr::paths::{IN, OUT};
 use crate::expr::statements::define::{DefineAccessStatement, DefineUserStatement};
 use crate::expr::{Base, DefineAnalyzerStatement};
 use crate::key::record;
-use crate::kvs::KVValue;
 use crate::sql::statements::OptionStatement;
 
 #[derive(Clone, Debug, SurrealValue)]
@@ -417,22 +416,11 @@ impl Transaction {
 	///
 	/// # Arguments
 	///
-	/// * `k` - The record key.
-	/// * `record` - The record to be processed.
+	/// * `record` - The record to be processed. The `id` field must already be present in `data`
+	///   (this is the case when the record was produced by [`Record::kv_decode_value_with_id`]).
 	/// * `records_relate` - A mutable reference to a string buffer for graph edge records.
 	/// * `records_normal` - A mutable reference to a string buffer for normal records.
-	fn process_record(
-		k: record::RecordKey,
-		mut record: Record,
-		records_relate: &mut String,
-		records_normal: &mut String,
-	) {
-		// Inject the id field into the document before processing.
-		let rid = crate::val::RecordId {
-			table: k.tb.into_owned(),
-			key: k.id,
-		};
-		record.data.def(rid);
+	fn process_record(record: &Record, records_relate: &mut String, records_normal: &mut String) {
 		// Match on the value to determine if it is a graph edge record or a normal record.
 		if record.is_edge()
 			&& let crate::val::Value::RecordId(_) = record.data.pick(&IN)
@@ -483,9 +471,13 @@ impl Transaction {
 		// Process each regular value.
 		for (k, v) in regular_values {
 			let k = record::RecordKey::decode_key(&k)?;
-			let v = Record::kv_decode_value(v)?;
+			let rid = crate::val::RecordId {
+				table: k.tb.into_owned(),
+				key: k.id,
+			};
+			let v = Record::kv_decode_value_with_id(&v, rid)?;
 			// Process the value and categorize it into records_relate or records_normal.
-			Self::process_record(k, v, &mut records_relate, &mut records_normal);
+			Self::process_record(&v, &mut records_relate, &mut records_normal);
 		}
 
 		// If there are normal records, generate and send the INSERT SQL command.

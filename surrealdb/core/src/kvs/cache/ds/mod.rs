@@ -8,6 +8,8 @@ use anyhow::Result;
 pub(crate) use entry::CachedJwks;
 pub(crate) use entry::Entry;
 pub(crate) use lookup::Lookup;
+use quick_cache::sync::DefaultLifecycle;
+use quick_cache::{DefaultHashBuilder, OptionsBuilder};
 use uuid::Uuid;
 
 use crate::catalog::{DatabaseId, NamespaceId};
@@ -37,7 +39,17 @@ pub struct DatastoreCache {
 impl DatastoreCache {
 	/// Creates a new empty cache for a datastore.
 	pub(in crate::kvs) fn new(size: usize) -> Self {
-		let cache = Cache::with_weighter(size, size as u64, weight::Weight);
+		let options = OptionsBuilder::new()
+			.estimated_items_capacity(size)
+			.weight_capacity(size as u64)
+			.build()
+			.expect("valid datastore cache options");
+		let cache = Cache::with_options(
+			options,
+			weight::Weight,
+			DefaultHashBuilder::default(),
+			DefaultLifecycle::default(),
+		);
 		Self {
 			cache,
 		}
@@ -51,12 +63,6 @@ impl DatastoreCache {
 	/// Inserts an item into the datastore cache
 	pub(crate) fn insert(&self, lookup: Lookup, entry: Entry) {
 		self.cache.insert(lookup.into(), entry);
-	}
-
-	/// Clear the cache entry for a table
-	pub(crate) fn clear_tb(&self, ns: NamespaceId, db: DatabaseId, tb: &TableName) {
-		let key = Lookup::Tb(ns, db, tb);
-		self.cache.remove(&key);
 	}
 
 	/// Clear all items from the datastore cache

@@ -225,18 +225,15 @@ impl DefineFieldStatement {
 
 					// Add the TYPE to the DEFINE TABLE statement
 					if *field_kind != relation.from {
+						// Refresh the table cache
 						tb.table_type = TableType::Relation(Relation {
 							from: field_kind.clone(),
 							..relation.clone()
 						});
-
 						txn.put_tb(ns_name, db_name, &tb).await?;
 						// Clear the cache
-						if let Some(cache) = ctx.get_cache() {
-							cache.clear_tb(ns, db, &definition.table);
-						}
-
 						txn.clear_cache();
+						// Ok all good
 						return Ok(Value::None);
 					}
 				}
@@ -255,18 +252,15 @@ impl DefineFieldStatement {
 					};
 					// Add the TYPE to the DEFINE TABLE statement
 					if *field_kind != relation.to {
+						// Refresh the table cache
 						tb.table_type = TableType::Relation(Relation {
 							to: field_kind.clone(),
 							..relation.clone()
 						});
-
 						txn.put_tb(ns_name, db_name, &tb).await?;
 						// Clear the cache
-						if let Some(cache) = ctx.get_cache() {
-							cache.clear_tb(ns, db, &definition.table);
-						}
-
 						txn.clear_cache();
+						// Ok all good
 						return Ok(Value::None);
 					}
 				}
@@ -277,11 +271,6 @@ impl DefineFieldStatement {
 
 		// Process possible recursive defitions
 		self.process_recursive_definitions(ns, db, Arc::clone(&txn), &definition).await?;
-
-		// Clear the cache
-		if let Some(cache) = ctx.get_cache() {
-			cache.clear_tb(ns, db, &definition.table);
-		}
 
 		// Clear the cache
 		txn.clear_cache();

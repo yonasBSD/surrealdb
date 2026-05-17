@@ -18,7 +18,8 @@ use crate::catalog::{
 use crate::ctx::Context;
 use crate::dbs::node::Node;
 use crate::err::Error;
-use crate::val::{RecordIdKey, TableName};
+use crate::kvs::CachePolicy;
+use crate::val::{RecordId, RecordIdKey, TableName};
 
 /// A boxed future returned by catalog-provider trait methods.
 ///
@@ -622,6 +623,16 @@ pub(crate) trait TableProvider: ProviderFutureSendRequirement {
 		id: &'a RecordIdKey,
 		version: Option<u64>,
 	) -> BoxProviderFut<'a, Result<Arc<Record>>>;
+
+	/// Fetch multiple specific record values.
+	fn get_records<'a>(
+		&'a self,
+		ns: NamespaceId,
+		db: DatabaseId,
+		rids: &'a [RecordId],
+		version: Option<u64>,
+		cache_policy: CachePolicy,
+	) -> BoxProviderFut<'a, Result<Vec<Arc<Record>>>>;
 
 	/// Check if a record exists.
 	fn record_exists<'a>(

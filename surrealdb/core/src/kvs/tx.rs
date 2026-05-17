@@ -65,7 +65,7 @@ use crate::observe::{
 };
 use crate::val::{RecordId, RecordIdKey, TableName};
 
-/// Controls whether `getm_records` populates the transaction cache on miss.
+/// Controls whether `get_records` populates the transaction cache on miss.
 ///
 /// Point lookups and graph traversals benefit from caching (records are
 /// likely re-accessed within the same transaction). Large sequential scans
@@ -714,64 +714,6 @@ impl Transaction {
 		Ok(())
 	}
 
-	async fn release_index_build_reservations(&self) -> Result<()> {
-		let reservations = {
-			let mut pending = self.pending_index_build_reservations.lock().await;
-			std::mem::take(&mut *pending)
-		};
-		let mut first_error = None;
-		for reservation in reservations {
-			if let Err(err) = reservation.release().await
-				&& first_error.is_none()
-			{
-				first_error = Some(err);
-			}
-		}
-		if let Some(err) = first_error {
-			Err(err)
-		} else {
-			Ok(())
-		}
-	}
-
-	async fn cleanup_uncommitted_index_builds(&self) -> Result<()> {
-		let builds = {
-			let mut pending = self.pending_uncommitted_index_builds.lock().await;
-			std::mem::take(&mut *pending)
-		};
-		let mut first_error = None;
-		for build in builds {
-			if let Err(err) = build.cleanup().await
-				&& first_error.is_none()
-			{
-				first_error = Some(err);
-			}
-		}
-		if let Some(err) = first_error {
-			Err(err)
-		} else {
-			Ok(())
-		}
-	}
-
-	async fn discard_uncommitted_index_builds(&self) {
-		self.pending_uncommitted_index_builds.lock().await.clear();
-	}
-
-	async fn run_index_builder_aborts(&self) {
-		let aborts = {
-			let mut pending = self.pending_index_builder_aborts.lock().await;
-			std::mem::take(&mut *pending)
-		};
-		for abort in aborts {
-			abort.abort().await;
-		}
-	}
-
-	async fn discard_index_builder_aborts(&self) {
-		self.pending_index_builder_aborts.lock().await.clear();
-	}
-
 	/// Check if a key exists in the datastore.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip_all)]
 	pub async fn exists<K>(&self, key: &K, version: Option<u64>) -> Result<bool>
@@ -813,14 +755,8 @@ impl Transaction {
 		K: KVKey + Debug,
 	{
 		let keys = keys.iter().map(|k| k.encode_key()).collect::<Result<Vec<_>>>()?;
-		// Sum the encoded input key lengths once, before they're moved into
-		// the transactor. The backend doesn't repeat this work because the
-		// caller already knows the inputs.
 		let key_bytes: u64 = keys.iter().map(|k| k.len() as u64).sum();
 		let res = self.tr.getm(keys, version).await.map_err(Error::from)?;
-		// On a decode failure `Result::collect` short-circuits and the
-		// metric still reflects the totals reported by the backend, which
-		// covers the entire batch. Decoding is purely a caller concern.
 		self.metrics.record_get(res.records, key_bytes, res.value_bytes);
 		res.values
 			.into_iter()
@@ -864,110 +800,6 @@ impl Transaction {
 		let res = self.tr.getr(beg..end, version).await.map_err(Error::from)?;
 		self.metrics.record_scan(res.values.len() as u64, res.key_bytes, res.value_bytes);
 		res.values.into_iter().map(|(k, v)| Ok((k, K::ValueType::kv_decode_value(v)?))).collect()
-	}
-
-	/// Fetch many records by ID in a single batch, with cache awareness.
-	///
-	/// For each record ID, checks the transaction cache first. Cache misses are
-	/// fetched in one batch via the store's multi-get, then results are merged
-	/// and returned in the same order as `rids`.
-	///
-	/// When `cache_policy` is [`CachePolicy::ReadWrite`], newly fetched records
-	/// are inserted into the cache. When [`CachePolicy::ReadOnly`], fetched
-	/// records are returned but **not** cached, avoiding eviction churn during
-	/// large sequential scans.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
-	pub(crate) async fn getm_records(
-		&self,
-		ns: NamespaceId,
-		db: DatabaseId,
-		rids: &[RecordId],
-		version: Option<u64>,
-		cache_policy: CachePolicy,
-	) -> Result<Vec<Arc<Record>>> {
-		if rids.is_empty() {
-			return Ok(Vec::new());
-		}
-
-		// Cache is not versioned — bypass it entirely for historical reads
-		if version.is_some() {
-			let keys: Vec<crate::key::record::RecordKey<'_>> = rids
-				.iter()
-				.map(|rid| crate::key::record::new(ns, db, &rid.table, &rid.key))
-				.collect();
-
-			let values = self.getm(keys, version).await?;
-
-			return values
-				.into_iter()
-				.zip(rids)
-				.map(|(opt_val, rid)| {
-					Ok(match opt_val {
-						Some(mut record) => {
-							record.data.def(rid.clone());
-							record.into_read_only()
-						}
-						None => Arc::new(Default::default()),
-					})
-				})
-				.collect::<Result<Vec<_>, _>>();
-		}
-
-		// Phase 1: check cache, collect hits and indices of misses
-		let mut out: Vec<Option<Arc<Record>>> = vec![None; rids.len()];
-		let mut uncached_rids: Vec<(usize, &RecordId)> = Vec::new();
-
-		for (i, rid) in rids.iter().enumerate() {
-			let qey = cache::tx::Lookup::Record(ns, db, rid.table.as_str(), &rid.key);
-			if let Some(entry) = self.cache.get(&qey) {
-				out[i] = Some(entry.try_into_record()?);
-			} else {
-				uncached_rids.push((i, rid));
-			}
-		}
-
-		// Phase 2: batch fetch uncached keys
-		if uncached_rids.is_empty() {
-			return out
-				.into_iter()
-				.map(|o| {
-					o.ok_or_else(|| Error::Internal("missing record in multi-get batch".into()))
-				})
-				.collect::<Result<Vec<_>, _>>()
-				.map_err(Into::into);
-		}
-
-		let keys: Vec<crate::key::record::RecordKey<'_>> = uncached_rids
-			.iter()
-			.map(|(_, rid)| crate::key::record::new(ns, db, &rid.table, &rid.key))
-			.collect();
-
-		let values = self.getm(keys, None).await?;
-
-		// Phase 3: post-process fetched records and merge into output.
-		// Only populate the cache when the caller requests ReadWrite; ReadOnly
-		// avoids eviction churn during large sequential scans.
-		for (j, opt_val) in values.into_iter().enumerate() {
-			let (i, rid) = uncached_rids[j];
-			let record = match opt_val {
-				Some(mut record) => {
-					record.data.def(rid.clone());
-					let record = record.into_read_only();
-					if matches!(cache_policy, CachePolicy::ReadWrite) {
-						let qey = cache::tx::Lookup::Record(ns, db, rid.table.as_str(), &rid.key);
-						self.cache.insert(qey, cache::tx::Entry::Val(Arc::clone(&record)));
-					}
-					record
-				}
-				None => Arc::new(Default::default()),
-			};
-			out[i] = Some(record);
-		}
-
-		out.into_iter()
-			.map(|o| o.ok_or_else(|| Error::Internal("missing record in multi-get batch".into())))
-			.collect::<Result<Vec<_>, _>>()
-			.map_err(Into::into)
 	}
 
 	/// Delete a key from the datastore.
@@ -1157,6 +989,40 @@ impl Transaction {
 	}
 
 	// --------------------------------------------------
+	// Raw bytes functions
+	// --------------------------------------------------
+
+	/// Fetch a key from the datastore, without decoding.
+	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip_all)]
+	pub async fn get_raw<K>(&self, key: &K, version: Option<u64>) -> Result<Option<Val>>
+	where
+		K: KVKey + Debug,
+	{
+		let key = key.encode_key()?;
+		let key_bytes = key.len() as u64;
+		let val = self.tr.get(key, version).await.map_err(Error::from)?;
+		let (keys_found, value_bytes) = match &val {
+			Some(v) => (1, v.len() as u64),
+			None => (0, 0),
+		};
+		self.metrics.record_get(keys_found, key_bytes, value_bytes);
+		Ok(val)
+	}
+
+	/// Retrieve a batch set of keys from the datastor, without decoding.
+	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip_all)]
+	pub async fn getm_raw<K>(&self, keys: Vec<K>, version: Option<u64>) -> Result<Vec<Option<Val>>>
+	where
+		K: KVKey + Debug,
+	{
+		let keys = keys.iter().map(|k| k.encode_key()).collect::<Result<Vec<_>>>()?;
+		let key_bytes: u64 = keys.iter().map(|k| k.len() as u64).sum();
+		let res = self.tr.getm(keys, version).await.map_err(Error::from)?;
+		self.metrics.record_get(res.records, key_bytes, res.value_bytes);
+		Ok(res.values)
+	}
+
+	// --------------------------------------------------
 	// Range functions
 	// --------------------------------------------------
 
@@ -1229,6 +1095,10 @@ impl Transaction {
 		Ok(res.values)
 	}
 
+	/// Retrieve a specific range of keys from the datastore, in reverse order.
+	///
+	/// This function fetches the full range of key-value pairs, in a single
+	/// request to the underlying datastore.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip_all)]
 	pub async fn scanr<K>(
 		&self,
@@ -1416,7 +1286,7 @@ impl Transaction {
 	// Changefeed functions
 	// --------------------------------------------------
 
-	// Records the table (re)definition in the changefeed if enabled.
+	/// Records the table (re)definition in the changefeed if enabled.
 	pub(crate) fn changefeed_buffer_table_change(
 		&self,
 		ns: NamespaceId,
@@ -1427,10 +1297,10 @@ impl Transaction {
 		self.changefeed.get_or_init(Changefeed::new).buffer_table_change(ns, db, tb, dt)
 	}
 
-	// change will record the change in the changefeed if enabled.
-	// To actually persist the record changes into the underlying kvs,
-	// you must call the `complete_changes` function and then commit the
-	// transaction.
+	/// change will record the change in the changefeed if enabled.
+	/// To actually persist the record changes into the underlying kvs,
+	/// you must call the `complete_changes` function and then commit the
+	/// transaction.
 	#[expect(clippy::too_many_arguments)]
 	pub(crate) fn changefeed_buffer_record_change(
 		&self,
@@ -1453,20 +1323,20 @@ impl Transaction {
 		)
 	}
 
-	// complete_changes will complete the changefeed recording for the given
-	// namespace and database.
-	//
-	// This function writes all buffered changefeed entries to the datastore
-	// with the current transaction timestamp. Every change must be recorded by
-	// calling this struct's `changefeed_buffer_record_change` function beforehand.
-	// If there were no preceding calls for this transaction, this function
-	// will do nothing.
-	//
-	// This function should be called only after all the changes have been made to
-	// the transaction. Otherwise, changes are missed in the change feed.
-	//
-	// This function should be called immediately before calling the commit function
-	// to ensure the timestamp reflects the actual commit time.
+	/// complete_changes will complete the changefeed recording for the given
+	/// namespace and database.
+	///
+	/// This function writes all buffered changefeed entries to the datastore
+	/// with the current transaction timestamp. Every change must be recorded by
+	/// calling this struct's `changefeed_buffer_record_change` function beforehand.
+	/// If there were no preceding calls for this transaction, this function
+	/// will do nothing.
+	///
+	/// This function should be called only after all the changes have been made to
+	/// the transaction. Otherwise, changes are missed in the change feed.
+	///
+	/// This function should be called immediately before calling the commit function
+	/// to ensure the timestamp reflects the actual commit time.
 	pub(crate) async fn store_changes(&self) -> Result<()> {
 		// If no changefeed writer, there are no changes
 		let Some(changefeed) = self.changefeed.get() else {
@@ -1497,22 +1367,117 @@ impl Transaction {
 	}
 
 	// --------------------------------------------------
-	// Cache functions
+	// Index functions
 	// --------------------------------------------------
 
-	#[inline]
-	fn set_record_cache(
-		&self,
-		ns: NamespaceId,
-		db: DatabaseId,
-		tb: &TableName,
-		id: &RecordIdKey,
-		record: Arc<Record>,
-	) {
-		// Set the value in the cache
-		let qey = cache::tx::Lookup::Record(ns, db, tb, id);
-		self.cache.insert(qey, cache::tx::Entry::Val(record));
+	/// Drain and release every queued durable index-build reservation.
+	///
+	/// Called from both the commit and cancel paths so that each admitted
+	/// ticket is released exactly once after the user transaction terminates.
+	/// Every release runs in its own short transaction, isolating it from the
+	/// outcome of the surrounding transaction and from snapshot conflicts on
+	/// snapshot-isolated local engines. All reservations are attempted even
+	/// when one fails; the first error is preserved and returned so the caller
+	/// can surface it while later releases still get a chance to run.
+	async fn release_index_build_reservations(&self) -> Result<()> {
+		// Take the queued reservations under the lock so concurrent registrations
+		// see an empty queue while releases are in flight
+		let reservations = {
+			let mut pending = self.pending_index_build_reservations.lock().await;
+			std::mem::take(&mut *pending)
+		};
+		// Attempt every release, remembering the first failure
+		let mut first_error = None;
+		for reservation in reservations {
+			if let Err(err) = reservation.release().await
+				&& first_error.is_none()
+			{
+				first_error = Some(err);
+			}
+		}
+		// Surface the first failure once all releases have been attempted
+		if let Some(err) = first_error {
+			Err(err)
+		} else {
+			Ok(())
+		}
 	}
+
+	/// Drain and clean up provisional index builds for an uncommitted schema.
+	///
+	/// `DEFINE INDEX` starts the in-process builder while its schema
+	/// transaction is still open, and the builder may have committed durable
+	/// build state and index data from separate transactions before the
+	/// schema transaction terminates. When that schema transaction is
+	/// cancelled or fails to commit, this function removes the orphaned
+	/// durable state so a later retry sees a clean slate. Every cleanup is
+	/// attempted even when one fails, and the first error is returned.
+	async fn cleanup_uncommitted_index_builds(&self) -> Result<()> {
+		// Take the queued cleanups under the lock to detach them from any
+		// concurrent registrations
+		let builds = {
+			let mut pending = self.pending_uncommitted_index_builds.lock().await;
+			std::mem::take(&mut *pending)
+		};
+		// Attempt every cleanup, remembering the first failure
+		let mut first_error = None;
+		for build in builds {
+			if let Err(err) = build.cleanup().await
+				&& first_error.is_none()
+			{
+				first_error = Some(err);
+			}
+		}
+		// Surface the first failure once all cleanups have been attempted
+		if let Some(err) = first_error {
+			Err(err)
+		} else {
+			Ok(())
+		}
+	}
+
+	/// Discard queued provisional index-build cleanups without running them.
+	///
+	/// Invoked on the commit path once the schema transaction has succeeded:
+	/// the catalog row is now durable, so the index build is no longer
+	/// provisional and its durable state must be retained for the builder to
+	/// finish its work.
+	async fn discard_uncommitted_index_builds(&self) {
+		self.pending_uncommitted_index_builds.lock().await.clear();
+	}
+
+	/// Drain and abort every queued in-process index builder.
+	///
+	/// Used after a successful schema retirement commit to stop the
+	/// non-transactional in-process builder for an index whose durable state
+	/// and catalog entry have already been removed transactionally. Deferring
+	/// the abort until commit avoids stopping a still-valid build if the
+	/// schema transaction is rolled back or cancelled.
+	async fn run_index_builder_aborts(&self) {
+		// Take the queued aborts under the lock so concurrent registrations
+		// see an empty queue while aborts are in flight
+		let aborts = {
+			let mut pending = self.pending_index_builder_aborts.lock().await;
+			std::mem::take(&mut *pending)
+		};
+		// Run every abort; aborting an in-process builder is infallible
+		for abort in aborts {
+			abort.abort().await;
+		}
+	}
+
+	/// Discard queued in-process builder aborts without running them.
+	///
+	/// Invoked on the cancel path and on commit failure so a builder whose
+	/// retirement did not become durable is not stopped: the catalog still
+	/// references the index, and the build must keep running.
+	async fn discard_index_builder_aborts(&self) {
+		self.pending_index_builder_aborts.lock().await.clear();
+	}
+
+	// --------------------------------------------------
+	// Cache functions
+	// --------------------------------------------------
 
 	/// Clears all keys from the transaction cache.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip(self))]
@@ -1521,12 +1486,12 @@ impl Transaction {
 	}
 
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip_all)]
-	pub async fn compact<K>(&self, prefix_key: Option<K>) -> Result<()>
+	pub async fn compact<K>(&self, key: Option<K>) -> Result<()>
 	where
 		K: KVKey + Debug,
 	{
-		let rng = match prefix_key {
-			Some(prefix_key) => Some(util::to_prefix_range(&prefix_key)?),
+		let rng = match key {
+			Some(key) => Some(util::to_prefix_range(&key)?),
 			None => None,
 		};
 		self.tr.inner.compact(rng).await
@@ -1537,6 +1502,10 @@ impl Transaction {
 		self.trigger_async_event.store(true, Ordering::Relaxed);
 	}
 }
+
+// --------------------------------------------------
+// Node implementation functions
+// --------------------------------------------------
 
 impl NodeProvider for Transaction {
 	/// Retrieve all nodes belonging to this cluster.
@@ -1584,6 +1553,10 @@ impl NodeProvider for Transaction {
 		)
 	}
 }
+
+// --------------------------------------------------
+// Root implementation functions
+// --------------------------------------------------
 
 impl RootProvider for Transaction {
 	fn get_default_config(&self) -> BoxProviderFut<'_, Result<Option<Arc<DefaultConfig>>>> {
@@ -1636,6 +1609,10 @@ impl RootProvider for Transaction {
 		)
 	}
 }
+
+// --------------------------------------------------
+// Namespace implementation functions
+// --------------------------------------------------
 
 impl NamespaceProvider for Transaction {
 	/// Retrieve all namespace definitions in a datastore.
@@ -1744,6 +1721,10 @@ impl NamespaceProvider for Transaction {
 		Box::pin(async move { self.sequences.next_namespace_id(ctx).await })
 	}
 }
+
+// --------------------------------------------------
+// Database implementation functions
+// --------------------------------------------------
 
 impl DatabaseProvider for Transaction {
 	/// Retrieve all database definitions for a specific namespace.
@@ -2499,6 +2480,10 @@ impl DatabaseProvider for Transaction {
 	}
 }
 
+// --------------------------------------------------
+// Table implementation functions
+// --------------------------------------------------
+
 impl TableProvider for Transaction {
 	/// Retrieve all table definitions for a specific database.
 	fn all_tb(
@@ -3193,17 +3178,18 @@ impl TableProvider for Transaction {
 				if version.is_some() {
 					// Fetch the record from the datastore
 					let key = crate::key::record::new(ns, db, tb, id);
-					match self.get(&key, version).await? {
+					match self.get_raw(&key, version).await? {
 						// The value exists in the datastore
-						Some(mut record) => {
-							// Inject the id field into the document
+						Some(bytes) => {
+							// Create the record id
 							let rid = RecordId {
 								table: tb.to_owned(),
 								key: id.clone(),
 							};
-							record.data.def(rid);
-							// Convert to read-only format for better sharing and performance
-							Ok(record.into_read_only())
+							// Decode the record
+							let record = Record::kv_decode_value_with_id(&bytes, rid)?;
+							let record = record.into_read_only();
+							Ok(record)
 						}
 						// The value is not in the datastore
 						None => Ok(Arc::new(Default::default())),
@@ -3217,17 +3203,16 @@ impl TableProvider for Transaction {
 						None => {
 							// Fetch the record from the datastore
 							let key = crate::key::record::new(ns, db, tb, id);
-							match self.get(&key, None).await? {
+							match self.get_raw(&key, None).await? {
 								// The value exists in the datastore
-								Some(mut record) => {
-									// Inject the id field into the document
+								Some(bytes) => {
+									// Create the record id
 									let rid = RecordId {
 										table: tb.to_owned(),
 										key: id.clone(),
 									};
-									record.data.def(rid);
-									// Convert to read-only format for better sharing and
-									// performance
+									// Decode the record
+									let record = Record::kv_decode_value_with_id(&bytes, rid)?;
 									let record = record.into_read_only();
 									let entry = cache::tx::Entry::Val(Arc::clone(&record));
 									self.cache.insert(qey, entry);
@@ -3241,6 +3226,106 @@ impl TableProvider for Transaction {
 				}
 			}
 			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_record")),
+		)
+	}
+
+	fn get_records<'a>(
+		&'a self,
+		ns: NamespaceId,
+		db: DatabaseId,
+		rids: &'a [RecordId],
+		version: Option<u64>,
+		cache_policy: CachePolicy,
+	) -> BoxProviderFut<'a, Result<Vec<Arc<Record>>>> {
+		Box::pin(
+			async move {
+				// Nothing to fetch
+				if rids.is_empty() {
+					return Ok(Vec::new());
+				}
+				// Cache is not versioned
+				if version.is_some() {
+					// Fetch the records from the datastore
+					let keys: Vec<crate::key::record::RecordKey<'_>> = rids
+						.iter()
+						.map(|rid| crate::key::record::new(ns, db, &rid.table, &rid.key))
+						.collect();
+					let values = self.getm_raw(keys, version).await?;
+					// Decode each payload, injecting the record id from the key
+					let mut out: Vec<Arc<Record>> = Vec::with_capacity(rids.len());
+					for (opt_bytes, rid) in values.into_iter().zip(rids) {
+						let record = match opt_bytes {
+							// The value exists in the datastore
+							Some(bytes) => {
+								// Decode the record
+								let record = Record::kv_decode_value_with_id(&bytes, rid.clone())?;
+								record.into_read_only()
+							}
+							// The value is not in the datastore
+							None => Arc::new(Default::default()),
+						};
+						out.push(record);
+					}
+					return Ok(out);
+				}
+				// Phase 1: check cache, collect hits and indices of misses
+				let mut out: Vec<Option<Arc<Record>>> = vec![None; rids.len()];
+				let mut uncached_rids: Vec<(usize, &RecordId)> = Vec::new();
+				for (i, rid) in rids.iter().enumerate() {
+					let qey = cache::tx::Lookup::Record(ns, db, rid.table.as_str(), &rid.key);
+					match self.cache.get(&qey) {
+						// The entry is in the cache
+						Some(entry) => out[i] = Some(entry.try_into_record()?),
+						// The entry is not in the cache
+						None => uncached_rids.push((i, rid)),
+					}
+				}
+				// Phase 2: batch fetch the uncached keys from the datastore
+				if !uncached_rids.is_empty() {
+					let keys: Vec<crate::key::record::RecordKey<'_>> = uncached_rids
+						.iter()
+						.map(|(_, rid)| crate::key::record::new(ns, db, &rid.table, &rid.key))
+						.collect();
+					let values = self.getm_raw(keys, None).await?;
+					// Phase 3: decode each payload, populate the cache, merge into output
+					for ((i, rid), opt_bytes) in uncached_rids.into_iter().zip(values) {
+						let record = match opt_bytes {
+							// The value exists in the datastore
+							Some(bytes) => {
+								// Decode the record
+								let record = Record::kv_decode_value_with_id(&bytes, rid.clone())?;
+								let record = record.into_read_only();
+								// Only populate the cache when the caller requests
+								// ReadWrite; ReadOnly avoids eviction churn during
+								// large sequential scans.
+								if matches!(cache_policy, CachePolicy::ReadWrite) {
+									let qey = cache::tx::Lookup::Record(
+										ns,
+										db,
+										rid.table.as_str(),
+										&rid.key,
+									);
+									let entry = cache::tx::Entry::Val(Arc::clone(&record));
+									self.cache.insert(qey, entry);
+								}
+								record
+							}
+							// The value is not in the datastore
+							None => Arc::new(Default::default()),
+						};
+						out[i] = Some(record);
+					}
+				}
+				// Every slot should be populated by now
+				out.into_iter()
+					.map(|o| {
+						o.ok_or_else(|| {
+							Error::Internal("missing record in multi-get batch".into()).into()
+						})
+					})
+					.collect()
+			}
+			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "get_records")),
 		)
 	}
 
@@ -3269,12 +3354,11 @@ impl TableProvider for Transaction {
 		Box::pin(
 			async move {
 				let key = crate::key::record::new(ns, db, tb, id);
-				let mut val = record.as_ref().clone();
-				if let crate::val::Value::Object(ref mut obj) = val.data {
-					obj.0.remove("id");
-				}
-				self.put(&key, &val).await?;
-				self.set_record_cache(ns, db, tb, id, record);
+				self.put(&key, record.as_ref()).await?;
+				// Set the value in the cache
+				let qey = cache::tx::Lookup::Record(ns, db, tb, id);
+				self.cache.insert(qey, cache::tx::Entry::Val(record));
+				// Return nothing
 				Ok(())
 			}
 			.instrument(trace_span!(target: "surrealdb::core::kvs::tx", "put_record")),
@@ -3293,13 +3377,10 @@ impl TableProvider for Transaction {
 			async move {
 				// Set the value in the datastore
 				let key = crate::key::record::new(ns, db, tb, id);
-				let mut val = record.as_ref().clone();
-				if let crate::val::Value::Object(ref mut obj) = val.data {
-					obj.0.remove("id");
-				}
-				self.set(&key, &val).await?;
-				// Set the value in the cache
-				self.set_record_cache(ns, db, tb, id, record);
+				self.set(&key, record.as_ref()).await?;
+				// Clear the value from the cache
+				let qey = cache::tx::Lookup::Record(ns, db, tb, id);
+				self.cache.remove(&qey);
 				// Return nothing
 				Ok(())
 			}
@@ -3338,6 +3419,10 @@ impl TableProvider for Transaction {
 		Box::pin(async move { self.sequences.next_table_id(ctx, ns, db).await })
 	}
 }
+
+// --------------------------------------------------
+// User implementation functions
+// --------------------------------------------------
 
 impl UserProvider for Transaction {
 	/// Retrieve all ROOT level users in a datastore.
@@ -3609,6 +3694,10 @@ impl UserProvider for Transaction {
 		})
 	}
 }
+
+// --------------------------------------------------
+// Authorisation implementation functions
+// --------------------------------------------------
 
 impl AuthorisationProvider for Transaction {
 	/// Retrieve all ROOT level accesses in a datastore.
@@ -4094,6 +4183,10 @@ impl AuthorisationProvider for Transaction {
 	}
 }
 
+// --------------------------------------------------
+// API implementation functions
+// --------------------------------------------------
+
 impl ApiProvider for Transaction {
 	/// Retrieve all api definitions for a specific database.
 	fn all_db_apis(
@@ -4190,6 +4283,10 @@ impl ApiProvider for Transaction {
 	}
 }
 
+// --------------------------------------------------
+// Bucket implementation functions
+// --------------------------------------------------
+
 impl BucketProvider for Transaction {
 	/// Retrieve all bucket definitions for a specific database.
 	fn all_db_buckets(
@@ -4260,5 +4357,9 @@ impl BucketProvider for Transaction {
 		)
 	}
 }
+
+// --------------------------------------------------
+// Catalog provider
+// --------------------------------------------------
 
 impl CatalogProvider for Transaction {}

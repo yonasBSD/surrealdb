@@ -107,11 +107,9 @@ impl AlterEventStatement {
 			};
 			txn.put_tb(ns_name, db_name, &tb).await?;
 		}
-
-		if let Some(cache) = ctx.get_cache() {
-			cache.clear_tb(ns, db, &what);
-		}
+		// Clear the cache
 		txn.clear_cache();
+		// Ok all good
 		Ok(Value::None)
 	}
 }

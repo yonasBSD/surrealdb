@@ -268,7 +268,7 @@ impl ExecOperator for FullTextScan {
 			};
 
 			// Iterate over hits, collecting record IDs into batches for
-			// batch-fetching via getm_records.
+			// batch-fetching via get_records.
 			let mut hits_iter = hits_iter;
 			let mut rid_batch = Vec::with_capacity(BATCH_SIZE);
 

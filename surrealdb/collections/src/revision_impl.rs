@@ -43,6 +43,87 @@ impl<K: DeserializeRevisioned + Ord, V: DeserializeRevisioned> DeserializeRevisi
 	}
 }
 
+impl<K, V> VecMap<K, V>
+where
+	K: DeserializeRevisioned + Ord,
+	V: DeserializeRevisioned,
+{
+	/// Deserialise a revisioned `VecMap` payload while merging an
+	/// `extra` entry into its sorted position during decode.
+	///
+	/// The wire format consumed is identical to the standard
+	/// [`DeserializeRevisioned`] implementation. The splice happens
+	/// in-memory between the read of each payload entry, so no
+	/// post-decode shift is required and the result is constructed
+	/// with [`VecMap::from_sorted_vec_unchecked`] directly.
+	///
+	/// # Duplicate-key policy
+	///
+	/// If the payload already contains an entry whose key equals
+	/// `extra.0`, the payload's value wins and `extra.1` is dropped.
+	/// This matches the "field is canonically reconstructed from
+	/// elsewhere but legacy payloads may still carry it" pattern
+	/// (for example, a record `id` field that is now derived from
+	/// the storage key but historically lived inside the payload).
+	///
+	/// # Errors
+	///
+	/// Returns [`Error::Deserialize`] when the payload keys are not
+	/// strictly ascending. The splice point itself is guaranteed to
+	/// preserve sort order without an additional check.
+	pub fn deserialize_revisioned_with_extra<R: std::io::Read>(
+		reader: &mut R,
+		extra: (K, V),
+	) -> Result<Self, Error> {
+		let len = usize::deserialize_revisioned(reader)?;
+		let mut items: Vec<(K, V)> = Vec::with_capacity(len + 1);
+		// `pending` holds the injected entry until it has been spliced
+		// in at its sorted position, or dropped because the payload
+		// already carried the same key.
+		let mut pending: Option<(K, V)> = Some(extra);
+		for _ in 0..len {
+			let k = K::deserialize_revisioned(reader)?;
+			// Strict-ascending check against the in-progress merge.
+			// Splicing `pending` between two strictly-ascending
+			// payload keys preserves the invariant for free, so the
+			// payload-vs-payload check is all we need.
+			if let Some((prev_k, _)) = items.last()
+				&& k <= *prev_k
+			{
+				return Err(Error::Deserialize(
+					"VecMap revision payload: keys not strictly ascending".into(),
+				));
+			}
+			if let Some((extra_k, _)) = pending.as_ref() {
+				match k.cmp(extra_k) {
+					std::cmp::Ordering::Less => {
+						// payload key < extra key: keep extra pending
+					}
+					std::cmp::Ordering::Equal => {
+						// Payload carries the extra key already. Payload wins.
+						let v = V::deserialize_revisioned(reader)?;
+						items.push((k, v));
+						pending = None;
+						continue;
+					}
+					std::cmp::Ordering::Greater => {
+						// payload key > extra key: splice extra in first
+						if let Some(p) = pending.take() {
+							items.push(p);
+						}
+					}
+				}
+			}
+			let v = V::deserialize_revisioned(reader)?;
+			items.push((k, v));
+		}
+		if let Some(p) = pending {
+			items.push(p);
+		}
+		Ok(VecMap::from_sorted_vec_unchecked(items))
+	}
+}
+
 impl<K: Revisioned + Ord, V: Revisioned> Revisioned for VecMap<K, V> {
 	#[inline]
 	fn revision() -> u16 {
@@ -380,5 +461,130 @@ mod tests {
 		1u32.serialize_revisioned(&mut w).unwrap();
 		let err = VecSet::<u32>::deserialize_revisioned(&mut w.as_slice()).unwrap_err();
 		assert!(matches!(err, Error::Deserialize(_)));
+	}
+
+	// ---- VecMap::deserialize_revisioned_with_extra ----
+
+	fn encode_pairs<K, V>(pairs: &[(K, V)]) -> Vec<u8>
+	where
+		K: SerializeRevisioned + Ord + Clone,
+		V: SerializeRevisioned + Clone,
+	{
+		let vm: VecMap<K, V> = VecMap::from_sorted_vec_unchecked(pairs.to_vec());
+		revision_bytes(&vm)
+	}
+
+	#[test]
+	fn deserialize_with_extra_splices_in_middle() {
+		// Payload keys bracket the extra: 1 < 2 < 3. The extra (2, 20)
+		// should be spliced between the two payload entries.
+		let bytes = encode_pairs(&[(1u32, 10u32), (3u32, 30u32)]);
+		let decoded = VecMap::<u32, u32>::deserialize_revisioned_with_extra(
+			&mut bytes.as_slice(),
+			(2u32, 20u32),
+		)
+		.unwrap();
+		let pairs: Vec<_> = decoded.iter().map(|(k, v)| (*k, *v)).collect();
+		assert_eq!(pairs, vec![(1, 10), (2, 20), (3, 30)]);
+	}
+
+	#[test]
+	fn deserialize_with_extra_appends_when_no_greater_key() {
+		// All payload keys sort before the extra: 1, 2 < 9. The extra
+		// (9, 90) should be appended at the end.
+		let bytes = encode_pairs(&[(1u32, 10u32), (2u32, 20u32)]);
+		let decoded = VecMap::<u32, u32>::deserialize_revisioned_with_extra(
+			&mut bytes.as_slice(),
+			(9u32, 90u32),
+		)
+		.unwrap();
+		let pairs: Vec<_> = decoded.iter().map(|(k, v)| (*k, *v)).collect();
+		assert_eq!(pairs, vec![(1, 10), (2, 20), (9, 90)]);
+	}
+
+	#[test]
+	fn deserialize_with_extra_prepends_when_no_lesser_key() {
+		// All payload keys sort after the extra: 0 < 5, 10. The extra
+		// (0, 0) should be prepended.
+		let bytes = encode_pairs(&[(5u32, 50u32), (10u32, 100u32)]);
+		let decoded = VecMap::<u32, u32>::deserialize_revisioned_with_extra(
+			&mut bytes.as_slice(),
+			(0u32, 0u32),
+		)
+		.unwrap();
+		let pairs: Vec<_> = decoded.iter().map(|(k, v)| (*k, *v)).collect();
+		assert_eq!(pairs, vec![(0, 0), (5, 50), (10, 100)]);
+	}
+
+	#[test]
+	fn deserialize_with_extra_into_empty_payload() {
+		// Empty payload: the extra is the only entry.
+		let bytes: Vec<u8> = encode_pairs::<u32, u32>(&[]);
+		let decoded = VecMap::<u32, u32>::deserialize_revisioned_with_extra(
+			&mut bytes.as_slice(),
+			(7u32, 70u32),
+		)
+		.unwrap();
+		let pairs: Vec<_> = decoded.iter().map(|(k, v)| (*k, *v)).collect();
+		assert_eq!(pairs, vec![(7, 70)]);
+	}
+
+	#[test]
+	fn deserialize_with_extra_payload_wins_on_collision() {
+		// Payload already carries the extra key. Payload's value wins
+		// and the extra's value is dropped.
+		let bytes = encode_pairs(&[(1u32, 10u32), (2u32, 20u32), (3u32, 30u32)]);
+		let decoded = VecMap::<u32, u32>::deserialize_revisioned_with_extra(
+			&mut bytes.as_slice(),
+			(2u32, 99u32),
+		)
+		.unwrap();
+		let pairs: Vec<_> = decoded.iter().map(|(k, v)| (*k, *v)).collect();
+		assert_eq!(pairs, vec![(1, 10), (2, 20), (3, 30)]);
+	}
+
+	#[test]
+	fn deserialize_with_extra_rejects_descending_payload() {
+		// Hand-craft a payload with descending keys to verify the
+		// strict-ascending check still fires when an extra is being
+		// spliced.
+		let mut w = Vec::new();
+		2usize.serialize_revisioned(&mut w).unwrap();
+		5u32.serialize_revisioned(&mut w).unwrap();
+		50u32.serialize_revisioned(&mut w).unwrap();
+		3u32.serialize_revisioned(&mut w).unwrap();
+		30u32.serialize_revisioned(&mut w).unwrap();
+		let err =
+			VecMap::<u32, u32>::deserialize_revisioned_with_extra(&mut w.as_slice(), (1u32, 10u32))
+				.unwrap_err();
+		assert!(matches!(err, Error::Deserialize(_)));
+	}
+
+	#[test]
+	fn deserialize_with_extra_rejects_duplicate_payload_keys() {
+		// Payload itself has duplicate keys (neither matches extra).
+		let mut w = Vec::new();
+		2usize.serialize_revisioned(&mut w).unwrap();
+		3u32.serialize_revisioned(&mut w).unwrap();
+		30u32.serialize_revisioned(&mut w).unwrap();
+		3u32.serialize_revisioned(&mut w).unwrap();
+		31u32.serialize_revisioned(&mut w).unwrap();
+		let err =
+			VecMap::<u32, u32>::deserialize_revisioned_with_extra(&mut w.as_slice(), (1u32, 10u32))
+				.unwrap_err();
+		assert!(matches!(err, Error::Deserialize(_)));
+	}
+
+	#[test]
+	fn deserialize_with_extra_capacity_avoids_realloc() {
+		// Not a behavioural property, but a regression check that the
+		// helper allocates a single Vec sized for the spliced result.
+		let bytes = encode_pairs(&[(1u32, 10u32), (3u32, 30u32)]);
+		let decoded = VecMap::<u32, u32>::deserialize_revisioned_with_extra(
+			&mut bytes.as_slice(),
+			(2u32, 20u32),
+		)
+		.unwrap();
+		assert_eq!(decoded.len(), 3);
 	}
 }

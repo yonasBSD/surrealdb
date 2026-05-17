@@ -28,7 +28,7 @@ use crate::exec::{EvalContext, ExecutionContext, PhysicalExpr, ValueBatch, Value
 use crate::expr::{ControlFlow, ControlFlowExt};
 use crate::idx::planner::ScanDirection;
 use crate::key::record;
-use crate::kvs::{KVKey, KVValue, Transaction};
+use crate::kvs::{KVKey, Transaction};
 use crate::val::{RecordIdKey, TableName, Value};
 
 /// A raw computed field entry before topological sorting:
@@ -238,7 +238,7 @@ pub(crate) fn kv_scan_stream(
 				{
 					continue;
 				}
-				batch.push(decode_record(&key, val)?);
+				batch.push(decode_record(&key, &val)?);
 			}
 			if !batch.is_empty() {
 				yield ValueBatch { values: batch };
@@ -250,7 +250,7 @@ pub(crate) fn kv_scan_stream(
 
 /// Decode a record from its key and value bytes.
 #[inline]
-pub(crate) fn decode_record(key: &[u8], val: Vec<u8>) -> Result<Value, ControlFlow> {
+pub(crate) fn decode_record(key: &[u8], val: &[u8]) -> Result<Value, ControlFlow> {
 	let decoded_key =
 		crate::key::record::RecordKey::decode_key(key).context("Failed to decode record key")?;
 
@@ -259,11 +259,8 @@ pub(crate) fn decode_record(key: &[u8], val: Vec<u8>) -> Result<Value, ControlFl
 		key: decoded_key.id,
 	};
 
-	let mut record =
-		crate::catalog::Record::kv_decode_value(val).context("Failed to deserialize record")?;
-
-	// Inject the id field into the document
-	record.data.def(rid);
+	let record = crate::catalog::Record::kv_decode_value_with_id(val, rid)
+		.context("Failed to deserialize record")?;
 
 	// Take ownership of the value (zero-cost move for freshly deserialized data)
 	Ok(record.data)

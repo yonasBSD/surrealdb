@@ -11,8 +11,6 @@ pub(crate) enum Key {
 	Jwk(String),
 	/// A cache key for a database
 	Db(String, String),
-	/// A cache key for a table
-	Tb(NamespaceId, DatabaseId, TableName),
 	/// A cache key for events (on a table)
 	Evs(NamespaceId, DatabaseId, String, Uuid),
 	/// A cache key for views (on a table)
@@ -31,7 +29,6 @@ impl<'a> From<Lookup<'a>> for Key {
 			#[cfg(feature = "jwks")]
 			Lookup::Jwk(a) => Key::Jwk(a.to_string()),
 			Lookup::Db(a, b) => Key::Db(a.to_string(), b.to_string()),
-			Lookup::Tb(a, b, c) => Key::Tb(a, b, c.clone()),
 			Lookup::Evs(a, b, c, d) => Key::Evs(a, b, c.to_string(), d),
 			Lookup::Fts(a, b, c, d) => Key::Fts(a, b, c.to_string(), d),
 			Lookup::Ixs(a, b, c, d) => Key::Ixs(a, b, c.to_string(), d),

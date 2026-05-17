@@ -254,7 +254,7 @@ fn import_replay_can_reuse_index(
 }
 
 async fn refresh_table_index_cache(
-	ctx: &FrozenContext,
+	_ctx: &FrozenContext,
 	txn: &Transaction,
 	ns: &str,
 	db: &str,
@@ -270,9 +270,6 @@ async fn refresh_table_index_cache(
 	)
 	.await?;
 
-	if let Some(cache) = ctx.get_cache() {
-		cache.clear_tb(tb.namespace_id, tb.database_id, &tb.name);
-	}
 	txn.clear_cache();
 	Ok(())
 }

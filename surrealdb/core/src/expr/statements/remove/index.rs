@@ -94,10 +94,6 @@ impl RemoveIndexStatement {
 		)
 		.await?;
 		// Clear the cache
-		if let Some(cache) = ctx.get_cache() {
-			cache.clear_tb(ns, db, &table_name);
-		}
-		// Clear the cache
 		txn.clear_cache();
 		// Ok all good
 		Ok(Value::None)

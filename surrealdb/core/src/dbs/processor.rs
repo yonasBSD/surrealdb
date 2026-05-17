@@ -20,7 +20,7 @@ use crate::expr::statements::relate::RelateThrough;
 use crate::idx::planner::iterators::{IndexItemRecord, IteratorRef, RecordIterator};
 use crate::idx::planner::{IterationStage, RecordStrategy, ScanDirection};
 use crate::key::{graph, record, r#ref};
-use crate::kvs::{KVKey, KVValue, Key, NORMAL_BATCH_SIZE, Transaction, Val};
+use crate::kvs::{KVKey, Key, NORMAL_BATCH_SIZE, Transaction, Val};
 use crate::val::{RecordId, RecordIdKey, RecordIdKeyRange, TableName, Value};
 
 impl Iterable {
@@ -158,7 +158,7 @@ impl Collectable {
 				Self::process_mergeable(doc_ctx, tb, id, o).await
 			}
 			// Raw key-value pairs from storage layer
-			Self::KeyVal(doc_ctx, key, val) => Ok(Self::process_key_val(doc_ctx, &key, val)?),
+			Self::KeyVal(doc_ctx, key, val) => Ok(Self::process_key_val(doc_ctx, &key, &val)?),
 			// Count aggregation results - no record processing needed
 			Self::Count(doc_ctx, c) => Ok(Self::process_count(doc_ctx, c)),
 			// Index scan results with values - includes pre-fetched data
@@ -460,15 +460,13 @@ impl Collectable {
 	}
 
 	#[instrument(level = "trace", skip_all)]
-	fn process_key_val(doc_ctx: NsDbTbCtx, key: &Key, val: Val) -> Result<Processable> {
+	fn process_key_val(doc_ctx: NsDbTbCtx, key: &Key, val: &[u8]) -> Result<Processable> {
 		let key = record::RecordKey::decode_key(key)?;
-		let mut val = Record::kv_decode_value(val)?;
 		let rid = RecordId {
 			table: key.tb.into_owned(),
 			key: key.id,
 		};
-		// Inject the id field into the document
-		val.data.def(rid.clone());
+		let val = Record::kv_decode_value_with_id(val, rid.clone())?;
 		// Create a new operable value
 		let val = Operable::Value(val.into());
 		// Process the record

@@ -148,10 +148,6 @@ impl DefineTableStatement {
 		let fields = txn.all_tb_fields(ns.namespace_id, db.database_id, &name, opt.version).await?;
 
 		// Clear the cache
-		if let Some(cache) = ctx.get_cache() {
-			cache.clear_tb(ns.namespace_id, db.database_id, &name);
-		}
-		// Clear the cache
 		txn.clear_cache();
 
 		let doc_ctx = DocumentContext::NsDbTbCtx(NsDbTbCtx {
@@ -205,18 +201,10 @@ impl DefineTableStatement {
 				.await?;
 
 				// Clear the cache
-				if let Some(cache) = ctx.get_cache() {
-					cache.clear_tb(ns.namespace_id, db.database_id, ft);
-				}
-				// Clear the cache
 				txn.clear_cache();
 			}
 
 			Self::initialize_view(stk, ctx, opt, &doc_ctx, &name, view).await?;
-		}
-		// Clear the cache
-		if let Some(cache) = ctx.get_cache() {
-			cache.clear_tb(ns.namespace_id, db.database_id, &name);
 		}
 		// Clear the cache
 		txn.clear_cache();
