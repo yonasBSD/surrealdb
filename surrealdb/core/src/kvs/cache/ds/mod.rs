@@ -4,6 +4,8 @@ mod lookup;
 mod weight;
 
 use anyhow::Result;
+#[cfg(feature = "jwks")]
+pub(crate) use entry::CachedJwks;
 pub(crate) use entry::Entry;
 pub(crate) use lookup::Lookup;
 use uuid::Uuid;
@@ -11,15 +13,29 @@ use uuid::Uuid;
 use crate::catalog::{DatabaseId, NamespaceId};
 use crate::val::TableName;
 
+/// Concurrent cache for values that should be shared across transactions on
+/// this datastore (schema slices, live-query versions, JWKS payloads, etc.).
+///
+/// # Values
+/// Cache values are cloned when fetched. Value types should be wrapped in an
+/// `Arc<_>` to avoid expensive clone operations when retrieving values from the
+/// cache. If interior mutability is required, `Arc<Mutex<_>>` or `Arc<RwLock<_>>`
+/// can be used.
+///
+/// # Thread safety
+/// The cache instance can be wrapped with an `Arc` and safely shared between
+/// threads. All methods are accessible via non-mut references, so no further
+/// synchronisation with mutexes is required for the cache itself.
 pub(crate) type Cache = quick_cache::sync::Cache<key::Key, Entry, weight::Weight>;
 
+/// Datastore-wide cache; see [`Cache`] for behaviour notes.
 pub struct DatastoreCache {
 	/// Store the cache entries
 	cache: Cache,
 }
 
 impl DatastoreCache {
-	/// Creates a new datastore cache
+	/// Creates a new empty cache for a datastore.
 	pub(in crate::kvs) fn new(size: usize) -> Self {
 		let cache = Cache::with_weighter(size, size as u64, weight::Weight);
 		Self {

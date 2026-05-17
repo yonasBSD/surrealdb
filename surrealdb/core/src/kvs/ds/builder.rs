@@ -7,8 +7,6 @@ use anyhow::Context as _;
 use anyhow::Result;
 use async_channel::Sender;
 use tokio::sync::Notify;
-#[cfg(feature = "jwks")]
-use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -21,8 +19,6 @@ use crate::dbs::{Capabilities, MessageBroker};
 use crate::exec::function::FunctionRegistry;
 #[cfg(feature = "http")]
 use crate::http::HttpClient;
-#[cfg(feature = "jwks")]
-use crate::iam::jwks::JwksCache;
 use crate::idx::trees::store::IndexStores;
 use crate::kvs::cache::ds::DatastoreCache;
 use crate::kvs::index::IndexBuilder;
@@ -284,8 +280,6 @@ impl Builder {
 			capabilities,
 			index_stores: IndexStores::new(config.hnsw_cache_size, config.diskann_cache_size),
 			index_builder: IndexBuilder::new(tf.clone()),
-			#[cfg(feature = "jwks")]
-			jwks_cache: Arc::new(RwLock::new(JwksCache::new())),
 			#[cfg(storage)]
 			temporary_directory: self.temporary_directory,
 			cache: Arc::new(DatastoreCache::new(config.datastore_cache_size)),

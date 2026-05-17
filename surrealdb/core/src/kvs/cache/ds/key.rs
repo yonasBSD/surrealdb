@@ -4,8 +4,11 @@ use super::lookup::Lookup;
 use crate::catalog::{DatabaseId, NamespaceId};
 use crate::val::TableName;
 
-#[derive(Clone, Hash, Eq, PartialEq)]
+#[derive(Hash, Eq, PartialEq)]
 pub(crate) enum Key {
+	/// A cache key for a JWKS document (hashed URL or stable id)
+	#[cfg(feature = "jwks")]
+	Jwk(String),
 	/// A cache key for a database
 	Db(String, String),
 	/// A cache key for a table
@@ -25,6 +28,8 @@ pub(crate) enum Key {
 impl<'a> From<Lookup<'a>> for Key {
 	fn from(value: Lookup<'a>) -> Self {
 		match value {
+			#[cfg(feature = "jwks")]
+			Lookup::Jwk(a) => Key::Jwk(a.to_string()),
 			Lookup::Db(a, b) => Key::Db(a.to_string(), b.to_string()),
 			Lookup::Tb(a, b, c) => Key::Tb(a, b, c.clone()),
 			Lookup::Evs(a, b, c, d) => Key::Evs(a, b, c.to_string(), d),

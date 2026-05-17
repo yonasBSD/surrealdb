@@ -7,6 +7,9 @@ use crate::val::TableName;
 
 #[derive(Hash, Eq, PartialEq)]
 pub(crate) enum Lookup<'a> {
+	/// A cache key for a JWKS document
+	#[cfg(feature = "jwks")]
+	Jwk(&'a str),
 	/// A cache key for a database
 	Db(&'a str, &'a str),
 	/// A cache key for a table
@@ -27,6 +30,8 @@ impl Equivalent<Key> for Lookup<'_> {
 	#[rustfmt::skip]
 	fn equivalent(&self, key: &Key) -> bool {
 		match (self, key) {
+			#[cfg(feature = "jwks")]
+			(Self::Jwk(la), Key::Jwk(ka)) => la == ka,
 			(Self::Db(la, lb), Key::Db(ka, kb)) => la == ka && lb == kb,
 			(Self::Tb(la, lb, lc), Key::Tb(ka, kb, kc)) => la == ka && lb == kb && lc == kc,
 			(Self::Evs(la, lb, lc, ld), Key::Evs(ka, kb, kc, kd)) => la == ka && lb == kb && lc == kc && ld == kd,

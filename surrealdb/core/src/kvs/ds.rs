@@ -25,8 +25,6 @@ use surrealdb_types::{AuthError, Error as TypesError, SurrealValue, object};
 #[cfg(not(target_family = "wasm"))]
 use tokio::spawn;
 use tokio::sync::Notify;
-#[cfg(feature = "jwks")]
-use tokio::sync::RwLock;
 use tokio::time::{Instant, sleep, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument, trace, warn};
@@ -67,8 +65,6 @@ use crate::expr::statements::{DefineModelStatement, DefineStatement, DefineUserS
 use crate::expr::{Base, Expr, FlowResultExt as _, Literal, LogicalPlan, TopLevelExpr};
 #[cfg(feature = "http")]
 use crate::http::HttpClient;
-#[cfg(feature = "jwks")]
-use crate::iam::jwks::JwksCache;
 use crate::iam::{Action, Auth, Error as IamError, Resource, ResourceKind, Role};
 use crate::idx::IndexKeyBase;
 use crate::idx::index::IndexOperation;
@@ -242,9 +238,6 @@ pub struct Datastore {
 	function_registry: Arc<FunctionRegistry>,
 	// The index asynchronous builder
 	index_builder: IndexBuilder,
-	#[cfg(feature = "jwks")]
-	// The JWKS object cache
-	jwks_cache: Arc<RwLock<JwksCache>>,
 	#[cfg(storage)]
 	// The temporary directory
 	temporary_directory: Option<Arc<PathBuf>>,
@@ -945,8 +938,6 @@ impl Datastore {
 				self.config.diskann_cache_size,
 			),
 			index_builder: IndexBuilder::new(self.transaction_factory.clone()),
-			#[cfg(feature = "jwks")]
-			jwks_cache: Arc::new(Default::default()),
 			#[cfg(storage)]
 			temporary_directory: self.temporary_directory,
 			cache: Arc::new(DatastoreCache::new(self.config.datastore_cache_size)),
@@ -992,8 +983,6 @@ impl Datastore {
 				self.config.diskann_cache_size,
 			),
 			index_builder: IndexBuilder::new(transaction_factory.clone()),
-			#[cfg(feature = "jwks")]
-			jwks_cache: Arc::new(RwLock::new(JwksCache::new())),
 			#[cfg(storage)]
 			temporary_directory: self.temporary_directory.clone(),
 			cache: Arc::new(DatastoreCache::new(self.config.datastore_cache_size)),
@@ -1113,8 +1102,8 @@ impl Datastore {
 	}
 
 	#[cfg(feature = "jwks")]
-	pub(crate) fn jwks_cache(&self) -> &Arc<RwLock<JwksCache>> {
-		&self.jwks_cache
+	pub(crate) fn cache(&self) -> &Arc<DatastoreCache> {
+		&self.cache
 	}
 
 	pub(super) fn clock_now(&self) -> Timestamp {
