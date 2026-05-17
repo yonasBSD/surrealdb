@@ -43,6 +43,8 @@ mod tests;
 
 pub(crate) mod cache;
 pub(crate) mod index;
+pub(crate) mod migrate_record_ids;
+pub(crate) mod record_id_encoding;
 pub(crate) mod sequences;
 pub(crate) mod slowlog;
 pub(crate) mod tasklease;
@@ -62,6 +64,7 @@ pub use ds::{
 pub use err::{Error, Result};
 pub use into::IntoBytes;
 pub(crate) use key::{KVKey, KVValue, impl_kv_key_storekey, impl_kv_value_revisioned};
+pub use migrate_record_ids::MigrationStats;
 pub use scanner::{Direction, Scanner};
 pub use timestamp::{
 	BoxTimeStamp, BoxTimeStampImpl, HlcTimeStamp, HlcTimeStampImpl, IncTimeStampImpl,

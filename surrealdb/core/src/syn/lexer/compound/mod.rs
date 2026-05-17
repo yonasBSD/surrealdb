@@ -8,8 +8,8 @@ mod regex;
 
 pub use js::javascript;
 pub use number::{
-	NumberKind, Numeric, NumericKind, ParsedInt, duration, float, integer, number, numeric,
-	numeric_kind, prepare_number_str,
+	NumberKind, Numeric, NumericKind, ParsedInt, duration, float, integer, number, number_kind,
+	numeric, numeric_kind, prepare_number_str,
 };
 pub use regex::regex;
 

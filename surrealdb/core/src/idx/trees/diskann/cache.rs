@@ -475,6 +475,7 @@ mod tests {
 	use super::*;
 	use crate::catalog::{DatabaseId, IndexId, NamespaceId, TableId};
 	use crate::idx::trees::vector::SerializedVector;
+	use crate::val::Number;
 
 	fn index() -> IndexKey {
 		(NamespaceId(1), DatabaseId(2), TableId(3), IndexId(4))
@@ -508,7 +509,7 @@ mod tests {
 			},
 		);
 		cache.insert_doc_set(index, 7, Ids64::Vec2([11, 12]));
-		cache.insert_doc_id(index, 11, Some(1), RecordIdKey::Number(99));
+		cache.insert_doc_id(index, 11, Some(1), RecordIdKey::Number(Number::Int(99)));
 
 		assert_eq!(cache.capacity(), 1024);
 		assert!(cache.weight() > 0);
@@ -535,7 +536,7 @@ mod tests {
 		cache.insert_element(index, 7, element.clone());
 		cache.insert_node(index, 7, node.clone());
 		cache.insert_doc_set(index, 7, Ids64::One(11));
-		cache.insert_doc_id(index, 11, Some(5), RecordIdKey::Number(17));
+		cache.insert_doc_id(index, 11, Some(5), RecordIdKey::Number(Number::Int(17)));
 
 		assert_eq!(cache.get_state(index).unwrap().enter_point, state.enter_point);
 		let first_element = cache.get_element(index, 7).unwrap();
@@ -549,7 +550,7 @@ mod tests {
 		assert_eq!(cache.get_doc_set(index, 7), Some(Ids64::One(11)));
 		assert_eq!(
 			cache.get_doc_id(index, 11, Some(5)).unwrap().as_ref(),
-			&RecordIdKey::Number(17)
+			&RecordIdKey::Number(Number::Int(17))
 		);
 		assert!(cache.get_doc_id(index, 11, Some(6)).is_none());
 		assert_eq!(cache.element_len(index), 1);
@@ -590,9 +591,12 @@ mod tests {
 			},
 		);
 		cache.insert_doc_set(index, 7, Ids64::One(42));
-		cache.insert_doc_id(index, 42, Some(5), RecordIdKey::Number(7));
+		cache.insert_doc_id(index, 42, Some(5), RecordIdKey::Number(Number::Int(7)));
 		assert!(cache.get_doc_id(index, 42, Some(4)).is_none());
-		assert_eq!(cache.get_doc_id(index, 42, Some(5)).unwrap().as_ref(), &RecordIdKey::Number(7));
+		assert_eq!(
+			cache.get_doc_id(index, 42, Some(5)).unwrap().as_ref(),
+			&RecordIdKey::Number(Number::Int(7))
+		);
 
 		cache.remove_element(index, 7);
 		cache.remove_node(index, 7);

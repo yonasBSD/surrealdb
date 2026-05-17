@@ -684,7 +684,7 @@ impl Parser<'_> {
 
 #[cfg(test)]
 mod tests {
-	use surrealdb_types::ToSql;
+	use surrealdb_types::{Number, ToSql};
 
 	use super::*;
 	use crate::sql::lookup::LookupSubject;
@@ -1085,7 +1085,7 @@ mod tests {
 			Expr::Idiom(Idiom(vec![
 				Part::Start(Expr::Literal(Literal::RecordId(RecordIdLit {
 					table: "test".into(),
-					key: RecordIdKeyLit::Number(1),
+					key: RecordIdKeyLit::Number(Number::Int(1)),
 				}))),
 				f("foo"),
 			]))
@@ -1101,7 +1101,7 @@ mod tests {
 			Expr::Idiom(Idiom(vec![
 				Part::Start(Expr::Literal(Literal::RecordId(RecordIdLit {
 					table: "test".into(),
-					key: RecordIdKeyLit::Number(1),
+					key: RecordIdKeyLit::Number(Number::Int(1)),
 				}))),
 				Part::Value(Expr::Literal(Literal::String(Strand::new_static("foo")))),
 			]))
@@ -1117,7 +1117,7 @@ mod tests {
 			Expr::Idiom(Idiom(vec![
 				Part::Start(Expr::Literal(Literal::RecordId(RecordIdLit {
 					table: "test".into(),
-					key: RecordIdKeyLit::Number(1),
+					key: RecordIdKeyLit::Number(Number::Int(1)),
 				}))),
 				Part::All
 			]))

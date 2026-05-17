@@ -25,7 +25,11 @@ pub(crate) const DEFAULT_SCAN_BATCH_SIZE: usize = 1000;
 /// the result into a key suitable for datastore range scans.
 pub(crate) fn value_to_record_id_key(val: Value) -> RecordIdKey {
 	match val {
-		Value::Number(n) => RecordIdKey::Number(n.as_int()),
+		// Numeric scan bounds (Int / Float / Decimal). NaN / ±∞ are not valid
+		// record-id keys and will surface as an `EncodeError` when the scan
+		// tries to materialize the key — preferable to silently masking them
+		// as integer 0 (which is what `as_int()` did previously).
+		Value::Number(n) => RecordIdKey::Number(n),
 		Value::String(s) => RecordIdKey::String(s),
 		Value::Uuid(u) => RecordIdKey::Uuid(u),
 		Value::Array(a) => RecordIdKey::Array(a),

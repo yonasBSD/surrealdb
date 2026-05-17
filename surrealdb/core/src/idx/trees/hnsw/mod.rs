@@ -618,7 +618,7 @@ mod tests {
 	use crate::idx::trees::vector::{SerializedVector, SharedVector, Vector};
 	use crate::kvs::LockType::Optimistic;
 	use crate::kvs::{Datastore, TransactionType};
-	use crate::val::{RecordIdKey, Value};
+	use crate::val::{Number, RecordIdKey, Value};
 
 	async fn insert_collection_hnsw(
 		ctx: &HnswContext<'_>,
@@ -855,7 +855,8 @@ mod tests {
 		let mut map: HashMap<SharedVector, HashSet<DocId>> = HashMap::default();
 		for (doc_id, obj) in collection.to_vec_ref() {
 			let content = vec![Value::from(obj.deref())];
-			h.index(ctx, &RecordIdKey::Number(*doc_id as i64), None, Some(content)).await?;
+			h.index(ctx, &RecordIdKey::Number(Number::Int(*doc_id as i64)), None, Some(content))
+				.await?;
 			match map.entry(obj.clone()) {
 				Entry::Occupied(mut e) => {
 					e.get_mut().insert(*doc_id);
@@ -921,7 +922,7 @@ mod tests {
 	) -> Result<()> {
 		for (doc_id, obj) in collection.to_vec_ref() {
 			let content = vec![Value::from(obj.deref())];
-			let id = RecordIdKey::Number(*doc_id as i64);
+			let id = RecordIdKey::Number(Number::Int(*doc_id as i64));
 			h.index(ctx, &id, Some(content), None).await?;
 			if let Entry::Occupied(mut e) = map.entry(obj.clone()) {
 				let set = e.get_mut();
@@ -1117,7 +1118,7 @@ mod tests {
 			&p,
 		)
 		.await?;
-		let id = RecordIdKey::Number(1);
+		let id = RecordIdKey::Number(Number::Int(1));
 		let first = new_i16_vec(1, 1);
 		let second = new_i16_vec(2, 2);
 
@@ -1147,7 +1148,7 @@ mod tests {
 			&p,
 		)
 		.await?;
-		let id = RecordIdKey::Number(1);
+		let id = RecordIdKey::Number(Number::Int(1));
 		let first = new_i16_vec(1, 1);
 		let second = new_i16_vec(2, 2);
 
@@ -1169,7 +1170,7 @@ mod tests {
 		let ds = Datastore::new("memory").await?;
 		let ikb = IndexKeyBase::new(NamespaceId(1), DatabaseId(2), "tb".into(), IndexId(4));
 		let p = new_params(2, VectorType::I16, Distance::Euclidean, 3, 500, true, true, true);
-		let id = RecordIdKey::Number(1);
+		let id = RecordIdKey::Number(Number::Int(1));
 		let first = new_i16_vec(1, 1);
 		let h = {
 			let ctx = new_ctx(&ds, TransactionType::Write).await;
@@ -1229,7 +1230,7 @@ mod tests {
 			tx.commit().await?;
 			h
 		};
-		let id = RecordIdKey::Number(1);
+		let id = RecordIdKey::Number(Number::Int(1));
 		let first = new_i16_vec(1, 1);
 
 		let plan = {
@@ -1264,7 +1265,7 @@ mod tests {
 		let ds = Datastore::new("memory").await?;
 		let ikb = IndexKeyBase::new(NamespaceId(1), DatabaseId(2), "tb".into(), IndexId(4));
 		let p = new_params(2, VectorType::I16, Distance::Euclidean, 3, 500, true, true, true);
-		let id = RecordIdKey::Number(1);
+		let id = RecordIdKey::Number(Number::Int(1));
 		let first = new_i16_vec(1, 1);
 		let second = new_i16_vec(2, 2);
 
@@ -1319,8 +1320,8 @@ mod tests {
 		let ds = Datastore::new("memory").await?;
 		let ikb = IndexKeyBase::new(NamespaceId(1), DatabaseId(2), "tb".into(), IndexId(4));
 		let p = new_params(2, VectorType::I16, Distance::Euclidean, 3, 500, true, true, true);
-		let first_id = RecordIdKey::Number(1);
-		let second_id = RecordIdKey::Number(2);
+		let first_id = RecordIdKey::Number(Number::Int(1));
+		let second_id = RecordIdKey::Number(Number::Int(2));
 		let first = new_i16_vec(1, 1);
 		let second = new_i16_vec(2, 2);
 
@@ -1374,7 +1375,7 @@ mod tests {
 		let ds = Datastore::new("memory").await?;
 		let ikb = IndexKeyBase::new(NamespaceId(1), DatabaseId(2), "tb".into(), IndexId(4));
 		let p = new_params(2, VectorType::I16, Distance::Euclidean, 3, 500, true, true, true);
-		let id = RecordIdKey::Number(1);
+		let id = RecordIdKey::Number(Number::Int(1));
 		let first = new_i16_vec(1, 1);
 
 		let h = {
@@ -1521,7 +1522,8 @@ mod tests {
 		info!("Insert collection");
 		for (doc_id, obj) in collection.to_vec_ref() {
 			let content = vec![Value::from(obj.deref())];
-			h.index(&ctx, &RecordIdKey::Number(*doc_id as i64), None, Some(content)).await?;
+			h.index(&ctx, &RecordIdKey::Number(Number::Int(*doc_id as i64)), None, Some(content))
+				.await?;
 		}
 
 		info!("Index pendings");

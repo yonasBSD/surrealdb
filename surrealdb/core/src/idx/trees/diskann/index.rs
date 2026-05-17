@@ -514,8 +514,8 @@ impl DiskAnnIndex {
 
 	/// Maps a record key to the pending-state shard that should be bumped by its writer.
 	fn pending_state_shard(id: &RecordIdKey) -> u16 {
-		if let RecordIdKey::Number(id) = id {
-			return id.rem_euclid(i64::from(DISKANN_PENDING_STATE_SHARDS)) as u16;
+		if let RecordIdKey::Number(crate::val::Number::Int(i)) = id {
+			return i.rem_euclid(i64::from(DISKANN_PENDING_STATE_SHARDS)) as u16;
 		}
 		let mut hasher = DefaultHasher::new();
 		id.hash(&mut hasher);
@@ -1301,8 +1301,8 @@ mod tests {
 			cache.clone(),
 		)
 		.await?;
-		let first_id = RecordIdKey::Number(1);
-		let second_id = RecordIdKey::Number(2);
+		let first_id = RecordIdKey::Number(Number::Int(1));
+		let second_id = RecordIdKey::Number(Number::Int(2));
 		let vector = [1.0, 2.0, 3.0, 4.0];
 
 		{
@@ -1352,7 +1352,7 @@ mod tests {
 		.await?;
 		let ctx = new_ctx(&ds, TransactionType::Write).await;
 		let tx = ctx.tx();
-		let id = RecordIdKey::Number(1);
+		let id = RecordIdKey::Number(Number::Int(1));
 
 		index.index(&ctx, &id, None, Some(f32_content(&[1.0, 2.0, 3.0, 4.0]))).await?;
 
@@ -1403,7 +1403,7 @@ mod tests {
 			cache(),
 		)
 		.await?;
-		let id = RecordIdKey::Number(1);
+		let id = RecordIdKey::Number(Number::Int(1));
 		{
 			let ctx = new_ctx(&ds, TransactionType::Write).await;
 			let tx = ctx.tx();
@@ -1462,7 +1462,7 @@ mod tests {
 			cache(),
 		)
 		.await?;
-		let id = RecordIdKey::Number(1);
+		let id = RecordIdKey::Number(Number::Int(1));
 		{
 			let ctx = new_ctx(&ds, TransactionType::Write).await;
 			index.index(&ctx, &id, None, Some(f32_content(&[1.0, 2.0, 3.0, 4.0]))).await?;
@@ -1519,8 +1519,9 @@ mod tests {
 			cache(),
 		)
 		.await?;
-		let first_id = RecordIdKey::Number(1);
-		let second_id = RecordIdKey::Number(1 + i64::from(DISKANN_PENDING_STATE_SHARDS));
+		let first_id = RecordIdKey::Number(Number::Int(1));
+		let second_id =
+			RecordIdKey::Number(Number::Int(1 + i64::from(DISKANN_PENDING_STATE_SHARDS)));
 		assert_eq!(
 			DiskAnnIndex::pending_state_shard(&first_id),
 			DiskAnnIndex::pending_state_shard(&second_id)
@@ -1579,7 +1580,7 @@ mod tests {
 			cache(),
 		)
 		.await?;
-		let id = RecordIdKey::Number(1);
+		let id = RecordIdKey::Number(Number::Int(1));
 		let plan = {
 			let ctx = new_ctx(&ds, TransactionType::Read).await;
 			let plan = DiskAnnIndex::prepare_compaction(&ctx, &ikb).await?;
@@ -1620,8 +1621,8 @@ mod tests {
 			cache(),
 		)
 		.await?;
-		let first_id = RecordIdKey::Number(1);
-		let second_id = RecordIdKey::Number(2);
+		let first_id = RecordIdKey::Number(Number::Int(1));
+		let second_id = RecordIdKey::Number(Number::Int(2));
 		{
 			let ctx = new_ctx(&ds, TransactionType::Write).await;
 			index.index(&ctx, &first_id, None, Some(f32_content(&[1.0, 2.0, 3.0, 4.0]))).await?;

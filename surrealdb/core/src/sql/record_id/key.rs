@@ -1,7 +1,7 @@
 use std::ops::Bound;
 
 use surrealdb_strand::Strand;
-use surrealdb_types::{SqlFormat, ToSql, write_sql};
+use surrealdb_types::{Number, SqlFormat, ToSql, write_sql};
 
 use crate::fmt::{CoverStmts, EscapeObjectKey, EscapeRidKey, Fmt};
 use crate::sql::literal::ObjectEntry;
@@ -39,7 +39,7 @@ impl From<crate::expr::RecordIdKeyGen> for RecordIdKeyGen {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub(crate) enum RecordIdKeyLit {
-	Number(i64),
+	Number(Number),
 	String(Strand),
 	Uuid(PublicUuid),
 	Array(Vec<Expr>),
@@ -51,7 +51,16 @@ pub(crate) enum RecordIdKeyLit {
 impl RecordIdKeyLit {
 	pub fn from_record_id_key(key: PublicRecordIdKey) -> Self {
 		match key {
-			PublicRecordIdKey::Number(x) => RecordIdKeyLit::Number(x),
+			PublicRecordIdKey::Number(x) => RecordIdKeyLit::Number(Number::Int(x)),
+			// NaN/±∞ are blocked at construction (Deserialize + from_number);
+			// reaching this arm is a programmer error worth a clear panic.
+			PublicRecordIdKey::Float(x) if x.is_finite() => {
+				RecordIdKeyLit::Number(Number::Float(x))
+			}
+			PublicRecordIdKey::Float(_) => unreachable!(
+				"PublicRecordIdKey::Float must be finite; construct via RecordIdKey::from_number"
+			),
+			PublicRecordIdKey::Decimal(x) => RecordIdKeyLit::Number(Number::Decimal(x)),
 			PublicRecordIdKey::String(x) => RecordIdKeyLit::String(x.into()),
 			PublicRecordIdKey::Uuid(x) => RecordIdKeyLit::Uuid(x),
 			PublicRecordIdKey::Array(x) => {
@@ -80,6 +89,12 @@ impl RecordIdKeyLit {
 					},
 				}))
 			}
+			// `PublicRecordIdKey` is `#[non_exhaustive]`. Silently aliasing
+			// unknown variants would be a data-corruption risk; surface the
+			// missed update as a controlled panic instead.
+			_ => unreachable!(
+				"unknown PublicRecordIdKey variant; surrealdb-core needs updating to handle the new variant"
+			),
 		}
 	}
 }
@@ -87,7 +102,7 @@ impl RecordIdKeyLit {
 impl From<RecordIdKeyLit> for crate::expr::RecordIdKeyLit {
 	fn from(value: RecordIdKeyLit) -> Self {
 		match value {
-			RecordIdKeyLit::Number(x) => crate::expr::RecordIdKeyLit::Number(x),
+			RecordIdKeyLit::Number(x) => crate::expr::RecordIdKeyLit::Number(x.into()),
 			RecordIdKeyLit::String(x) => crate::expr::RecordIdKeyLit::String(x),
 			RecordIdKeyLit::Uuid(x) => {
 				crate::expr::RecordIdKeyLit::Uuid(crate::val::Uuid(x.into_inner()))
@@ -107,7 +122,7 @@ impl From<RecordIdKeyLit> for crate::expr::RecordIdKeyLit {
 impl From<crate::expr::RecordIdKeyLit> for RecordIdKeyLit {
 	fn from(value: crate::expr::RecordIdKeyLit) -> Self {
 		match value {
-			crate::expr::RecordIdKeyLit::Number(x) => RecordIdKeyLit::Number(x),
+			crate::expr::RecordIdKeyLit::Number(x) => RecordIdKeyLit::Number(x.into()),
 			crate::expr::RecordIdKeyLit::String(x) => RecordIdKeyLit::String(x),
 			crate::expr::RecordIdKeyLit::Uuid(uuid) => {
 				RecordIdKeyLit::Uuid(surrealdb_types::Uuid::from(uuid.0))

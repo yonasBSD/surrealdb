@@ -40,6 +40,77 @@ pub struct SurrealProcess {
 	port: u16,
 }
 
+/// Build a `Command` rooted at the on-disk `surreal` binary that
+/// matches `version`. Shared between `SurrealProcess::new` (which
+/// invokes `surreal start ...`) and [`run_migrate_record_ids`] (which
+/// invokes the one-shot CLI subcommand).
+fn surreal_command(version: &DsVersion) -> Command {
+	match version {
+		DsVersion::Path(x) => {
+			let path = Path::new(x).join("target").join("debug").join("surreal");
+			Command::new(path)
+		}
+		DsVersion::Version(x) => {
+			let path = Path::new(".binary_cache").join(format!("surreal-v{x}"));
+			Command::new(path)
+		}
+	}
+}
+
+/// Storage endpoint that both the running server and the one-shot
+/// migration CLI must agree on for a given `(backend, tmp_dir)`.
+fn endpoint_for(config: &Config, tmp_dir: &str) -> String {
+	match config.backend {
+		UpgradeBackend::RocksDb => format!("rocksdb://{tmp_dir}/ds"),
+		UpgradeBackend::SurrealKv => format!("surrealkv://{tmp_dir}/ds"),
+	}
+}
+
+/// Run `surreal migrate-record-ids <endpoint>` as a one-shot using the
+/// `--to` binary, against the same on-disk data the upgrade test will
+/// query in phase 2.
+///
+/// Skipped when `--to` is a tagged release: every tagged version in the
+/// current upgrade chain (3.0.x and 3.1.0-beta.{1,2}) pre-dates the
+/// subcommand and reads/writes the legacy disc-2 / disc-8 / disc-9
+/// layouts directly, so there is no migration target and no subcommand
+/// to invoke. Only the local checkout (`DsVersion::Path`) ships the
+/// disc-10 layout plus the migration tool. When a future tagged release
+/// includes the subcommand, extend this gate to admit those versions.
+///
+/// On the hops where it does fire, the migration is idempotent — the
+/// tool short-circuits when the encoding sentinel is already `FullNew`,
+/// so running it for every applicable `(from, to)` pair is correct.
+pub async fn run_migrate_record_ids(
+	config: &Config,
+	version: &DsVersion,
+	tmp_dir: &str,
+) -> Result<(), anyhow::Error> {
+	if !matches!(version, DsVersion::Path(_)) {
+		return Ok(());
+	}
+	let endpoint = endpoint_for(config, tmp_dir);
+	let output = surreal_command(version)
+		.args(["migrate-record-ids", &endpoint])
+		.env("SURREAL_RUNTIME_WORKER_THREADS", "1")
+		.stdin(Stdio::null())
+		.stdout(Stdio::piped())
+		.stderr(Stdio::piped())
+		.kill_on_drop(true)
+		.output()
+		.await
+		.context("Failed to spawn `surreal migrate-record-ids`")?;
+	if !output.status.success() {
+		bail!(
+			"`surreal migrate-record-ids` exited with status {}\n    STDOUT:{}\n    STDERR:{}",
+			output.status,
+			String::from_utf8_lossy(&output.stdout),
+			String::from_utf8_lossy(&output.stderr),
+		);
+	}
+	Ok(())
+}
+
 impl SurrealProcess {
 	pub async fn new(
 		config: &Config,
@@ -47,21 +118,9 @@ impl SurrealProcess {
 		tmp_dir: &str,
 		port: u16,
 	) -> Result<SurrealProcess, anyhow::Error> {
-		let mut command = match version {
-			DsVersion::Path(x) => {
-				let path = Path::new(x).join("target").join("debug").join("surreal");
-				Command::new(path)
-			}
-			DsVersion::Version(x) => {
-				let path = Path::new(".binary_cache").join(format!("surreal-v{x}"));
-				Command::new(path)
-			}
-		};
+		let mut command = surreal_command(version);
 
-		let endpoint = match config.backend {
-			UpgradeBackend::RocksDb => format!("rocksdb://{tmp_dir}/ds"),
-			UpgradeBackend::SurrealKv => format!("surrealkv://{tmp_dir}/ds"),
-		};
+		let endpoint = endpoint_for(config, tmp_dir);
 
 		let bind = format!("127.0.0.1:{port}");
 		let common_args =

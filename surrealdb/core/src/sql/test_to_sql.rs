@@ -85,7 +85,7 @@ use crate::val::{Bytes, Duration, File, Geometry, Number, Object, RecordId, Set,
 #[case::expr_lit_file(Expr::Literal(Literal::File(PublicFile::from(File::new("bucket".to_string(), "path/to/file.txt".to_string())))), "f\"bucket:/path/to/file.txt\"", "f\"bucket:/path/to/file.txt\"")]
 #[case::expr_lit_record_id(Expr::Literal(Literal::RecordId(RecordIdLit {
     table: "table".into(),
-    key: RecordIdKeyLit::Number(123)
+    key: RecordIdKeyLit::Number(surrealdb_types::Number::Int(123))
 })), "`table`:123", "`table`:123")]
 #[case::expr_lit_regex(Expr::Literal(Literal::Regex("hello".parse().unwrap())), "/hello/", "/hello/")]
 // Expression: Params
@@ -329,7 +329,7 @@ use crate::val::{Bytes, Duration, File, Geometry, Number, Object, RecordId, Set,
     AccessStatementGrant {
 		ac: "user".into(),
         base: None,
-        subject: Subject::Record(RecordIdLit { table: "user".into(), key: RecordIdKeyLit::Number(123) }),
+        subject: Subject::Record(RecordIdLit { table: "user".into(), key: RecordIdKeyLit::Number(surrealdb_types::Number::Int(123)) }),
     }))), "ACCESS user GRANT FOR RECORD user:123", "ACCESS user GRANT FOR RECORD user:123")]
 #[case::top_level_kill(TopLevelExpr::Kill(KillStatement { id: Expr::Param(Param::new("id".to_string())) }), "KILL $id", "KILL $id")]
 #[case::top_level_live(TopLevelExpr::Live(Box::new(LiveStatement { fields: LiveFields::Select(Fields::all()), what: Expr::Table("user".into()), cond: None, fetch: None })), "LIVE SELECT * FROM user", "LIVE SELECT * FROM user")]

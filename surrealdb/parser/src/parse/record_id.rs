@@ -1,13 +1,89 @@
 use std::ops::Bound;
+use std::str::FromStr;
 
 use ast::Spanned;
+use common::source_error::{AnnotationKind, Level};
 use common::span::Span;
+use rust_decimal::Decimal;
 use token::{BaseTokenKind, Joined, RecordIdKeyToken, T, Token};
 
 use crate::parse::ParseResult;
 use crate::parse::peek::peek_joined_starts_record_id_key;
 use crate::parse::range::TryRange;
 use crate::{Parse, Parser};
+
+/// Parse the (possibly signed) float-literal slice covered by `span` as an
+/// `f64`, rejecting NaN/±Infinity which are not valid record-id keys. The
+/// returned `Spanned` covers the literal including any leading `+`/`-`.
+/// The lexer's `Float` regex matches `[+\-]?[0-9]+\.[0-9]+f?` or
+/// `[+\-]?[0-9]+f`, so the trailing `f` (when emitted by `Number::Float`
+/// `ToSql`) must be stripped before `parse::<f64>()`. The only realistic
+/// `parse` failure is overflow to infinity, which `is_finite()` catches.
+fn parse_float_id(
+	parser: &mut Parser<'_, '_>,
+	sign: Option<ast::Sign>,
+	float_span: Span,
+) -> ParseResult<ast::RecordIdKey> {
+	// Consume the peeked `BaseTokenKind::Float` token. The signed path
+	// already popped the leading `+`/`-` before getting here, so this
+	// advances past just the digit/dot portion either way.
+	let _ = parser.next();
+	let mut span = float_span;
+	if sign.is_some() {
+		span.start -= 1;
+	}
+	let raw = parser.slice(span);
+	let trimmed = raw.strip_suffix('f').unwrap_or(raw);
+	let value: f64 = trimmed.parse().unwrap_or(f64::NAN);
+	if !value.is_finite() {
+		return Err(parser.with_error(|parser| {
+			Level::Error
+				.title("NaN and \u{00b1}Infinity are not valid record-id keys")
+				.snippet(parser.snippet().annotate(AnnotationKind::Primary.span(span)))
+				.to_diagnostic()
+		}));
+	}
+	Ok(ast::RecordIdKey::Float(Spanned {
+		value,
+		span,
+	}))
+}
+
+/// Parse the (possibly signed) decimal-literal slice covered by `span` as a
+/// `Decimal`. The lexer's `Decimal` regex matches
+/// `[+\-]?[0-9]+(\.[0-9]+)?dec`, so this strips the trailing `dec` suffix and
+/// parses via `Decimal::from_str` — mirroring the strict-mode core parser at
+/// `surrealdb/core/src/syn/parser/record_id.rs:parse_numeric_record_id_key`'s
+/// Decimal arm.
+fn parse_decimal_id(
+	parser: &mut Parser<'_, '_>,
+	sign: Option<ast::Sign>,
+	decimal_span: Span,
+) -> ParseResult<ast::RecordIdKey> {
+	let _ = parser.next();
+	let mut span = decimal_span;
+	if sign.is_some() {
+		span.start -= 1;
+	}
+	let raw = parser.slice(span);
+	let trimmed = raw.strip_suffix("dec").expect("Decimal tokens end in `dec`");
+	let value = match Decimal::from_str(trimmed) {
+		Ok(d) => d,
+		Err(_) => {
+			return Err(parser.with_error(|parser| {
+				Level::Error
+					.title("Decimal record-id key outside of supported value range")
+					.snippet(parser.snippet().annotate(AnnotationKind::Primary.span(span)))
+					.to_diagnostic()
+			}));
+		}
+	};
+	let node = parser.push(Spanned {
+		value,
+		span,
+	});
+	Ok(ast::RecordIdKey::Decimal(node))
+}
 
 fn parse_int_id(
 	parser: &mut Parser<'_, '_>,
@@ -73,26 +149,50 @@ pub async fn parse_peeked_record_id_key(
 		BaseTokenKind::OpenBracket => ast::RecordIdKey::Array(parser.parse().await?),
 		BaseTokenKind::String => ast::RecordIdKey::String(parser.parse_sync()?),
 		T![+] => {
-			if let Some(peek1) = parser.peek_joined1()?
-				&& let BaseTokenKind::Int = peek1.token
-			{
-				let _ = parser.next();
-				parse_int_id(parser, Some(ast::Sign::Plus), peek1.span)?
+			if let Some(peek1) = parser.peek_joined1()? {
+				match peek1.token {
+					BaseTokenKind::Int => {
+						let _ = parser.next();
+						parse_int_id(parser, Some(ast::Sign::Plus), peek1.span)?
+					}
+					BaseTokenKind::Float => {
+						let _ = parser.next();
+						parse_float_id(parser, Some(ast::Sign::Plus), peek1.span)?
+					}
+					BaseTokenKind::Decimal => {
+						let _ = parser.next();
+						parse_decimal_id(parser, Some(ast::Sign::Plus), peek1.span)?
+					}
+					_ => return Err(parser.unexpected("a record id key")),
+				}
 			} else {
 				return Err(parser.unexpected("a record id key"));
 			}
 		}
 		T![-] => {
-			if let Some(peek1) = parser.peek_joined1()?
-				&& let BaseTokenKind::Int = peek1.token
-			{
-				let _ = parser.next();
-				parse_int_id(parser, Some(ast::Sign::Minus), peek1.span)?
+			if let Some(peek1) = parser.peek_joined1()? {
+				match peek1.token {
+					BaseTokenKind::Int => {
+						let _ = parser.next();
+						parse_int_id(parser, Some(ast::Sign::Minus), peek1.span)?
+					}
+					BaseTokenKind::Float => {
+						let _ = parser.next();
+						parse_float_id(parser, Some(ast::Sign::Minus), peek1.span)?
+					}
+					BaseTokenKind::Decimal => {
+						let _ = parser.next();
+						parse_decimal_id(parser, Some(ast::Sign::Minus), peek1.span)?
+					}
+					_ => return Err(parser.unexpected("a record id key")),
+				}
 			} else {
 				return Err(parser.unexpected("a record id key"));
 			}
 		}
 		BaseTokenKind::Int => parse_int_id(parser, None, peek.span)?,
+		BaseTokenKind::Float => parse_float_id(parser, None, peek.span)?,
+		BaseTokenKind::Decimal => parse_decimal_id(parser, None, peek.span)?,
 		BaseTokenKind::UuidString => {
 			let uuid = parser.parse_sync()?;
 			ast::RecordIdKey::Uuid(uuid)
@@ -190,6 +290,99 @@ pub fn peek_record_id_token(parser: &mut Parser<'_, '_>) -> ParseResult<Option<T
 				return Ok(Some(token));
 			}
 			BaseTokenKind::Int
+		}
+		// Mirror the signed-Number splitting: a leading `+`/`-` is emitted
+		// as its own joined token so `parse_peeked_record_id_key` can route
+		// `T![+]`/`T![-]` followed by a joined `BaseTokenKind::Float` to
+		// `parse_float_id` with an explicit `Sign`, matching how signed
+		// integer record-id keys are handled.
+		RecordIdKeyToken::Float => {
+			if parser.slice(span).starts_with('+') {
+				let token = Token {
+					token: T![+],
+					joined: Joined::Joined,
+					span: Span {
+						start: span.start,
+						end: span.start + 1,
+					},
+				};
+				parser.lex.push_token(token);
+				parser.lex.push_token(Token {
+					token: BaseTokenKind::Float,
+					joined: Joined::Joined,
+					span: Span {
+						start: span.start + 1,
+						end: span.end,
+					},
+				});
+				return Ok(Some(token));
+			} else if parser.slice(span).starts_with('-') {
+				let token = Token {
+					token: T![-],
+					joined: Joined::Joined,
+					span: Span {
+						start: span.start,
+						end: span.start + 1,
+					},
+				};
+				parser.lex.push_token(token);
+				parser.lex.push_token(Token {
+					token: BaseTokenKind::Float,
+					joined: Joined::Joined,
+					span: Span {
+						start: span.start + 1,
+						end: span.end,
+					},
+				});
+				return Ok(Some(token));
+			}
+			BaseTokenKind::Float
+		}
+		// Same signed-token splitting as `Float`, routing to a
+		// `BaseTokenKind::Decimal` consumed by `parse_decimal_id`. Triggered
+		// by `3dec`, `1.5dec`, and signed variants — the canonical `to_sql()`
+		// output for `Number::Decimal` record-id keys.
+		RecordIdKeyToken::Decimal => {
+			if parser.slice(span).starts_with('+') {
+				let token = Token {
+					token: T![+],
+					joined: Joined::Joined,
+					span: Span {
+						start: span.start,
+						end: span.start + 1,
+					},
+				};
+				parser.lex.push_token(token);
+				parser.lex.push_token(Token {
+					token: BaseTokenKind::Decimal,
+					joined: Joined::Joined,
+					span: Span {
+						start: span.start + 1,
+						end: span.end,
+					},
+				});
+				return Ok(Some(token));
+			} else if parser.slice(span).starts_with('-') {
+				let token = Token {
+					token: T![-],
+					joined: Joined::Joined,
+					span: Span {
+						start: span.start,
+						end: span.start + 1,
+					},
+				};
+				parser.lex.push_token(token);
+				parser.lex.push_token(Token {
+					token: BaseTokenKind::Decimal,
+					joined: Joined::Joined,
+					span: Span {
+						start: span.start + 1,
+						end: span.end,
+					},
+				});
+				return Ok(Some(token));
+			}
+			BaseTokenKind::Decimal
 		}
 		RecordIdKeyToken::Identifier => BaseTokenKind::Ident,
 	};

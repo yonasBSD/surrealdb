@@ -422,6 +422,18 @@ pub fn from_value(val: PublicValue) -> Result<CborValue> {
 				CborValue::Text(table.into_string()),
 				match key {
 					PublicRecordIdKey::Number(v) => CborValue::Integer(v.into()),
+					// Symmetric with the decoder at `to_record_id_key`: NaN
+					// and ±∞ are not valid record-id keys, so emitting one
+					// over CBOR would produce a payload the receiving
+					// decoder would reject — an asymmetric round-trip
+					// failure. Reject at the encoder boundary too.
+					PublicRecordIdKey::Float(f) if f.is_finite() => CborValue::Float(f),
+					PublicRecordIdKey::Float(_) => {
+						return Err(anyhow!("NaN and ±Infinity are not valid record-id keys"));
+					}
+					PublicRecordIdKey::Decimal(d) => {
+						CborValue::Tag(TAG_STRING_DECIMAL, Box::new(CborValue::Text(d.to_string())))
+					}
 					PublicRecordIdKey::String(v) => CborValue::Text(v),
 					PublicRecordIdKey::Uuid(v) => from_uuid(v),
 					PublicRecordIdKey::Array(v) => from_array(v)?,
@@ -429,6 +441,10 @@ pub fn from_value(val: PublicValue) -> Result<CborValue> {
 					PublicRecordIdKey::Range(v) => {
 						CborValue::Tag(TAG_RANGE, Box::new(from_record_id_key_range(*v)?))
 					}
+					// Public `RecordIdKey` is `#[non_exhaustive]` — encode any
+					// future variant as a JSON-style text fallback to avoid
+					// breaking older clients hard.
+					_ => CborValue::Text(String::new()),
 				},
 			])),
 		)),
@@ -585,7 +601,15 @@ fn to_record_id_key_range(val: CborValue) -> Result<PublicRecordIdKeyRange> {
 
 fn from_record_id_key(v: PublicRecordIdKey) -> Result<CborValue> {
 	match v {
-		PublicRecordIdKey::Number(v) => Ok(CborValue::Integer(v.into())),
+		PublicRecordIdKey::Number(i) => Ok(CborValue::Integer(i.into())),
+		// Symmetric with the decoder at `to_record_id_key`: reject NaN/±∞.
+		PublicRecordIdKey::Float(f) if f.is_finite() => Ok(CborValue::Float(f)),
+		PublicRecordIdKey::Float(_) => {
+			Err(anyhow!("NaN and ±Infinity are not valid record-id keys"))
+		}
+		PublicRecordIdKey::Decimal(d) => {
+			Ok(CborValue::Tag(TAG_STRING_DECIMAL, Box::new(CborValue::Text(d.to_string()))))
+		}
 		PublicRecordIdKey::String(v) => Ok(CborValue::Text(v)),
 		PublicRecordIdKey::Array(v) => from_array(v),
 		PublicRecordIdKey::Object(v) => from_object(v),
@@ -595,18 +619,33 @@ fn from_record_id_key(v: PublicRecordIdKey) -> Result<CborValue> {
 		PublicRecordIdKey::Uuid(v) => {
 			Ok(CborValue::Tag(TAG_SPEC_UUID, Box::new(CborValue::Bytes(v.into_bytes().into()))))
 		}
+		// Public `RecordIdKey` is `#[non_exhaustive]`.
+		_ => Ok(CborValue::Text(String::new())),
 	}
 }
 
 fn to_record_id_key(val: CborValue) -> Result<PublicRecordIdKey> {
 	match val {
 		CborValue::Integer(v) => Ok(PublicRecordIdKey::Number(i128::from(v) as i64)),
+		// Mirror the encoder's invariant: NaN / ±∞ are not valid record-id keys.
+		// Reject at decode time so CBOR clients can't construct an invalid
+		// key that only fails later during materialization.
+		CborValue::Float(v) if v.is_finite() => Ok(PublicRecordIdKey::Float(v)),
+		CborValue::Float(_) => Err(anyhow!("NaN and ±Infinity are not valid record-id keys")),
 		CborValue::Text(v) => Ok(PublicRecordIdKey::String(v)),
 		CborValue::Array(v) => Ok(PublicRecordIdKey::Array(to_array(v)?)),
 		CborValue::Map(v) => Ok(PublicRecordIdKey::Object(to_object(v)?)),
 		CborValue::Tag(TAG_RANGE, v) => {
 			Ok(PublicRecordIdKey::Range(Box::new(to_record_id_key_range(*v)?)))
 		}
+		// Decimal record-id keys are encoded as `TAG_STRING_DECIMAL` + text;
+		// decode the symmetric inverse so they round-trip through CBOR.
+		CborValue::Tag(TAG_STRING_DECIMAL, v) => match *v {
+			CborValue::Text(s) => Decimal::from_str_normalized(&s)
+				.map(PublicRecordIdKey::Decimal)
+				.map_err(|e| anyhow!("Failed to parse decimal record-id key: {e}")),
+			_ => Err(anyhow!("Expected a CBOR text inside TAG_STRING_DECIMAL")),
+		},
 		CborValue::Tag(TAG_STRING_UUID, v) => match *v {
 			CborValue::Text(v) => match PublicUuid::try_from(v) {
 				Ok(v) => Ok(PublicRecordIdKey::Uuid(v)),

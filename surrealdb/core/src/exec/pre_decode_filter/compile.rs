@@ -340,7 +340,11 @@ fn try_compile_leaf_streaming(
 /// nested [`RecordIdExpr`] keys (no `rand()` / ulid / uuid generators or range bounds).
 fn try_static_record_id_key(key: &PhysicalRecordIdKey) -> Option<RecordIdKey> {
 	match key {
-		PhysicalRecordIdKey::Number(n) => Some(RecordIdKey::Number(*n)),
+		// Route through the canonicalizing factory so non-finite floats are
+		// rejected here too — mirrors the runtime evaluator at
+		// `physical_expr/record_id.rs` and keeps the plan-time / run-time
+		// invariants symmetric.
+		PhysicalRecordIdKey::Number(n) => RecordIdKey::from_number(*n),
 		PhysicalRecordIdKey::String(s) => Some(RecordIdKey::String(s.clone())),
 		PhysicalRecordIdKey::Uuid(u) => Some(RecordIdKey::Uuid(*u)),
 		PhysicalRecordIdKey::Generate(_) => None,

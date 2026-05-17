@@ -145,6 +145,8 @@ impl RoughlyEq for RecordIdKey {
 		if config.record_id_keys {
 			match (self, other) {
 				(RecordIdKey::Number(a), RecordIdKey::Number(b)) => a == b,
+				(RecordIdKey::Float(a), RecordIdKey::Float(b)) => a.roughly_equal(b, config),
+				(RecordIdKey::Decimal(a), RecordIdKey::Decimal(b)) => a.roughly_equal(b, config),
 				(RecordIdKey::String(a), RecordIdKey::String(b)) => a == b,
 				(RecordIdKey::Uuid(a), RecordIdKey::Uuid(b)) => {
 					if config.uuid {
@@ -161,6 +163,8 @@ impl RoughlyEq for RecordIdKey {
 		} else {
 			match (self, other) {
 				(RecordIdKey::Number(_), RecordIdKey::Number(_)) => true,
+				(RecordIdKey::Float(_), RecordIdKey::Float(_)) => true,
+				(RecordIdKey::Decimal(_), RecordIdKey::Decimal(_)) => true,
 				(RecordIdKey::String(_), RecordIdKey::String(_)) => true,
 				(RecordIdKey::Uuid(_), RecordIdKey::Uuid(_)) => true,
 				(RecordIdKey::Array(a), RecordIdKey::Array(b)) => a.roughly_equal(b, config),

@@ -40,6 +40,8 @@ pub fn peek_joined_starts_record_id_key(parser: &mut Parser<'_, '_>) -> ParseRes
 					| BaseTokenKind::OpenBracket
 					| BaseTokenKind::UuidString
 					| BaseTokenKind::Int
+					| BaseTokenKind::Float
+					| BaseTokenKind::Decimal
 					| BaseTokenKind::String
 					// +123 and -123 are valid prime integers
 					| T![+] | T![-]

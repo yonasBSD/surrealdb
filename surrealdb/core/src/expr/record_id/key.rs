@@ -10,7 +10,7 @@ use crate::dbs::Options;
 use crate::doc::CursorDoc;
 use crate::expr::literal::ObjectEntry;
 use crate::expr::{Expr, FlowResultExt as _, Kind, KindLiteral, RecordIdKeyRangeLit};
-use crate::val::{Array, Object, RecordIdKey, Uuid};
+use crate::val::{Array, Number, Object, RecordIdKey, Uuid};
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum RecordIdKeyGen {
@@ -31,7 +31,7 @@ impl RecordIdKeyGen {
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub(crate) enum RecordIdKeyLit {
-	Number(i64),
+	Number(Number),
 	String(Strand),
 	Uuid(Uuid),
 	Array(Vec<Expr>),
@@ -99,7 +99,8 @@ impl RecordIdKeyLit {
 		doc: Option<&CursorDoc>,
 	) -> Result<RecordIdKey> {
 		match self {
-			RecordIdKeyLit::Number(v) => Ok(RecordIdKey::Number(*v)),
+			RecordIdKeyLit::Number(v) => RecordIdKey::from_number(*v)
+				.ok_or_else(|| anyhow::anyhow!("NaN or ±∞ is not a valid record-id key")),
 			RecordIdKeyLit::String(v) => Ok(RecordIdKey::String(v.clone())),
 			RecordIdKeyLit::Uuid(v) => Ok(RecordIdKey::Uuid(*v)),
 			RecordIdKeyLit::Array(v) => {
@@ -133,7 +134,16 @@ impl RecordIdKeyLit {
 impl From<crate::types::PublicRecordIdKey> for RecordIdKeyLit {
 	fn from(value: crate::types::PublicRecordIdKey) -> Self {
 		match value {
-			crate::types::PublicRecordIdKey::Number(x) => Self::Number(x),
+			crate::types::PublicRecordIdKey::Number(x) => Self::Number(Number::Int(x)),
+			// NaN/±∞ are blocked at construction (Deserialize + from_number);
+			// reaching this arm is a programmer error worth a clear panic.
+			crate::types::PublicRecordIdKey::Float(x) if x.is_finite() => {
+				Self::Number(Number::Float(x))
+			}
+			crate::types::PublicRecordIdKey::Float(_) => unreachable!(
+				"PublicRecordIdKey::Float must be finite; construct via RecordIdKey::from_number"
+			),
+			crate::types::PublicRecordIdKey::Decimal(x) => Self::Number(Number::Decimal(x)),
 			crate::types::PublicRecordIdKey::String(x) => Self::String(x.into()),
 			crate::types::PublicRecordIdKey::Uuid(x) => Self::Uuid(x.into()),
 			crate::types::PublicRecordIdKey::Array(x) => {
@@ -161,6 +171,12 @@ impl From<crate::types::PublicRecordIdKey> for RecordIdKeyLit {
 					},
 				}))
 			}
+			// `PublicRecordIdKey` is `#[non_exhaustive]`. Silently aliasing
+			// unknown variants would be a data-corruption risk; surface the
+			// missed update as a controlled panic instead.
+			_ => unreachable!(
+				"unknown PublicRecordIdKey variant; surrealdb-core needs updating to handle the new variant"
+			),
 		}
 	}
 }

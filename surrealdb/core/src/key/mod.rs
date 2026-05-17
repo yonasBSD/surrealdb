@@ -18,6 +18,7 @@
 //! - {ns_name}: &str
 //! - {db_name}: &str
 //!
+//! crate::key::record_id_encoding       !re -> RecordIdEncoding
 //! crate::key::version                  !v -> Version
 //!
 //! crate::key::root::all                /
@@ -113,6 +114,7 @@ pub(crate) mod index;
 pub(crate) mod namespace;
 pub(crate) mod node;
 pub(crate) mod record;
+pub(crate) mod record_id_encoding;
 pub(crate) mod r#ref;
 pub(crate) mod root;
 pub(crate) mod sequence;

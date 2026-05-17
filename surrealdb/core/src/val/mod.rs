@@ -1245,7 +1245,22 @@ fn convert_record_id_key_to_public(
 	key: crate::val::RecordIdKey,
 ) -> Result<surrealdb_types::RecordIdKey> {
 	match key {
-		crate::val::RecordIdKey::Number(n) => Ok(surrealdb_types::RecordIdKey::Number(n)),
+		// Reject non-finite floats at the boundary, mirroring the guard in the
+		// parallel `TryFrom<RecordIdKey> for PublicRecordIdKey` impl
+		// (`val/record_id.rs:641-644`) and the invariant enforced by every
+		// other internal→public conversion site. Without this check a stray
+		// in-memory `Number::Float(NaN)` constructed via the bare variant
+		// (bypassing `from_number`) would surface in downstream SDK payloads,
+		// where the receiving decoder (CBOR / FlatBuffers / serde) would then
+		// reject it — producing a confusing asymmetric round-trip failure.
+		crate::val::RecordIdKey::Number(n) => Ok(match n {
+			crate::val::Number::Int(i) => surrealdb_types::RecordIdKey::Number(i),
+			crate::val::Number::Float(f) if f.is_finite() => surrealdb_types::RecordIdKey::Float(f),
+			crate::val::Number::Float(_) => {
+				return Err(anyhow::anyhow!("NaN and ±Infinity are not valid record-id keys"));
+			}
+			crate::val::Number::Decimal(d) => surrealdb_types::RecordIdKey::Decimal(d),
+		}),
 		crate::val::RecordIdKey::String(s) => Ok(surrealdb_types::RecordIdKey::String(s.into())),
 		crate::val::RecordIdKey::Uuid(u) => {
 			Ok(surrealdb_types::RecordIdKey::Uuid(surrealdb_types::Uuid::from(u.0)))
@@ -1670,5 +1685,55 @@ mod tests {
 		let deserialized_sql_value =
 			crate::syn::value_legacy_strand(&json_str, &CommonConfig::default()).unwrap();
 		assert_eq!(deserialized_sql_value, expected_deserialized);
+	}
+
+	// ---- defense-in-depth: `convert_record_id_key_to_public` rejects non-finite floats ----
+	//
+	// `RecordIdKey::Number(Number::Float(NaN | ±∞))` is not constructible
+	// through any blessed path (`from_number`, parser, serde `Deserialize`,
+	// every former-truncation site, etc. all reject non-finite floats), but
+	// the bare enum variants remain reachable in-crate. The parallel
+	// `TryFrom<RecordIdKey> for PublicRecordIdKey` impl at
+	// `val/record_id.rs:631-650` rejects non-finite floats; this function
+	// must match that posture so a hypothetical regression that constructs
+	// the variant directly can't smuggle `NaN` into a client-facing payload
+	// where the receiving CBOR / FlatBuffers / serde decoder would then
+	// reject it with a confusing asymmetric round-trip failure.
+
+	#[test]
+	fn convert_record_id_key_to_public_rejects_nan_float() {
+		let key = crate::val::RecordIdKey::Number(crate::val::Number::Float(f64::NAN));
+		let err = convert_record_id_key_to_public(key).unwrap_err();
+		assert!(
+			err.to_string().contains("NaN and ±Infinity are not valid record-id keys"),
+			"unexpected error: {err}",
+		);
+	}
+
+	#[test]
+	fn convert_record_id_key_to_public_rejects_positive_infinity_float() {
+		let key = crate::val::RecordIdKey::Number(crate::val::Number::Float(f64::INFINITY));
+		let err = convert_record_id_key_to_public(key).unwrap_err();
+		assert!(
+			err.to_string().contains("NaN and ±Infinity are not valid record-id keys"),
+			"unexpected error: {err}",
+		);
+	}
+
+	#[test]
+	fn convert_record_id_key_to_public_rejects_negative_infinity_float() {
+		let key = crate::val::RecordIdKey::Number(crate::val::Number::Float(f64::NEG_INFINITY));
+		let err = convert_record_id_key_to_public(key).unwrap_err();
+		assert!(
+			err.to_string().contains("NaN and ±Infinity are not valid record-id keys"),
+			"unexpected error: {err}",
+		);
+	}
+
+	#[test]
+	fn convert_record_id_key_to_public_accepts_finite_float() {
+		let key = crate::val::RecordIdKey::Number(crate::val::Number::Float(1.5));
+		let public = convert_record_id_key_to_public(key).expect("finite float should convert");
+		assert_eq!(public, PublicRecordIdKey::Float(1.5));
 	}
 }
