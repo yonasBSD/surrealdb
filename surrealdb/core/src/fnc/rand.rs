@@ -63,18 +63,17 @@ impl<T: FromArg> FromArg for NoneOrRange<T> {
 // TODO (Delskayn): Don't agree with the inclusive ranges in the functions here,
 // seems inconsistent with general use of ranges not including the upperbound.
 // These should probably all be exclusive.
-//
-// TODO (Delskayn): Switching of min and max if min > max is also inconsistent
-// with rest of functions and the range type. The functions should either return
-// NONE or an error if the lowerbound of the ranges here are larger then the
-// upperbound.
 pub fn float((NoneOrRange(range),): (NoneOrRange<f64>,)) -> Result<Value> {
 	let v = if let Some((min, max)) = range {
-		if max < min {
-			rand::rng().random_range(max..=min)
-		} else {
-			rand::rng().random_range(min..=max)
-		}
+		ensure!(
+			min <= max,
+			Error::InvalidFunctionArguments {
+				name: String::from("rand::float"),
+				message: "Lowerbound of the range must be less than or equal to the upperbound."
+					.to_string(),
+			}
+		);
+		rand::rng().random_range(min..=max)
 	} else {
 		rand::random::<f64>()
 	};
@@ -138,11 +137,15 @@ pub fn id((Optional(arg1), Optional(arg2)): (Optional<i64>, Optional<i64>)) -> R
 
 pub fn int((NoneOrRange(range),): (NoneOrRange<i64>,)) -> Result<Value> {
 	Ok(if let Some((min, max)) = range {
-		if max < min {
-			rand::rng().random_range(max..=min)
-		} else {
-			rand::rng().random_range(min..=max)
-		}
+		ensure!(
+			min <= max,
+			Error::InvalidFunctionArguments {
+				name: String::from("rand::int"),
+				message: "Lowerbound of the range must be less than or equal to the upperbound."
+					.to_string(),
+			}
+		);
+		rand::rng().random_range(min..=max)
 	} else {
 		rand::random::<i64>()
 	}
@@ -192,14 +195,16 @@ pub fn string((Optional(arg1), Optional(arg2)): (Optional<i64>, Optional<i64>)) 
 }
 
 pub fn duration((dur1, dur2): (Duration, Duration)) -> Result<Value> {
-	// Sort from low to high
-	let (from, to) = if dur2 > dur1 {
-		(dur1, dur2)
-	} else {
-		(dur2, dur1)
-	};
+	ensure!(
+		dur1 <= dur2,
+		Error::InvalidFunctionArguments {
+			name: String::from("rand::duration"),
+			message: "Lowerbound of the range must be less than or equal to the upperbound."
+				.to_string(),
+		}
+	);
 
-	let rand = rand::rng().random_range(from.as_nanos()..=to.as_nanos());
+	let rand = rand::rng().random_range(dur1.as_nanos()..=dur2.as_nanos());
 
 	let nanos = (rand % 1_000_000_000) as u32;
 
@@ -236,24 +241,24 @@ pub fn time((NoneOrRange(range),): (NoneOrRange<Value>,)) -> Result<Value> {
 
 	// Check the function input arguments
 	let (min, max) = if let Some((min, max)) = range {
-		match min {
-			min if (MINIMUM..=LIMIT).contains(&min) => match max {
-				max if min <= max && max <= LIMIT => (min, max),
-				max if max >= MINIMUM && max <= min => (max, min),
-				_ => bail!(Error::InvalidFunctionArguments {
-					name: String::from("rand::time"),
-					message: format!(
-						"To generate a random time, the 2 arguments must be numbers between {MINIMUM} and {LIMIT} seconds from the UNIX epoch or a 'datetime' within the range d'-262143-01-01T00:00:00Z' and +262142-12-31T23:59:59Z'."
-					),
-				}),
-			},
-			_ => bail!(Error::InvalidFunctionArguments {
+		ensure!(
+			(MINIMUM..=LIMIT).contains(&min) && (MINIMUM..=LIMIT).contains(&max),
+			Error::InvalidFunctionArguments {
 				name: String::from("rand::time"),
 				message: format!(
 					"To generate a random time, the 2 arguments must be numbers between {MINIMUM} and {LIMIT} seconds from the UNIX epoch or a 'datetime' within the range d'-262143-01-01T00:00:00Z' and +262142-12-31T23:59:59Z'."
 				),
-			}),
-		}
+			}
+		);
+		ensure!(
+			min <= max,
+			Error::InvalidFunctionArguments {
+				name: String::from("rand::time"),
+				message: "Lowerbound of the range must be less than or equal to the upperbound."
+					.to_string(),
+			}
+		);
+		(min, max)
 	} else {
 		// Datetime between d'0000-01-01T00:00:00Z' and d'9999-12-31T23:59:59Z'
 		(-62167219200, 253402300799)
