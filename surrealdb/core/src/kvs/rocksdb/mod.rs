@@ -8,6 +8,7 @@ mod disk_space_manager;
 mod garbage_collector;
 mod memory_manager;
 mod prefix_extractor;
+mod range_shard;
 #[cfg(test)]
 mod tests;
 
@@ -23,6 +24,7 @@ use commit_coordinator::CommitCoordinator;
 use disk_space_manager::{DiskSpaceManager, DiskSpaceState, TransactionState};
 use garbage_collector::GarbageCollector;
 use memory_manager::MemoryManager;
+use range_shard::{COUNT_PARALLEL_MAX_SHARDS, shard_range};
 use rocksdb::{
 	BottommostLevelCompaction, ColumnFamilyDescriptor, CompactOptions, DBCompactionStyle,
 	DBCompressionType, FlushOptions, LogLevel, OptimisticTransactionDB,
@@ -1482,6 +1484,12 @@ impl Transactable for Transaction {
 	/// entire provided key range without an early-exit limit. It is therefore
 	/// always offloaded to the blocking threadpool to avoid stalling the
 	/// async executor during the full range scan.
+	///
+	/// Writable transactions iterate the inner transaction so that pending
+	/// writes are merged into the count, and run as a single serial scan.
+	/// Read-only transactions shard the range across the affinitypool and
+	/// scan all shards in parallel against a shared snapshot, which is a
+	/// significant speed-up on large ranges (e.g. full-table `COUNT(*)`).
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(rng = rng.sprint()))]
 	async fn count(&self, rng: Range<Key>, version: Option<u64>) -> Result<usize> {
 		// Versioned queries require a versioned datastore
@@ -1492,12 +1500,92 @@ impl Transactable for Transaction {
 		if self.closed() {
 			return Err(Error::TransactionFinished);
 		}
-		// Always offload to the blocking threadpool
-		affinitypool::spawn_local(move || {
-			let guard = self.inner.blocking_lock();
-			self.count_blocking(rng, version, guard)
-		})
-		.await
+		// Writable transactions iterate on the inner transaction so that
+		// pending writes are visible; this cannot safely be sharded across
+		// threads, so we fall back to a single serial scan.
+		if self.write {
+			return affinitypool::spawn_local(move || {
+				// Acquire the inner lock inside the task
+				let guard = self.inner.blocking_lock();
+				// Run the serial count
+				self.count_blocking(rng, version, guard)
+			})
+			.await;
+		}
+		// Decide how many shards to dispatch, bounded by the machine
+		// parallelism so we don't oversubscribe the affinitypool, and
+		// further bounded by `COUNT_PARALLEL_MAX_SHARDS` so very large
+		// CPU counts don't produce many tiny shards that all touch the
+		// same SSTs.
+		let desired = std::thread::available_parallelism()
+			.map(|n| n.get())
+			.unwrap_or(8)
+			.min(COUNT_PARALLEL_MAX_SHARDS);
+		// Compute the disjoint sub-ranges that together cover `[start, end)`.
+		// Returns a single shard when the range is too narrow to split
+		// meaningfully along its first differing byte.
+		let sub_ranges = shard_range(&rng.start, &rng.end, desired);
+		// Fall back to a single serial scan when the range is too narrow
+		// to split: dispatching a single shard would just add the overhead
+		// of an extra task hop with no parallelism benefit.
+		if sub_ranges.len() <= 1 {
+			return affinitypool::spawn_local(move || {
+				// Acquire the inner lock inside the task
+				let guard = self.inner.blocking_lock();
+				// Run the serial count
+				self.count_blocking(rng, version, guard)
+			})
+			.await;
+		}
+		// Build all shard `ReadOptions` under the inner lock so each shard
+		// captures the same snapshot pointer. The lock is dropped before
+		// dispatching shards: the snapshot stays alive for as long as
+		// `inner.tx` is alive (owned by this `Transaction`), and read-only
+		// transactions never take the inner out of the mutex.
+		let scans = {
+			// Acquire the inner lock
+			let guard = self.inner.lock().await;
+			// Get the inner transaction state
+			let inner =
+				guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+			// Build one (sub-range, ReadOptions) pair per shard
+			sub_ranges
+				.into_iter()
+				.map(|(lo, hi)| {
+					// Construct the shard's sub-range
+					let sub_rng = lo..hi;
+					// Build the ReadOptions for this shard
+					let ro = self.count_read_options(&sub_rng, version, inner);
+					(sub_rng, ro)
+				})
+				.collect::<Vec<_>>()
+		};
+		let mut tasks = Vec::with_capacity(scans.len());
+		for (sub_rng, ro) in scans {
+			// Clone the Arc'd handle so each shard owns its own reference
+			let db = self.db.clone();
+			tasks.push(affinitypool::spawn_local(move || -> Result<usize> {
+				// Create the iterator on the database
+				let mut iter = db.raw_iterator_opt(ro);
+				// Seek to the start key
+				iter.seek(&sub_rng.start);
+				// Initialize the per-shard count
+				let mut res: usize = 0;
+				// Count the items
+				while iter.valid() {
+					res += 1;
+					iter.next();
+				}
+				// Catch any iterator errors
+				iter.status()?;
+				// Return the per-shard count
+				Ok(res)
+			}));
+		}
+		// Run all shard scans concurrently and sum the per-shard counts
+		let counts = futures::future::try_join_all(tasks).await?;
+		// Return result
+		Ok(counts.into_iter().sum())
 	}
 
 	/// Retrieve a range of keys.
