@@ -518,7 +518,7 @@ impl Cast for Array {
 				}
 				// checked above
 				let range = range.coerce_to_typed::<i64>().expect("range type checked above");
-				if range.len() > *GENERATION_ALLOCATION_LIMIT {
+				if range.len().is_none_or(|n| n > *GENERATION_ALLOCATION_LIMIT) {
 					return Err(CastError::RangeSizeLimit {
 						value: Box::new(Range::from(range)),
 					});

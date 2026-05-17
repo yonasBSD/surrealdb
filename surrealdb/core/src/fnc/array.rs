@@ -645,7 +645,10 @@ pub fn range((start_range, Optional(end)): (Value, Optional<i64>)) -> Result<Val
 		}
 	};
 
-	limit("array::range", mem::size_of::<Value>().saturating_mul(range.len()))?;
+	limit(
+		"array::range",
+		mem::size_of::<Value>().saturating_mul(range.len().unwrap_or(usize::MAX)),
+	)?;
 
 	Ok(range.iter().map(Value::from).collect())
 }
@@ -664,7 +667,10 @@ pub fn sequence((offset_len, Optional(len)): (i64, Optional<i64>)) -> Result<Val
 	let end = offset.saturating_add(len - 1);
 	let range = TypedRange::from_range(offset..=end);
 
-	limit("array::sequence", mem::size_of::<Value>().saturating_mul(range.len()))?;
+	limit(
+		"array::sequence",
+		mem::size_of::<Value>().saturating_mul(range.len().unwrap_or(usize::MAX)),
+	)?;
 	Ok(range.iter().map(Value::from).collect())
 }
 

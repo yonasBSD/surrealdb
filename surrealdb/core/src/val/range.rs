@@ -280,32 +280,33 @@ impl TypedRange<i64> {
 		}
 	}
 
-	// TODO: Change this to return an option.
+	/// Returns the length of this range, or `None` when the range is unbounded
+	/// on either side or its length does not fit in a `usize`.
 	#[allow(clippy::len_without_is_empty)]
-	pub fn len(&self) -> usize {
+	pub fn len(&self) -> Option<usize> {
 		let end = match self.end {
-			Bound::Unbounded => i64::MAX,
+			Bound::Unbounded => return None,
 			Bound::Included(x) => x,
 			Bound::Excluded(x) => match x.checked_sub(1) {
 				Some(x) => x,
-				None => return 0,
+				None => return Some(0),
 			},
 		};
 
 		let start = match self.start {
-			Bound::Unbounded => i64::MIN,
+			Bound::Unbounded => return None,
 			Bound::Included(x) => x,
 			Bound::Excluded(x) => match x.checked_add(1) {
 				Some(x) => x,
-				None => return 0,
+				None => return Some(0),
 			},
 		};
 
 		if start > end {
-			return 0;
+			return Some(0);
 		}
 
-		usize::try_from(start.abs_diff(end)).unwrap_or(usize::MAX)
+		usize::try_from(start.abs_diff(end)).ok()
 	}
 
 	pub(crate) fn cast_to_array(self) -> Array {
