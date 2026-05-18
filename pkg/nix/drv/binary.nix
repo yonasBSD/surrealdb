@@ -26,6 +26,11 @@ let
     doCheck = false;
     cargoExtraArgs = let flags = [ "--no-default-features" ] ++ featureFlags;
     in builtins.concatStringsSep " " flags;
+    # Limit parallel rustc jobs to avoid OOM on GitHub-hosted runners (7 GB RAM).
+    # The diskann-wide SIMD crates push peak memory over the 7 GB ceiling when
+    # multiple codegen units run concurrently. Building one job at a time keeps
+    # memory manageable at the cost of some build speed.
+    CARGO_BUILD_JOBS = "1";
     
     # Add autoPatchelfHook to fix dynamic library linking for non-static builds
     nativeBuildInputs = (spec.buildSpec.nativeBuildInputs or []) 
