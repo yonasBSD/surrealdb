@@ -28,7 +28,7 @@ use crate::exec::{EvalContext, ExecutionContext, PhysicalExpr, ValueBatch, Value
 use crate::expr::{ControlFlow, ControlFlowExt};
 use crate::idx::planner::ScanDirection;
 use crate::key::record;
-use crate::kvs::{KVKey, Transaction};
+use crate::kvs::{KVKey, KVValue, Transaction};
 use crate::val::{RecordIdKey, TableName, Value};
 
 /// A raw computed field entry before topological sorting:
@@ -259,7 +259,7 @@ pub(crate) fn decode_record(key: &[u8], val: &[u8]) -> Result<Value, ControlFlow
 		key: decoded_key.id,
 	};
 
-	let record = crate::catalog::Record::kv_decode_value_with_id(val, rid)
+	let record = crate::catalog::Record::kv_decode_value(val, rid)
 		.context("Failed to deserialize record")?;
 
 	// Take ownership of the value (zero-cost move for freshly deserialized data)

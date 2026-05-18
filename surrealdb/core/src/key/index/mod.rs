@@ -124,10 +124,13 @@ struct PrefixIds<'a> {
 
 impl crate::kvs::KVKey for PrefixIds<'_> {
 	type ValueType = Vec<u8>;
+
 	fn encode_key(&self) -> anyhow::Result<Vec<u8>> {
 		Ok(storekey::encode_vec_format::<IndexFormat, _>(self)
 			.map_err(|_| crate::err::Error::Unencodable)?)
 	}
+
+	fn value_context(&self) {}
 }
 
 impl<'a> PrefixIds<'a> {
@@ -170,10 +173,13 @@ pub(crate) struct Index<'a> {
 
 impl crate::kvs::KVKey for Index<'_> {
 	type ValueType = RecordId;
+
 	fn encode_key(&self) -> ::anyhow::Result<Vec<u8>> {
 		Ok(storekey::encode_vec_format::<IndexFormat, _>(self)
 			.map_err(|_| crate::err::Error::Unencodable)?)
 	}
+
+	fn value_context(&self) {}
 }
 
 impl Categorise for Index<'_> {

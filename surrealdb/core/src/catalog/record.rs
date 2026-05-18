@@ -65,9 +65,13 @@ const ID_KEY: Strand = Strand::new_static("id");
 const VALUE_OBJECT_PREFIX: &[u8] = &[0x01, 0x0A, 0x01];
 
 impl KVValue for Record {
+	/// The storage key carries the canonical `RecordId`, which the value
+	/// encoder strips from `data` and the value decoder splices back in.
+	type KeyContext = RecordId;
+
 	/// Encode a `Record` for storage, skipping the top-level `id` field of
 	/// `data` if present. The id is reconstructed from the storage key on
-	/// read (see [`Record::kv_decode_value_with_id`]), so storing it in the
+	/// read (see [`Record::kv_decode_value`]), so storing it in the
 	/// serialized payload would be redundant.
 	///
 	/// The output is byte-identical to the `#[revisioned]` derive applied
@@ -119,25 +123,6 @@ impl KVValue for Record {
 		Ok(buf)
 	}
 
-	/// Standard revisioned decode. Callers that need the `id` field
-	/// reconstructed from the storage key should use
-	/// [`Record::kv_decode_value_with_id`] instead — this method does not
-	/// inject one.
-	fn kv_decode_value(bytes: Vec<u8>) -> Result<Self> {
-		Ok(revision::from_slice(&bytes)?)
-	}
-}
-
-impl Record {
-	/// Compile-time guard: every revision of [`Record`] supported on
-	/// disk must have a corresponding arm in
-	/// [`Record::kv_decode_value_with_id`]. Bumping
-	/// `#[revisioned(revision = N)]` on [`Record`] without adding a
-	/// matching `decode_revN_with_id` arm below will trip this
-	/// assertion at `cargo build` time.
-	const _ASSERT_REVISION_DISPATCHER_COVERS_CURRENT: () =
-		assert!(<Record>::REVISION <= 1, "Record revision exceeds the decoder's handled max");
-
 	/// Decode a `Record` and ensure its `data` carries the canonical `id`
 	/// reconstructed from the storage key.
 	///
@@ -146,7 +131,7 @@ impl Record {
 	/// construction, avoiding an O(n) post-decode shift. For older
 	/// revisions or non-Object payloads we fall back to the standard
 	/// derived deserializer and then assign the id unconditionally.
-	pub(crate) fn kv_decode_value_with_id(bytes: &[u8], rid: RecordId) -> Result<Record> {
+	fn kv_decode_value(bytes: &[u8], rid: RecordId) -> Result<Record> {
 		let mut reader: &[u8] = bytes;
 		let record_rev = <u16 as DeserializeRevisioned>::deserialize_revisioned(&mut reader)?;
 		match record_rev {
@@ -154,6 +139,16 @@ impl Record {
 			x => Err(anyhow!("Invalid revision `{x}` for type `Record`")),
 		}
 	}
+}
+
+impl Record {
+	/// Compile-time guard: every revision of [`Record`] supported on
+	/// disk must have a corresponding arm in [`Record::kv_decode_value`].
+	/// Bumping `#[revisioned(revision = N)]` on [`Record`] without adding
+	/// a matching `decode_revN_with_id` arm will trip this assertion at
+	/// `cargo build` time.
+	const _ASSERT_REVISION_DISPATCHER_COVERS_CURRENT: () =
+		assert!(<Record>::REVISION <= 1, "Record revision exceeds the decoder's handled max");
 
 	/// Decode a `Record` revision-1 body (i.e. after the Record revision
 	/// tag has already been consumed), splicing `id` inline when the
@@ -275,6 +270,16 @@ mod tests {
 	}
 
 	#[test]
+	fn bool_record_encoded_size_is_stable() {
+		// Pin the encoded byte length for a minimal `Record { data: Bool(true) }`
+		// so accidental changes to the revisioned wire format (e.g. extra
+		// metadata bytes, a Bool encoding change) trip a test. Previously
+		// covered by the generic `test_serialize_deserialize` rstest, which
+		// dropped its Record case when the `KeyContext = ()` bound was added.
+		assert_eq!(Record::new(Value::Bool(true)).kv_encode_value().unwrap().len(), 5);
+	}
+
+	#[test]
 	fn custom_encode_matches_derive_encode_of_stripped_record() {
 		// The custom `KVValue` encoder is hand-built on top of the
 		// hard-coded `VALUE_OBJECT_PREFIX` bytes and must remain
@@ -363,7 +368,7 @@ mod tests {
 		let original = Record::new(Value::Object(obj));
 
 		let bytes = original.kv_encode_value().unwrap();
-		let decoded = Record::kv_decode_value_with_id(&bytes, rid.clone()).unwrap();
+		let decoded = Record::kv_decode_value(&bytes, rid.clone()).unwrap();
 		assert_eq!(decoded, original);
 		// And id must be present at the top level.
 		match &decoded.data {
@@ -389,7 +394,7 @@ mod tests {
 		// Use the standard revision encoder (matches the pre-refactor
 		// on-disk format produced *before* the runtime strip ran).
 		let bytes = revision::to_vec(&record).unwrap();
-		let decoded = Record::kv_decode_value_with_id(&bytes, rid).unwrap();
+		let decoded = Record::kv_decode_value(&bytes, rid).unwrap();
 		assert_eq!(decoded, record);
 	}
 
@@ -407,7 +412,7 @@ mod tests {
 		let original = Record::new(Value::Object(obj));
 
 		let bytes = original.kv_encode_value().unwrap();
-		let decoded = Record::kv_decode_value_with_id(&bytes, rid.clone()).unwrap();
+		let decoded = Record::kv_decode_value(&bytes, rid.clone()).unwrap();
 
 		match &decoded.data {
 			Value::Object(o) => {
@@ -430,7 +435,7 @@ mod tests {
 		let original = Record::new(Value::Object(obj));
 
 		let bytes = original.kv_encode_value().unwrap();
-		let decoded = Record::kv_decode_value_with_id(&bytes, rid).unwrap();
+		let decoded = Record::kv_decode_value(&bytes, rid).unwrap();
 		match &decoded.data {
 			Value::Object(o) => {
 				let keys: Vec<&str> = o.0.iter().map(|(k, _)| k.as_str()).collect();
@@ -451,7 +456,7 @@ mod tests {
 		let original = Record::new(Value::Object(obj));
 
 		let bytes = original.kv_encode_value().unwrap();
-		let decoded = Record::kv_decode_value_with_id(&bytes, rid).unwrap();
+		let decoded = Record::kv_decode_value(&bytes, rid).unwrap();
 		match &decoded.data {
 			Value::Object(o) => {
 				let keys: Vec<&str> = o.0.iter().map(|(k, _)| k.as_str()).collect();
@@ -486,7 +491,7 @@ mod tests {
 		let record = Record::new(Value::Object(top));
 
 		let bytes = record.kv_encode_value().unwrap();
-		let decoded = Record::kv_decode_value_with_id(&bytes, rid.clone()).unwrap();
+		let decoded = Record::kv_decode_value(&bytes, rid.clone()).unwrap();
 
 		match &decoded.data {
 			Value::Object(o) => {

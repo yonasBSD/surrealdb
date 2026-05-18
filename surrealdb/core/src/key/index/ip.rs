@@ -29,10 +29,13 @@ pub(crate) struct Ip<'a> {
 
 impl KVKey for Ip<'_> {
 	type ValueType = PrimaryAppending;
+
 	fn encode_key(&self) -> ::anyhow::Result<Vec<u8>> {
 		Ok(storekey::encode_vec_format::<IndexFormat, _>(self)
 			.map_err(|_| crate::err::Error::Unencodable)?)
 	}
+
+	fn value_context(&self) {}
 }
 
 impl<'a> Ip<'a> {

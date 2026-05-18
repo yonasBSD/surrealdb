@@ -1354,9 +1354,23 @@ pub fn record_array() -> Record {
 	])))
 }
 
+/// Sentinel `RecordId` used as the decode-time `KeyContext` for
+/// `Record` compat tests. `Record::kv_decode_value` splices the rid
+/// into the decoded `data` Object on the fast path; expected fixtures
+/// for Object-data records must therefore include `id: test_record_rid()`
+/// so `decoded == expected`. Encode strips the top-level `id` again, so
+/// the byte constants in `v3_0_0_*.rs` are unaffected by this addition.
+pub fn test_record_rid() -> RecordId {
+	RecordId {
+		table: TableName::from("compat_test"),
+		key: RecordIdKey::String(Strand::new_static("fixture")),
+	}
+}
+
 /// Record with object data
 pub fn record_object() -> Record {
 	let mut obj = Object::default();
+	obj.insert("id".to_string(), Value::RecordId(test_record_rid()));
 	obj.insert("name".to_string(), Value::String(Strand::new_static("Alice")));
 	obj.insert("age".to_string(), Value::Number(Number::Int(30)));
 	obj.insert("active".to_string(), Value::Bool(true));
@@ -1374,7 +1388,9 @@ pub fn record_set() -> Record {
 
 /// Record with metadata (Edge type)
 pub fn record_with_metadata() -> Record {
-	let mut record = Record::new(Value::Object(Object::default()));
+	let mut obj = Object::default();
+	obj.insert("id".to_string(), Value::RecordId(test_record_rid()));
+	let mut record = Record::new(Value::Object(obj));
 	record.set_record_type(RecordType::Edge);
 	record
 }
@@ -1382,6 +1398,7 @@ pub fn record_with_metadata() -> Record {
 /// Record with explicit Table metadata type
 pub fn record_with_table_metadata() -> Record {
 	let mut obj = Object::default();
+	obj.insert("id".to_string(), Value::RecordId(test_record_rid()));
 	obj.insert("name".to_string(), Value::String(Strand::new_static("Test Record")));
 	let mut record = Record::new(Value::Object(obj));
 	record.set_record_type(RecordType::Table);

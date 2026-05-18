@@ -48,6 +48,8 @@ pub(crate) struct DiskAnnState {
 }
 
 impl KVValue for DiskAnnState {
+	type KeyContext = ();
+
 	#[inline]
 	fn kv_encode_value(&self) -> anyhow::Result<Vec<u8>> {
 		let mut val = Vec::new();
@@ -56,8 +58,8 @@ impl KVValue for DiskAnnState {
 	}
 
 	#[inline]
-	fn kv_decode_value(val: Vec<u8>) -> anyhow::Result<Self> {
-		Ok(DeserializeRevisioned::deserialize_revisioned(&mut val.as_slice())?)
+	fn kv_decode_value(mut val: &[u8], _: ()) -> anyhow::Result<Self> {
+		Ok(DeserializeRevisioned::deserialize_revisioned(&mut val)?)
 	}
 }
 
@@ -72,6 +74,8 @@ pub(crate) struct DiskAnnElement {
 }
 
 impl KVValue for DiskAnnElement {
+	type KeyContext = ();
+
 	#[inline]
 	fn kv_encode_value(&self) -> anyhow::Result<Vec<u8>> {
 		let mut val = Vec::new();
@@ -80,8 +84,8 @@ impl KVValue for DiskAnnElement {
 	}
 
 	#[inline]
-	fn kv_decode_value(val: Vec<u8>) -> anyhow::Result<Self> {
-		Ok(DeserializeRevisioned::deserialize_revisioned(&mut val.as_slice())?)
+	fn kv_decode_value(mut val: &[u8], _: ()) -> anyhow::Result<Self> {
+		Ok(DeserializeRevisioned::deserialize_revisioned(&mut val)?)
 	}
 }
 
@@ -94,6 +98,8 @@ pub(crate) struct DiskAnnNode {
 }
 
 impl KVValue for DiskAnnNode {
+	type KeyContext = ();
+
 	#[inline]
 	fn kv_encode_value(&self) -> anyhow::Result<Vec<u8>> {
 		let mut val = Vec::new();
@@ -102,8 +108,8 @@ impl KVValue for DiskAnnNode {
 	}
 
 	#[inline]
-	fn kv_decode_value(val: Vec<u8>) -> anyhow::Result<Self> {
-		Ok(DeserializeRevisioned::deserialize_revisioned(&mut val.as_slice())?)
+	fn kv_decode_value(mut val: &[u8], _: ()) -> anyhow::Result<Self> {
+		Ok(DeserializeRevisioned::deserialize_revisioned(&mut val)?)
 	}
 }
 

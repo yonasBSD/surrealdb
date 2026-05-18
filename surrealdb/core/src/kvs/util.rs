@@ -28,14 +28,17 @@ pub fn to_prefix_range<K: KVKey>(key: &K) -> Result<Range<Vec<u8>>> {
 
 /// Takes an iterator of byte slices and deserializes the byte slices to the
 /// expected type, returning an error if any of the values fail to serialize.
+///
+/// Bound to `KeyContext = ()` to prevent accidental use on `Record`
+/// (whose decode requires a `RecordId` from the storage key).
 pub fn deserialize_cache<'a, I, T>(iter: I) -> Result<Arc<[T]>>
 where
-	T: KVValue,
+	T: KVValue<KeyContext = ()>,
 	I: Iterator<Item = &'a [u8]>,
 {
 	let mut buf = Vec::new();
 	for slice in iter {
-		buf.push(T::kv_decode_value(slice.to_vec())?)
+		buf.push(T::kv_decode_value(slice, ())?)
 	}
 	Ok(Arc::from(buf))
 }

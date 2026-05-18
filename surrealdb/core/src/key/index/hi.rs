@@ -26,10 +26,13 @@ pub(crate) struct Hi<'a> {
 
 impl crate::kvs::KVKey for Hi<'_> {
 	type ValueType = u64;
+
 	fn encode_key(&self) -> ::anyhow::Result<Vec<u8>> {
 		Ok(::storekey::encode_vec_format::<IndexFormat, _>(self)
 			.map_err(|_| crate::err::Error::Unencodable)?)
 	}
+
+	fn value_context(&self) {}
 }
 
 impl<'a> Hi<'a> {

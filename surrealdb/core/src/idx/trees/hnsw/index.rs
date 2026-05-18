@@ -368,7 +368,7 @@ impl HnswIndex {
 				if ctx.is_done(Some(*count)).await? {
 					bail!(Error::QueryCancelled)
 				}
-				let pending = VectorPendingUpdate::kv_decode_value(value.clone())?;
+				let pending = VectorPendingUpdate::kv_decode_value(&value, ())?;
 				let pending = Self::append_pending_to_operation(pending);
 				if !builder.add(key, value, pending) {
 					return Ok(());
@@ -403,7 +403,7 @@ impl HnswIndex {
 					bail!(Error::QueryCancelled)
 				}
 				let hr = HnswRecordPending::decode_key(&key)?;
-				let pending = HnswRecordPendingUpdate::kv_decode_value(value.clone())?;
+				let pending = HnswRecordPendingUpdate::kv_decode_value(&value, ())?;
 				let pending = Self::record_pending_to_operation(hr.id.into_owned(), pending);
 				if !builder.add(key, value, pending) {
 					return Ok(());
@@ -738,7 +738,7 @@ impl HnswIndex {
 				if ctx.is_done(Some(count)).await? {
 					bail!(Error::QueryCancelled)
 				}
-				let pending = VectorPendingUpdate::kv_decode_value(v)?;
+				let pending = VectorPendingUpdate::kv_decode_value(&v, ())?;
 				collector(Self::append_pending_to_operation(pending));
 				count += 1;
 			}
@@ -754,7 +754,7 @@ impl HnswIndex {
 					bail!(Error::QueryCancelled)
 				}
 				let hr = HnswRecordPending::decode_key(&key)?;
-				let pending = HnswRecordPendingUpdate::kv_decode_value(value)?;
+				let pending = HnswRecordPendingUpdate::kv_decode_value(&value, ())?;
 				collector(Self::record_pending_to_operation(hr.id.into_owned(), pending));
 				count += 1;
 			}

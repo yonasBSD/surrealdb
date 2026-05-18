@@ -72,6 +72,8 @@ pub(crate) struct HnswState {
 }
 
 impl KVValue for HnswState {
+	type KeyContext = ();
+
 	#[inline]
 	fn kv_encode_value(&self) -> Result<Vec<u8>> {
 		let mut val = Vec::new();
@@ -80,8 +82,8 @@ impl KVValue for HnswState {
 	}
 
 	#[inline]
-	fn kv_decode_value(val: Vec<u8>) -> Result<Self> {
-		Ok(DeserializeRevisioned::deserialize_revisioned(&mut val.as_slice())?)
+	fn kv_decode_value(mut val: &[u8], _: ()) -> Result<Self> {
+		Ok(DeserializeRevisioned::deserialize_revisioned(&mut val)?)
 	}
 }
 

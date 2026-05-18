@@ -65,13 +65,15 @@ impl RecordIdEncoding {
 }
 
 impl KVValue for RecordIdEncoding {
+	type KeyContext = ();
+
 	#[inline]
 	fn kv_encode_value(&self) -> Result<Vec<u8>> {
 		Ok(self.as_u16().to_be_bytes().to_vec())
 	}
 
 	#[inline]
-	fn kv_decode_value(v: Vec<u8>) -> Result<Self> {
+	fn kv_decode_value(v: &[u8], _: ()) -> Result<Self> {
 		let bin = v.try_into().map_err(|_| {
 			Error::Serialization("RecordIdEncoding value must be exactly 2 bytes".to_string())
 		})?;
@@ -87,7 +89,7 @@ mod tests {
 	fn encode_decode_roundtrip() {
 		for mode in [RecordIdEncoding::Compat, RecordIdEncoding::FullNew] {
 			let encoded = mode.kv_encode_value().unwrap();
-			let decoded = RecordIdEncoding::kv_decode_value(encoded).unwrap();
+			let decoded = RecordIdEncoding::kv_decode_value(&encoded, ()).unwrap();
 			assert_eq!(decoded, mode);
 		}
 	}
@@ -104,12 +106,12 @@ mod tests {
 
 	#[test]
 	fn decode_rejects_unknown() {
-		assert!(RecordIdEncoding::kv_decode_value(vec![0, 2]).is_err());
+		assert!(RecordIdEncoding::kv_decode_value(&[0, 2], ()).is_err());
 	}
 
 	#[test]
 	fn decode_rejects_wrong_length() {
-		assert!(RecordIdEncoding::kv_decode_value(vec![0]).is_err());
-		assert!(RecordIdEncoding::kv_decode_value(vec![0, 0, 0]).is_err());
+		assert!(RecordIdEncoding::kv_decode_value(&[0], ()).is_err());
+		assert!(RecordIdEncoding::kv_decode_value(&[0, 0, 0], ()).is_err());
 	}
 }

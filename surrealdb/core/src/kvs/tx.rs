@@ -3,6 +3,11 @@
 //! Cache paths use `Entry::Any(val.clone())` for concrete `Arc<T>` values that must coerce to
 //! `Arc<dyn Any + Send + Sync>`; `Arc::clone(&val)` does not perform that unsized coercion.
 #![allow(clippy::clone_on_ref_ptr)]
+// `Transaction`'s pub methods take `K: KVKey` / `K::ValueType: KVValue`.
+// Both traits are `pub(crate)` (their `pub` declarations are gated by
+// `pub(crate) use` re-exports in `kvs/mod.rs`), so the lint flags every
+// such method. The visibility is intentional — silence at module scope.
+#![allow(private_bounds, private_interfaces)]
 
 use std::any::Any;
 use std::fmt::Debug;
@@ -363,7 +368,7 @@ impl IndexBuildReservationRelease {
 					return Err(err.into());
 				}
 			};
-			let current = IndexBuildState::kv_decode_value(current_state.clone())?;
+			let current = IndexBuildState::kv_decode_value(&current_state, ())?;
 			if current.generation != br.generation
 				|| !matches!(current.phase, IndexBuildPhase::Building | IndexBuildPhase::Closing)
 			{
@@ -749,15 +754,17 @@ impl Transaction {
 	where
 		K: KVKey + Debug,
 	{
-		let key = key.encode_key()?;
-		let key_bytes = key.len() as u64;
-		let val = self.tr.get(key, version).await.map_err(Error::from)?;
+		let encoded = key.encode_key()?;
+		let key_bytes = encoded.len() as u64;
+		let val = self.tr.get(encoded, version).await.map_err(Error::from)?;
 		let (keys_found, value_bytes) = match &val {
 			Some(v) => (1, v.len() as u64),
 			None => (0, 0),
 		};
 		self.metrics.record_get(keys_found, key_bytes, value_bytes);
-		val.map(K::ValueType::kv_decode_value).transpose()
+		// Build the decode context only on a hit. For `RecordKey` this
+		// avoids a `RecordId` clone (table + key) on every miss.
+		val.map(|v| K::ValueType::kv_decode_value(&v, key.value_context())).transpose()
 	}
 
 	/// Retrieve a batch set of keys from the datastore.
@@ -770,14 +777,15 @@ impl Transaction {
 	where
 		K: KVKey + Debug,
 	{
-		let keys = keys.iter().map(|k| k.encode_key()).collect::<Result<Vec<_>>>()?;
-		let key_bytes: u64 = keys.iter().map(|k| k.len() as u64).sum();
-		let res = self.tr.getm(keys, version).await.map_err(Error::from)?;
+		let encoded_keys: Vec<_> = keys.iter().map(|k| k.encode_key()).collect::<Result<_>>()?;
+		let key_bytes: u64 = encoded_keys.iter().map(|k| k.len() as u64).sum();
+		let res = self.tr.getm(encoded_keys, version).await.map_err(Error::from)?;
 		self.metrics.record_get(res.records, key_bytes, res.value_bytes);
 		res.values
 			.into_iter()
-			.map(|v| match v {
-				Some(v) => K::ValueType::kv_decode_value(v).map(Some),
+			.zip(keys)
+			.map(|(v, k)| match v {
+				Some(v) => K::ValueType::kv_decode_value(&v, k.value_context()).map(Some),
 				None => Ok(None),
 			})
 			.collect()
@@ -785,23 +793,30 @@ impl Transaction {
 
 	/// Retrieve a specific prefix of keys from the datastore.
 	///
-	/// This function fetches key-value pairs from the underlying datastore in
-	/// grouped batches.
+	/// Range scans are intentionally restricted to value types with
+	/// `KeyContext = ()`: per-row context isn't available without decoding
+	/// each row's storage key. Callers that need to scan a record range
+	/// must decode the storage key per row and reconstruct the context
+	/// themselves.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip_all)]
 	pub async fn getp<K>(&self, key: &K, version: Option<u64>) -> Result<Vec<(Key, K::ValueType)>>
 	where
 		K: KVKey + Debug,
+		K::ValueType: KVValue<KeyContext = ()>,
 	{
 		let key = key.encode_key()?;
 		let res = self.tr.getp(key, version).await.map_err(Error::from)?;
 		self.metrics.record_scan(res.values.len() as u64, res.key_bytes, res.value_bytes);
-		res.values.into_iter().map(|(k, v)| Ok((k, K::ValueType::kv_decode_value(v)?))).collect()
+		res.values
+			.into_iter()
+			.map(|(k, v)| Ok((k, K::ValueType::kv_decode_value(&v, ())?)))
+			.collect()
 	}
 
 	/// Retrieve a specific range of keys from the datastore.
 	///
-	/// This function fetches key-value pairs from the underlying datastore in
-	/// grouped batches.
+	/// As with [`Self::getp`], restricted to value types with
+	/// `KeyContext = ()`.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip_all)]
 	pub async fn getr<K>(
 		&self,
@@ -810,12 +825,16 @@ impl Transaction {
 	) -> Result<Vec<(Key, K::ValueType)>>
 	where
 		K: KVKey + Debug,
+		K::ValueType: KVValue<KeyContext = ()>,
 	{
 		let beg = rng.start.encode_key()?;
 		let end = rng.end.encode_key()?;
 		let res = self.tr.getr(beg..end, version).await.map_err(Error::from)?;
 		self.metrics.record_scan(res.values.len() as u64, res.key_bytes, res.value_bytes);
-		res.values.into_iter().map(|(k, v)| Ok((k, K::ValueType::kv_decode_value(v)?))).collect()
+		res.values
+			.into_iter()
+			.map(|(k, v)| Ok((k, K::ValueType::kv_decode_value(&v, ())?)))
+			.collect()
 	}
 
 	/// Delete a key from the datastore.
@@ -3192,22 +3211,13 @@ impl TableProvider for Transaction {
 			async move {
 				// Cache is not versioned
 				if version.is_some() {
-					// Fetch the record from the datastore
+					// Fetch the record from the datastore. `tx.get` decodes
+					// using the storage key, so the canonical `id` is
+					// spliced back in automatically (see
+					// `RecordKey::value_context`).
 					let key = crate::key::record::new(ns, db, tb, id);
-					match self.get_raw(&key, version).await? {
-						// The value exists in the datastore
-						Some(bytes) => {
-							// Create the record id
-							let rid = RecordId {
-								table: tb.to_owned(),
-								key: id.clone(),
-							};
-							// Decode the record
-							let record = Record::kv_decode_value_with_id(&bytes, rid)?;
-							let record = record.into_read_only();
-							Ok(record)
-						}
-						// The value is not in the datastore
+					match self.get(&key, version).await? {
+						Some(record) => Ok(record.into_read_only()),
 						None => Ok(Arc::new(Default::default())),
 					}
 				} else {
@@ -3217,24 +3227,14 @@ impl TableProvider for Transaction {
 						Some(val) => val.try_into_record(),
 						// The entry is not in the cache
 						None => {
-							// Fetch the record from the datastore
 							let key = crate::key::record::new(ns, db, tb, id);
-							match self.get_raw(&key, None).await? {
-								// The value exists in the datastore
-								Some(bytes) => {
-									// Create the record id
-									let rid = RecordId {
-										table: tb.to_owned(),
-										key: id.clone(),
-									};
-									// Decode the record
-									let record = Record::kv_decode_value_with_id(&bytes, rid)?;
+							match self.get(&key, None).await? {
+								Some(record) => {
 									let record = record.into_read_only();
 									let entry = cache::tx::Entry::Val(Arc::clone(&record));
 									self.cache.insert(qey, entry);
 									Ok(record)
 								}
-								// The value is not in the datastore
 								None => Ok(Arc::new(Default::default())),
 							}
 						}
@@ -3261,27 +3261,22 @@ impl TableProvider for Transaction {
 				}
 				// Cache is not versioned
 				if version.is_some() {
-					// Fetch the records from the datastore
+					// `tx.getm` decodes each value with its own key's
+					// context (`RecordKey::value_context`), so the
+					// canonical `id` is spliced into the decoded record
+					// automatically.
 					let keys: Vec<crate::key::record::RecordKey<'_>> = rids
 						.iter()
 						.map(|rid| crate::key::record::new(ns, db, &rid.table, &rid.key))
 						.collect();
-					let values = self.getm_raw(keys, version).await?;
-					// Decode each payload, injecting the record id from the key
-					let mut out: Vec<Arc<Record>> = Vec::with_capacity(rids.len());
-					for (opt_bytes, rid) in values.into_iter().zip(rids) {
-						let record = match opt_bytes {
-							// The value exists in the datastore
-							Some(bytes) => {
-								// Decode the record
-								let record = Record::kv_decode_value_with_id(&bytes, rid.clone())?;
-								record.into_read_only()
-							}
-							// The value is not in the datastore
+					let values = self.getm(keys, version).await?;
+					let out: Vec<Arc<Record>> = values
+						.into_iter()
+						.map(|opt| match opt {
+							Some(record) => record.into_read_only(),
 							None => Arc::new(Default::default()),
-						};
-						out.push(record);
-					}
+						})
+						.collect();
 					return Ok(out);
 				}
 				// Phase 1: check cache, collect hits and indices of misses
@@ -3302,14 +3297,11 @@ impl TableProvider for Transaction {
 						.iter()
 						.map(|(_, rid)| crate::key::record::new(ns, db, &rid.table, &rid.key))
 						.collect();
-					let values = self.getm_raw(keys, None).await?;
-					// Phase 3: decode each payload, populate the cache, merge into output
-					for ((i, rid), opt_bytes) in uncached_rids.into_iter().zip(values) {
-						let record = match opt_bytes {
-							// The value exists in the datastore
-							Some(bytes) => {
-								// Decode the record
-								let record = Record::kv_decode_value_with_id(&bytes, rid.clone())?;
+					let values = self.getm(keys, None).await?;
+					// Phase 3: populate cache + merge into output
+					for ((i, rid), opt) in uncached_rids.into_iter().zip(values) {
+						let record = match opt {
+							Some(record) => {
 								let record = record.into_read_only();
 								// Only populate the cache when the caller requests
 								// ReadWrite; ReadOnly avoids eviction churn during
@@ -3326,7 +3318,6 @@ impl TableProvider for Transaction {
 								}
 								record
 							}
-							// The value is not in the datastore
 							None => Arc::new(Default::default()),
 						};
 						out[i] = Some(record);

@@ -41,6 +41,8 @@ impl KVKey for HnswRecordPending<'_> {
 		Ok(storekey::encode_vec_format::<IndexFormat, _>(self)
 			.map_err(|_| crate::err::Error::Unencodable)?)
 	}
+
+	fn value_context(&self) {}
 }
 
 impl<'a> HnswRecordPending<'a> {

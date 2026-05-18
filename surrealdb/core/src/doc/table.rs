@@ -323,8 +323,15 @@ impl Document {
 
 		let k = key::record::new(db.namespace_id, db.database_id, view_table_name, &key);
 		let mut action = Action::Update;
-		let mut record = if let Some(record) = tx.get(&k, None).await? {
-			record
+		let mut record = if let Some(bytes) = tx.get_raw(&k, None).await? {
+			// View-table aggregation rows store their `data` as an `Object`
+			// without an `id` field (the group key is the row's identity
+			// but is not duplicated into the body). Decoding via
+			// `Record::kv_decode_value` would splice the id back from the
+			// key, which is visible in event-trigger `$before`/`$after`
+			// payloads and changes pre-existing language-test semantics.
+			// Decode raw to preserve the on-disk shape exactly.
+			revision::from_slice::<Record>(&bytes)?
 		} else {
 			action = Action::Create;
 			Record {
@@ -431,8 +438,11 @@ impl Document {
 		let tx = ctx.tx();
 
 		let k = key::record::new(db.namespace_id, db.database_id, view_table_name, &key);
-		let mut record = if let Some(record) = tx.get(&k, None).await? {
-			record
+		// View-table aggregation rows store `data` without an `id`; see the
+		// note on the matching read in the `Update` path above. Use raw
+		// decode so we don't splice the group key back into `data`.
+		let mut record = if let Some(bytes) = tx.get_raw(&k, None).await? {
+			revision::from_slice::<Record>(&bytes)?
 		} else {
 			fail!("Deletion for a view but no record exists for that view")
 		};
@@ -807,8 +817,11 @@ impl Document {
 		let tx = ctx.tx();
 
 		let k = key::record::new(db.namespace_id, db.database_id, view_table_name, &key);
-		let mut record = if let Some(record) = tx.get(&k, None).await? {
-			record
+		// View-table aggregation rows store `data` without an `id`; see the
+		// note on the matching read in the `Update` path above. Use raw
+		// decode so we don't splice the group key back into `data`.
+		let mut record = if let Some(bytes) = tx.get_raw(&k, None).await? {
+			revision::from_slice::<Record>(&bytes)?
 		} else {
 			fail!("Deletion for a view but no record exists for that view")
 		};

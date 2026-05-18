@@ -8,7 +8,6 @@ use uuid::Uuid;
 
 use super::*;
 use crate::catalog::auth::AuthLimit;
-use crate::catalog::record::Record;
 use crate::catalog::schema::base::Base;
 use crate::expr::field::Selector;
 use crate::expr::{
@@ -239,14 +238,13 @@ use crate::val::{Datetime, TableName, Value};
 	comment: Some("comment".to_string()),
 	base: crate::catalog::schema::base::Base::Root,
 }, 40)]
-#[case::record(Record::new(Value::Bool(true)), 5)]
 fn test_serialize_deserialize<T>(#[case] original: T, #[case] expected_encoded_size: usize)
 where
-	T: KVValue + std::fmt::Debug + PartialEq,
+	T: KVValue<KeyContext = ()> + std::fmt::Debug + PartialEq,
 {
 	let encoded = original.kv_encode_value().unwrap();
 	assert_eq!(encoded.len(), expected_encoded_size);
 
-	let decoded = T::kv_decode_value(encoded).unwrap();
+	let decoded = T::kv_decode_value(&encoded, ()).unwrap();
 	assert_eq!(decoded, original);
 }

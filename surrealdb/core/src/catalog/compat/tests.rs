@@ -20,15 +20,24 @@ use crate::val::{RecordId, RecordIdKey};
 
 /// Macro to generate backwards compatibility tests for a fixture across multiple versions.
 ///
-/// This macro creates tests that:
-/// 1. Decode the fixture bytes using `kv_decode_value`
-/// 2. Compare the decoded value against the expected fixture value
-/// 3. Fail loudly if decoding fails OR if values don't match
-///
-/// For each version in the list, a test function is generated with the name
-/// `{version}_{base_name}`.
+/// Decode goes through the real `KVValue::kv_decode_value` path so the
+/// test exercises the same code production uses. Two arms:
+/// * 5-arg form (default): for value types whose `KeyContext = ()`.
+/// * 6-arg form (with `ctx`): for `Record`, whose decode splices the `RecordId` argument into the
+///   resulting `data` Object. Pass `fixtures::test_record_rid()` for those; Object-data Record
+///   fixtures are built to include the same rid as their `id` field so the decode/expected
+///   comparison lines up.
 macro_rules! compat_test {
+	// 5-arg form: KeyContext = () (default context).
 	($base_name:ident, $type:ty, $const_name:ident, $expected:expr, [$($version:ident),+ $(,)?]) => {
+		compat_test!(@inner $base_name, $type, $const_name, $expected, (), [$($version),+]);
+	};
+	// 6-arg form: explicit context (for `Record`, with `RecordId`).
+	($base_name:ident, $type:ty, $const_name:ident, $expected:expr, $ctx:expr, [$($version:ident),+ $(,)?]) => {
+		compat_test!(@inner $base_name, $type, $const_name, $expected, $ctx, [$($version),+]);
+	};
+	// Internal generator.
+	(@inner $base_name:ident, $type:ty, $const_name:ident, $expected:expr, $ctx:expr, [$($version:ident),+ $(,)?]) => {
 		$(
 			paste::paste! {
 				#[test]
@@ -36,7 +45,7 @@ macro_rules! compat_test {
 					let fixture_bytes = [<$version>]::$const_name;
 
 					// Attempt to decode - this MUST succeed for backwards compatibility
-					let decoded = <$type>::kv_decode_value(fixture_bytes.to_vec()).unwrap_or_else(|e| {
+					let decoded = <$type>::kv_decode_value(fixture_bytes, $ctx).unwrap_or_else(|e| {
 						panic!(
 							concat!(
 								"BACKWARDS COMPATIBILITY BROKEN: Failed to decode ",
@@ -471,6 +480,7 @@ compat_test!(
 	Record,
 	RECORD_NONE,
 	fixtures::record_none(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -478,6 +488,7 @@ compat_test!(
 	Record,
 	RECORD_NULL,
 	fixtures::record_null(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -485,6 +496,7 @@ compat_test!(
 	Record,
 	RECORD_BOOL,
 	fixtures::record_bool(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -492,6 +504,7 @@ compat_test!(
 	Record,
 	RECORD_NUMBER_INT,
 	fixtures::record_number_int(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -499,6 +512,7 @@ compat_test!(
 	Record,
 	RECORD_NUMBER_FLOAT,
 	fixtures::record_number_float(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -506,6 +520,7 @@ compat_test!(
 	Record,
 	RECORD_NUMBER_DECIMAL,
 	fixtures::record_number_decimal(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -513,6 +528,7 @@ compat_test!(
 	Record,
 	RECORD_STRING,
 	fixtures::record_string(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -520,6 +536,7 @@ compat_test!(
 	Record,
 	RECORD_BYTES,
 	fixtures::record_bytes(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -527,6 +544,7 @@ compat_test!(
 	Record,
 	RECORD_DURATION,
 	fixtures::record_duration(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -534,6 +552,7 @@ compat_test!(
 	Record,
 	RECORD_DATETIME,
 	fixtures::record_datetime(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -541,6 +560,7 @@ compat_test!(
 	Record,
 	RECORD_UUID,
 	fixtures::record_uuid(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -548,6 +568,7 @@ compat_test!(
 	Record,
 	RECORD_GEOMETRY_POINT,
 	fixtures::record_geometry_point(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -555,6 +576,7 @@ compat_test!(
 	Record,
 	RECORD_GEOMETRY_LINE,
 	fixtures::record_geometry_line(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -562,6 +584,7 @@ compat_test!(
 	Record,
 	RECORD_GEOMETRY_POLYGON,
 	fixtures::record_geometry_polygon(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -569,6 +592,7 @@ compat_test!(
 	Record,
 	RECORD_GEOMETRY_MULTI_POINT,
 	fixtures::record_geometry_multi_point(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -576,6 +600,7 @@ compat_test!(
 	Record,
 	RECORD_GEOMETRY_MULTI_LINE,
 	fixtures::record_geometry_multi_line(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -583,6 +608,7 @@ compat_test!(
 	Record,
 	RECORD_GEOMETRY_MULTI_POLYGON,
 	fixtures::record_geometry_multi_polygon(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -590,6 +616,7 @@ compat_test!(
 	Record,
 	RECORD_GEOMETRY_COLLECTION,
 	fixtures::record_geometry_collection(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -597,6 +624,7 @@ compat_test!(
 	Record,
 	RECORD_TABLE,
 	fixtures::record_table(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -604,6 +632,7 @@ compat_test!(
 	Record,
 	RECORD_RECORDID,
 	fixtures::record_recordid(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -611,6 +640,7 @@ compat_test!(
 	Record,
 	RECORD_FILE,
 	fixtures::record_file(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -618,6 +648,7 @@ compat_test!(
 	Record,
 	RECORD_RANGE_UNBOUNDED,
 	fixtures::record_range_unbounded(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -625,6 +656,7 @@ compat_test!(
 	Record,
 	RECORD_RANGE_BOUNDED,
 	fixtures::record_range_bounded(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -632,6 +664,7 @@ compat_test!(
 	Record,
 	RECORD_REGEX,
 	fixtures::record_regex(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -639,6 +672,7 @@ compat_test!(
 	Record,
 	RECORD_ARRAY,
 	fixtures::record_array(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -646,6 +680,7 @@ compat_test!(
 	Record,
 	RECORD_OBJECT,
 	fixtures::record_object(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -653,6 +688,7 @@ compat_test!(
 	Record,
 	RECORD_SET,
 	fixtures::record_set(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -660,6 +696,7 @@ compat_test!(
 	Record,
 	RECORD_WITH_METADATA,
 	fixtures::record_with_metadata(),
+	fixtures::test_record_rid(),
 	[v3_0_0_beta_1, v3_0_0_beta_3, v3_0_0]
 );
 compat_test!(
@@ -667,6 +704,7 @@ compat_test!(
 	Record,
 	RECORD_WITH_TABLE_METADATA,
 	fixtures::record_with_table_metadata(),
+	fixtures::test_record_rid(),
 	[v3_0_0]
 );
 

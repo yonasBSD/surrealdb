@@ -703,7 +703,7 @@ impl DiskAnnIndex {
 					bail!(Error::QueryCancelled)
 				}
 				let dr = DiskAnnRecordPending::decode_key(&key)?;
-				let pending = DiskAnnRecordPendingUpdate::kv_decode_value(value.clone())?;
+				let pending = DiskAnnRecordPendingUpdate::kv_decode_value(&value, ())?;
 				let pending = Self::record_pending_to_operation(dr.id.into_owned(), pending);
 				if !builder.add(key, value, pending) {
 					return Ok(builder.into_plan());
@@ -1018,7 +1018,7 @@ impl DiskAnnIndex {
 					bail!(Error::QueryCancelled)
 				}
 				let dr = DiskAnnRecordPending::decode_key(&key)?;
-				let pending = DiskAnnRecordPendingUpdate::kv_decode_value(value)?;
+				let pending = DiskAnnRecordPendingUpdate::kv_decode_value(&value, ())?;
 				collector(Self::record_pending_to_operation(dr.id.into_owned(), pending));
 				count += 1;
 			}

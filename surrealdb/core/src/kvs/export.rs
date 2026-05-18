@@ -4,7 +4,7 @@ use anyhow::Result;
 use async_channel::Sender;
 use surrealdb_types::{SurrealValue, ToSql};
 
-use super::Transaction;
+use super::{KVValue, Transaction};
 use crate::catalog::providers::{
 	ApiProvider, AuthorisationProvider, BucketProvider, DatabaseProvider, TableProvider,
 	UserProvider,
@@ -475,7 +475,7 @@ impl Transaction {
 				table: k.tb.into_owned(),
 				key: k.id,
 			};
-			let v = Record::kv_decode_value_with_id(&v, rid)?;
+			let v = Record::kv_decode_value(&v, rid)?;
 			// Process the value and categorize it into records_relate or records_normal.
 			Self::process_record(&v, &mut records_relate, &mut records_normal);
 		}

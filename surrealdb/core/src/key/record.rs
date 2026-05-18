@@ -5,9 +5,10 @@ use anyhow::Result;
 use storekey::{BorrowDecode, Encode};
 
 use crate::catalog::{DatabaseId, NamespaceId, Record};
+use crate::err::Error;
 use crate::key::category::{Categorise, Category};
-use crate::kvs::{KVKey, impl_kv_key_storekey};
-use crate::val::{RecordIdKey, TableName};
+use crate::kvs::KVKey;
+use crate::val::{RecordId, RecordIdKey, TableName};
 
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Encode, BorrowDecode)]
 #[storekey(format = "()")]
@@ -23,7 +24,20 @@ pub(crate) struct RecordKey<'a> {
 	pub id: RecordIdKey,
 }
 
-impl_kv_key_storekey!(RecordKey<'_> => Record);
+impl KVKey for RecordKey<'_> {
+	type ValueType = Record;
+
+	fn encode_key(&self) -> Result<Vec<u8>> {
+		Ok(storekey::encode_vec(self).map_err(|_| Error::Unencodable)?)
+	}
+
+	fn value_context(&self) -> RecordId {
+		RecordId {
+			table: self.tb.as_ref().clone(),
+			key: self.id.clone(),
+		}
+	}
+}
 
 pub fn new<'a>(
 	ns: NamespaceId,

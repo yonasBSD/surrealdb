@@ -353,7 +353,7 @@ impl DiskAnnProvider {
 			for (key, value) in batch {
 				let key: crate::key::index::de::De<'_> = storekey::decode_borrow(&key)
 					.map_err(|e| ANNError::log_index_error(e.to_string()))?;
-				let element = DiskAnnElement::kv_decode_value(value)
+				let element = DiskAnnElement::kv_decode_value(&value, ())
 					.map_err(|e| ANNError::log_index_error(e.to_string()))?;
 				let deleted = element.deleted;
 				self.cache.insert_element(self.cache_index(), key.element_id, element);

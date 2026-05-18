@@ -436,6 +436,8 @@ mod tests {
 }
 
 impl KVValue for HnswDocsState {
+	type KeyContext = ();
+
 	#[inline]
 	fn kv_encode_value(&self) -> Result<Vec<u8>> {
 		let mut val = Vec::new();
@@ -444,8 +446,8 @@ impl KVValue for HnswDocsState {
 	}
 
 	#[inline]
-	fn kv_decode_value(val: Vec<u8>) -> Result<Self> {
-		Ok(DeserializeRevisioned::deserialize_revisioned(&mut val.as_slice())?)
+	fn kv_decode_value(mut val: &[u8], _: ()) -> Result<Self> {
+		Ok(DeserializeRevisioned::deserialize_revisioned(&mut val)?)
 	}
 }
 
@@ -543,21 +545,25 @@ impl ElementHashedDocs {
 	}
 }
 impl KVValue for ElementHashedDocs {
+	type KeyContext = ();
+
 	fn kv_encode_value(&self) -> Result<Vec<u8>> {
 		let mut val = Vec::new();
 		SerializeRevisioned::serialize_revisioned(self, &mut val)?;
 		Ok(val)
 	}
 
-	fn kv_decode_value(bytes: Vec<u8>) -> Result<Self>
+	fn kv_decode_value(mut bytes: &[u8], _: ()) -> Result<Self>
 	where
 		Self: Sized,
 	{
-		Ok(DeserializeRevisioned::deserialize_revisioned(&mut bytes.as_slice())?)
+		Ok(DeserializeRevisioned::deserialize_revisioned(&mut bytes)?)
 	}
 }
 
 impl KVValue for ElementDocs {
+	type KeyContext = ();
+
 	#[inline]
 	fn kv_encode_value(&self) -> Result<Vec<u8>> {
 		let mut val = Vec::new();
@@ -566,8 +572,8 @@ impl KVValue for ElementDocs {
 	}
 
 	#[inline]
-	fn kv_decode_value(bytes: Vec<u8>) -> anyhow::Result<Self> {
-		Ok(DeserializeRevisioned::deserialize_revisioned(&mut bytes.as_slice())?)
+	fn kv_decode_value(mut bytes: &[u8], _: ()) -> anyhow::Result<Self> {
+		Ok(DeserializeRevisioned::deserialize_revisioned(&mut bytes)?)
 	}
 }
 

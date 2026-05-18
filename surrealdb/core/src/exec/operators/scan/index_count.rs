@@ -42,6 +42,7 @@ use crate::expr::{ControlFlow, ControlFlowExt};
 use crate::iam::Action;
 use crate::key::index::iu::IndexCountKey;
 use crate::key::record;
+use crate::kvs::KVValue;
 use crate::val::{Number, Object, TableName, Value};
 
 /// Optimized operator for `SELECT count() FROM <table> WHERE <cond> GROUP ALL`
@@ -401,7 +402,7 @@ async fn count_with_filter_fallback(
 				table: decoded_key.tb.into_owned(),
 				key: decoded_key.id,
 			};
-			let record = crate::catalog::Record::kv_decode_value_with_id(&val, rid_val)
+			let record = crate::catalog::Record::kv_decode_value(&val, rid_val)
 				.context("Failed to deserialize record")?;
 			let value = record.data;
 

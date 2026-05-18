@@ -447,7 +447,7 @@ impl AsyncEventContext {
 		let ctx = ctx.freeze();
 		let tx = ctx.tx();
 		let eq = EventQueue::decode_key(&self.k)?;
-		let mut ev = AsyncEventRecord::kv_decode_value(v)?;
+		let mut ev = AsyncEventRecord::kv_decode_value(&v, ())?;
 		match Self::process_event(stk, &ctx, &self.opt, self.lh.as_ref(), &eq, &ev).await {
 			Ok(_) => {
 				// Event processed successfully, delete the event from the queue.

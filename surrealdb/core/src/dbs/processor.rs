@@ -20,7 +20,7 @@ use crate::expr::statements::relate::RelateThrough;
 use crate::idx::planner::iterators::{IndexItemRecord, IteratorRef, RecordIterator};
 use crate::idx::planner::{IterationStage, RecordStrategy, ScanDirection};
 use crate::key::{graph, record, r#ref};
-use crate::kvs::{KVKey, Key, NORMAL_BATCH_SIZE, Transaction, Val};
+use crate::kvs::{KVKey, KVValue, Key, NORMAL_BATCH_SIZE, Transaction, Val};
 use crate::val::{RecordId, RecordIdKey, RecordIdKeyRange, TableName, Value};
 
 impl Iterable {
@@ -466,7 +466,7 @@ impl Collectable {
 			table: key.tb.into_owned(),
 			key: key.id,
 		};
-		let val = Record::kv_decode_value_with_id(val, rid.clone())?;
+		let val = Record::kv_decode_value(val, rid.clone())?;
 		// Create a new operable value
 		let val = Operable::Value(val.into());
 		// Process the record
