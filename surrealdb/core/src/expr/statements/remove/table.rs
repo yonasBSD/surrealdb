@@ -151,7 +151,11 @@ impl RemoveTableStatement {
 					.await;
 			}
 		}
-		// Clear the cache
+		// Refresh the table cache for lives
+		if let Some(cache) = ctx.get_cache() {
+			cache.new_live_queries_version(ns, db, &name);
+		}
+		// Clear the transaction cache
 		txn.clear_cache();
 		// Ok all good
 		Ok(Value::None)
