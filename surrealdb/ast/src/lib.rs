@@ -1833,8 +1833,6 @@ ast_type! {
 	pub enum RecordIdKey{
 		String(NodeId<StringLit>),
 		Number(Spanned<i64>),
-		Float(Spanned<f64>),
-		Decimal(NodeId<Spanned<Decimal>>),
 		Uuid(NodeId<Spanned<Uuid>>),
 		Object(NodeId<Object>),
 		Array(NodeId<Array>),

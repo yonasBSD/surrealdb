@@ -298,19 +298,16 @@ async fn insert_with_savepoint() -> Result<()> {
 			}
 		]",
 	)?;
-	// Storage order: under the unified disc-10 layout `RecordIdKey::Number`
-	// keys sort *after* `RecordIdKey::String` keys (disc 3 < disc 10), so
-	// `SELECT *` returns the string-id row before the number-id row.
 	t.expect_val(
 		"[
+			{
+				id: pokemon:1,
+				two: 'two'
+			},
 			{
 				id: pokemon:test,
 				one: 'one',
 				two: 'changed'
-			},
-			{
-				id: pokemon:1,
-				two: 'two'
 			}
 		]",
 	)?;

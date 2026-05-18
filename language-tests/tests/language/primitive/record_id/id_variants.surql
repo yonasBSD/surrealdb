@@ -20,8 +20,7 @@ value = "[{ id: person:`100`, test: 'Two' }]"
 error = "Database record `person:`100`` already exists"
 
 [[test.results]]
-# String id (disc 3) sorts before Number id (disc 10) in storage byte order.
-value = "[{ id: person:`100`, test: 'Two' }, { id: person:100, test: 'One' }]"
+value = "[{ id: person:100, test: 'One' }, { id: person:`100`, test: 'Two' }]"
 
 */
 

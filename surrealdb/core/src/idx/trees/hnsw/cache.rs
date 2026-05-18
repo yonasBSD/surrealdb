@@ -479,7 +479,6 @@ mod tests {
 
 	use super::*;
 	use crate::idx::trees::vector::Vector;
-	use crate::val::Number;
 
 	/// Test that cache eviction works correctly within an async runtime.
 	///
@@ -505,7 +504,7 @@ mod tests {
 			.insert(namespace_id, database_id, table_id, index_id, 7, SharedVector::from(vector))
 			.await;
 		cache.insert_doc_set(index, 7, Ids64::Vec2([11, 12])).await;
-		cache.insert_doc_id(index, 11, Some(1), RecordIdKey::Number(Number::Int(99))).await;
+		cache.insert_doc_id(index, 11, Some(1), RecordIdKey::Number(99)).await;
 
 		assert_eq!(cache.capacity(), 1024);
 		assert!(cache.weight() > 0);
@@ -563,11 +562,11 @@ mod tests {
 		assert_eq!(retrieved.unwrap(), shared);
 		cache.insert_doc_set(index, element_id, Ids64::Vec2([7, 8])).await;
 		assert_eq!(cache.get_doc_set(index, element_id).await, Some(Ids64::Vec2([7, 8])));
-		let id = cache.insert_doc_id(index, 7, Some(3), RecordIdKey::Number(Number::Int(99))).await;
-		assert_eq!(id.as_ref(), &RecordIdKey::Number(Number::Int(99)));
+		let id = cache.insert_doc_id(index, 7, Some(3), RecordIdKey::Number(99)).await;
+		assert_eq!(id.as_ref(), &RecordIdKey::Number(99));
 		assert_eq!(
 			cache.get_doc_id(index, 7, Some(3)).await.unwrap().as_ref(),
-			&RecordIdKey::Number(Number::Int(99))
+			&RecordIdKey::Number(99)
 		);
 		assert!(cache.get_doc_id(index, 7, Some(4)).await.is_none());
 
@@ -598,9 +597,7 @@ mod tests {
 			let shared = SharedVector::from(vector);
 			cache.insert(namespace_id, database_id, table_id, index_id, i, shared).await;
 			cache.insert_doc_set(index, i, Ids64::One(i)).await;
-			cache
-				.insert_doc_id(index, i, Some(1), RecordIdKey::Number(Number::Int(i as i64)))
-				.await;
+			cache.insert_doc_id(index, i, Some(1), RecordIdKey::Number(i as i64)).await;
 		}
 
 		assert_eq!(cache.len(namespace_id, database_id, table_id, index_id).await, 10);

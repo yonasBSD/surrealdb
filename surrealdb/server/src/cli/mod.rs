@@ -8,7 +8,6 @@ mod import;
 mod isready;
 #[cfg(feature = "mcp")]
 pub(crate) mod mcp;
-mod migrate_record_ids;
 mod ml;
 #[cfg(feature = "surrealism")]
 mod module;
@@ -37,7 +36,6 @@ use import::ImportCommandArguments;
 use isready::IsReadyCommandArguments;
 #[cfg(feature = "mcp")]
 use mcp::McpCommandArguments;
-use migrate_record_ids::MigrateRecordIdsCommandArguments;
 use ml::MlCommand;
 #[cfg(feature = "surrealism")]
 use module::ModuleCommand;
@@ -199,8 +197,6 @@ enum Commands {
 	Validate(ValidateCommandArguments),
 	#[command(about = "Fix database storage issues")]
 	Fix(FixCommandArguments),
-	#[command(about = "Rewrite legacy record-id keys to the new unified lex-sortable layout")]
-	MigrateRecordIds(MigrateRecordIdsCommandArguments),
 	#[command(about = "Run commands in version 2 of the database for backwards compatibility")]
 	V2(V2Commands),
 }
@@ -323,7 +319,6 @@ pub async fn init<
 		Commands::IsReady(args) => isready::init(args).await,
 		Commands::Validate(args) => validate::init(args).await,
 		Commands::Fix(args) => fix::init::<C>(args).await,
-		Commands::MigrateRecordIds(args) => migrate_record_ids::init::<C>(args).await,
 		Commands::V2(args) => v2::init(args).await,
 	};
 	// Flush every provider's batch processor so audit / slow-query

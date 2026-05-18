@@ -7,19 +7,16 @@ use crate::val::{RecordId, RecordIdKey, TableName, Value};
 impl Value {
 	pub(crate) fn generate(self, tb: TableName, retable: bool) -> Result<RecordId> {
 		match self {
-			// Numeric id — preserves Int/Float/Decimal verbatim. NaN/±∞ are
-			// rejected via `RecordIdKey::from_number`.
-			Value::Number(id) => {
-				let key = RecordIdKey::from_number(id).ok_or_else(|| {
-					anyhow::Error::new(Error::IdInvalid {
-						value: Value::Number(id).to_sql(),
-					})
-				})?;
-				Ok(RecordId {
-					table: tb,
-					key,
-				})
-			}
+			// There is a floating point number for the id field
+			Value::Number(id) if id.is_float() => Ok(RecordId {
+				table: tb,
+				key: RecordIdKey::Number(id.as_int()),
+			}),
+			// There is an integer number for the id field
+			Value::Number(id) if id.is_int() => Ok(RecordId {
+				table: tb,
+				key: RecordIdKey::Number(id.as_int()),
+			}),
 			// There is a string for the id field
 			Value::String(id) if !id.is_empty() => Ok(RecordId {
 				table: tb,

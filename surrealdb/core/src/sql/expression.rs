@@ -395,20 +395,7 @@ fn convert_public_record_id_key_to_internal(
 	key: surrealdb_types::RecordIdKey,
 ) -> crate::val::RecordIdKey {
 	match key {
-		surrealdb_types::RecordIdKey::Number(n) => {
-			crate::val::RecordIdKey::Number(crate::val::Number::Int(n))
-		}
-		// NaN/±∞ are blocked at construction (Deserialize + from_number);
-		// reaching this arm is a programmer error worth a clear panic.
-		surrealdb_types::RecordIdKey::Float(f) if f.is_finite() => {
-			crate::val::RecordIdKey::Number(crate::val::Number::Float(f))
-		}
-		surrealdb_types::RecordIdKey::Float(_) => unreachable!(
-			"PublicRecordIdKey::Float must be finite; construct via RecordIdKey::from_number"
-		),
-		surrealdb_types::RecordIdKey::Decimal(d) => {
-			crate::val::RecordIdKey::Number(crate::val::Number::Decimal(d))
-		}
+		surrealdb_types::RecordIdKey::Number(n) => crate::val::RecordIdKey::Number(n),
 		surrealdb_types::RecordIdKey::String(s) => crate::val::RecordIdKey::String(s.into()),
 		surrealdb_types::RecordIdKey::Uuid(u) => {
 			crate::val::RecordIdKey::Uuid(crate::val::Uuid(u.into_inner()))
@@ -446,12 +433,6 @@ fn convert_public_record_id_key_to_internal(
 				},
 			}))
 		}
-		// `PublicRecordIdKey` is `#[non_exhaustive]`. Silently aliasing
-		// unknown variants would be a data-corruption risk; surface the
-		// missed update as a controlled panic instead.
-		_ => unreachable!(
-			"unknown PublicRecordIdKey variant; surrealdb-core needs updating to handle the new variant"
-		),
 	}
 }
 

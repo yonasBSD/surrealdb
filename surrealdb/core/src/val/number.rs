@@ -224,6 +224,14 @@ impl Number {
 		matches!(self, Number::Float(v) if v.is_nan())
 	}
 
+	pub fn is_int(&self) -> bool {
+		matches!(self, Number::Int(_))
+	}
+
+	pub fn is_float(&self) -> bool {
+		matches!(self, Number::Float(_))
+	}
+
 	pub fn is_truthy(&self) -> bool {
 		match self {
 			Number::Int(v) => v != &0,

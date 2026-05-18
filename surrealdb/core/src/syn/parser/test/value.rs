@@ -1,7 +1,7 @@
 use reblessive::Stack;
 use rust_decimal::Decimal;
 use surrealdb_strand::Strand;
-use surrealdb_types::{Number, ToSql};
+use surrealdb_types::ToSql;
 
 use crate::sql::literal::ObjectEntry;
 use crate::sql::{
@@ -157,7 +157,7 @@ fn parse_recursive_record_string() {
 					key: "c".into(),
 					value: Expr::Literal(Literal::RecordId(RecordIdLit {
 						table: "d".into(),
-						key: RecordIdKeyLit::Number(Number::Int(1))
+						key: RecordIdKeyLit::Number(1)
 					}))
 				}])
 			}))])

@@ -9,9 +9,7 @@ use crate::exec::{AccessMode, BoxFut, CombineAccessModes, ContextLevel};
 use crate::expr::FlowResult;
 use crate::expr::record_id::RecordIdKeyGen;
 use crate::fmt::EscapeRidKey;
-use crate::val::{
-	Array, Number, Object, RecordId, RecordIdKey, RecordIdKeyRange, TableName, Uuid, Value,
-};
+use crate::val::{Array, Object, RecordId, RecordIdKey, RecordIdKeyRange, TableName, Uuid, Value};
 
 // ============================================================================
 // PhysicalRecordIdKey
@@ -23,7 +21,7 @@ use crate::val::{
 /// variants hold physical expression children instead of raw `Expr` nodes.
 #[derive(Debug)]
 pub enum PhysicalRecordIdKey {
-	Number(Number),
+	Number(i64),
 	String(Strand),
 	Uuid(Uuid),
 	Generate(RecordIdKeyGen),
@@ -46,11 +44,7 @@ impl PhysicalRecordIdKey {
 	) -> crate::exec::BoxFut<'a, FlowResult<RecordIdKey>> {
 		Box::pin(async move {
 			match self {
-				PhysicalRecordIdKey::Number(n) => RecordIdKey::from_number(*n).ok_or_else(|| {
-					crate::expr::ControlFlow::from(anyhow::anyhow!(
-						"NaN or ±∞ is not a valid record-id key"
-					))
-				}),
+				PhysicalRecordIdKey::Number(n) => Ok(RecordIdKey::Number(*n)),
 				PhysicalRecordIdKey::String(s) => Ok(RecordIdKey::String(s.clone())),
 				PhysicalRecordIdKey::Uuid(u) => Ok(RecordIdKey::Uuid(*u)),
 				PhysicalRecordIdKey::Generate(generator) => Ok(generator.compute()),

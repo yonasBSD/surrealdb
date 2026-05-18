@@ -1,17 +1,17 @@
+use std::cmp::Ordering;
 use std::ops::Bound;
 
 use reblessive::Stk;
 use surrealdb_strand::Strand;
-use surrealdb_types::{Number, ToSql};
+use surrealdb_types::ToSql;
 
 use super::{ParseResult, Parser};
 use crate::sql::lookup::LookupSubject;
 use crate::sql::{Param, RecordIdKeyGen, RecordIdKeyLit, RecordIdKeyRangeLit, RecordIdLit};
 use crate::syn::error::bail;
-use crate::syn::lexer::compound::{self, NumberKind};
+use crate::syn::lexer::compound;
 use crate::syn::parser::mac::{expected, expected_whitespace, unexpected};
-use crate::syn::token::{Span, Token, TokenKind, t};
-use crate::val::DecimalExt;
+use crate::syn::token::{TokenKind, t};
 
 impl Parser<'_> {
 	pub(crate) async fn parse_record_id_or_range(
@@ -225,11 +225,83 @@ impl Parser<'_> {
 				let array = self.parse_array(stk, token.span).await?;
 				Ok(RecordIdKeyLit::Array(array))
 			}
-			t!("+") | t!("-") => {
+			t!("+") => {
 				self.pop_peek();
-				self.parse_numeric_record_id_key(token).await
+				// starting with a + so it must be a number
+				let digits_token = if let Some(digits_token) = self.peek_whitespace() {
+					match digits_token.kind {
+						TokenKind::Digits => digits_token,
+						_ => unexpected!(self, digits_token, "an integer"),
+					}
+				} else {
+					unexpected!(self, token, "a record-id key")
+				};
+
+				if let Some(next) = self.peek_whitespace() {
+					match next.kind {
+						t!(".") => {
+							// Numeric record-id keys are stored as `i64`, so a fractional part
+							// (`.`), an exponent (`e`/`E`), or a numeric type suffix is not
+							// allowed here.
+							unexpected!(self, next, "an integer", => "Numeric Record-id keys can only be integers");
+						}
+						x if Self::kind_is_identifier(x) => {
+							let span = token.span.covers(next.span);
+							bail!("Unexpected token `{x}` expected an integer", @span);
+						}
+						// allowed
+						_ => {}
+					}
+				}
+
+				let digits_str = self.span_str(digits_token.span);
+				if let Ok(number) = digits_str.parse() {
+					Ok(RecordIdKeyLit::Number(number))
+				} else {
+					// Safety: Parser guarentees no null bytes present in string.
+					Ok(RecordIdKeyLit::String(digits_str.into()))
+				}
 			}
-			TokenKind::Digits => self.parse_digits_record_id_key(token).await,
+			t!("-") => {
+				self.pop_peek();
+				let token = expected!(self, TokenKind::Digits);
+				if let Ok(number) = self.lex_compound(token, compound::integer::<u64>) {
+					// Parse to u64 and check if the value is equal to `-i64::MIN` via u64 as
+					// `-i64::MIN` doesn't fit in an i64
+					match number.value.cmp(&((i64::MAX as u64) + 1)) {
+						Ordering::Less => Ok(RecordIdKeyLit::Number(-(number.value as i64))),
+						Ordering::Equal => Ok(RecordIdKeyLit::Number(i64::MIN)),
+						// Safety: Parser guarentees no null bytes present in string.
+						Ordering::Greater => Ok(RecordIdKeyLit::String(
+							format!("-{}", self.span_str(number.span)).into(),
+						)),
+					}
+				} else {
+					let strand = format!("-{}", self.span_str(token.span));
+					Ok(RecordIdKeyLit::String(strand.into()))
+				}
+			}
+			TokenKind::Digits => {
+				if self.settings.flexible_record_id
+					&& let Some(next) = self.peek_whitespace1()
+					&& (Self::kind_is_identifier(next.kind)
+						|| next.kind == TokenKind::NaN
+						|| next.kind == TokenKind::Infinity)
+				{
+					let ident = self.parse_flexible_ident()?;
+					return Ok(RecordIdKeyLit::String(ident.into()));
+				}
+
+				self.pop_peek();
+
+				let digits_str = self.span_str(token.span);
+				if let Ok(number) = digits_str.parse::<i64>() {
+					Ok(RecordIdKeyLit::Number(number))
+				} else {
+					// Safety: Parser guarentees no null bytes present in string.
+					Ok(RecordIdKeyLit::String(digits_str.into()))
+				}
+			}
 			t!("ULID") => {
 				let token = self.pop_peek();
 				if self.eat(t!("(")) {
@@ -270,224 +342,6 @@ impl Parser<'_> {
 			}
 		}
 	}
-
-	/// Parse a record-id key starting from a `Digits` token in either
-	/// `flexible_record_id` mode (where ident-like suffixes are also strings)
-	/// or strict mode (full numeric grammar via the compound lexer).
-	///
-	/// In flexible mode the parser must distinguish:
-	///
-	///   * `D . D <suffix>` → Float / Decimal (with `f` / `dec` suffix)
-	///   * `D . D`          → Float
-	///   * `D <suffix>`     → Float / Decimal
-	///   * `D <ident>`      → flexible-ident string (e.g. `1abc`, `1ns`, `1e10`)
-	///   * `D`              → Integer (with string fallback for overflows)
-	///
-	/// `f` and `dec` are recognised here so that the canonical `to_sql()`
-	/// output for non-integer record-id keys (e.g. `1.5f`, `3dec`) round-trips
-	/// through statement-context parsing — matching the value-context
-	/// equivalent in [`Parser::parse_flexible_digit_record_id_key_value`].
-	/// Exponent forms (`1.5e10`) remain flexible-ident strings: `Display::fmt`
-	/// for `f64` never emits exponent notation for finite floats, so the
-	/// round-trip path doesn't need them.
-	///
-	/// This function must not call any other parser methods that advance
-	/// the lexer's `last_offset` before invoking
-	/// [`Self::parse_numeric_record_id_key`], because that helper's
-	/// [`compound::number_kind`] call asserts the start token is the last
-	/// consumed token.
-	async fn parse_digits_record_id_key(&mut self, token: Token) -> ParseResult<RecordIdKeyLit> {
-		if self.settings.flexible_record_id {
-			// In flexible mode we cannot use [`compound::number_kind`] directly
-			// because the look-ahead needed to distinguish `1abc` (flexible
-			// string ID) from `1.5` (float literal) advances the lexer's
-			// `last_offset` past the next token, which breaks `lex_compound`'s
-			// "start was the last consumed token" assertion. Instead we peek
-			// manually and stitch the relevant token spans together — mirroring
-			// `parse_flexible_digit_record_id_key_value` in `syn/parser/value.rs`.
-			let dot = self.peek_whitespace1().filter(|t| t.kind == t!("."));
-			let after_dot = if dot.is_some() {
-				self.peek_whitespace2().filter(|t| t.kind == TokenKind::Digits)
-			} else {
-				None
-			};
-
-			if let Some(after_dot_tok) = after_dot {
-				// `D . D` — pop the three tokens before looking at any suffix
-				// so we stay within the token buffer's capacity.
-				let mantissa_span = token.span.covers(after_dot_tok.span);
-				self.pop_peek();
-				self.pop_peek();
-				self.pop_peek();
-
-				let suffix = self.peek_whitespace().and_then(|t| match t.kind {
-					TokenKind::Identifier => match self.span_str(t.span) {
-						"f" => Some((t, NumberKind::Float)),
-						"dec" => Some((t, NumberKind::Decimal)),
-						_ => None,
-					},
-					_ => None,
-				});
-
-				return if let Some((suf, kind)) = suffix {
-					let span = token.span.covers(suf.span);
-					let s = self.span_str(span);
-					let key = decode_suffixed_numeric_record_id_key_lit(s, &kind, span)?;
-					self.pop_peek();
-					Ok(key)
-				} else {
-					let s = self.span_str(mantissa_span);
-					let f: f64 = s.parse().map_err(|e| {
-						crate::syn::error::syntax_error!(
-							"Failed to parse float record-id key: {e}",
-							@mantissa_span
-						)
-					})?;
-					if !f.is_finite() {
-						bail!("NaN and ±Infinity are not valid record-id keys", @mantissa_span);
-					}
-					Ok(RecordIdKeyLit::Number(Number::Float(f)))
-				};
-			}
-
-			// No `D . D` pattern. Check whether the bare digits carry a numeric
-			// suffix (`1f`, `3dec`) — otherwise fall through to flexible-ident
-			// or plain-integer handling.
-			let suffix = self.peek_whitespace1().and_then(|t| match t.kind {
-				TokenKind::Identifier => match self.span_str(t.span) {
-					"f" => Some((t, NumberKind::Float)),
-					"dec" => Some((t, NumberKind::Decimal)),
-					_ => None,
-				},
-				_ => None,
-			});
-
-			if let Some((suf, kind)) = suffix {
-				let span = token.span.covers(suf.span);
-				let s = self.span_str(span);
-				let key = decode_suffixed_numeric_record_id_key_lit(s, &kind, span)?;
-				self.pop_peek();
-				self.pop_peek();
-				return Ok(key);
-			}
-
-			if let Some(next) = self.peek_whitespace1()
-				&& (Self::kind_is_identifier(next.kind)
-					|| next.kind == TokenKind::NaN
-					|| next.kind == TokenKind::Infinity)
-			{
-				let ident = self.parse_flexible_ident()?;
-				return Ok(RecordIdKeyLit::String(ident.into()));
-			}
-
-			self.pop_peek();
-			let digits_str = self.span_str(token.span);
-			return Ok(match digits_str.parse::<i64>() {
-				Ok(n) => RecordIdKeyLit::Number(Number::Int(n)),
-				Err(_) => RecordIdKeyLit::String(digits_str.into()),
-			});
-		}
-
-		// Strict mode: full integer / float / decimal support via the compound lexer.
-		self.pop_peek();
-		self.parse_numeric_record_id_key(token).await
-	}
-
-	/// Parse a numeric record-id key, accepting integers, floats, and
-	/// decimals. The lexer's [`compound::number_kind`] consumes the full
-	/// numeric literal (mantissa, exponent, `f` / `dec` suffix); the parser
-	/// then dispatches by [`NumberKind`]. NaN and ±∞ are rejected as not
-	/// valid record-id keys. Integers that don't fit in `i64` fall back to
-	/// a string record-id key (legacy behaviour).
-	async fn parse_numeric_record_id_key(&mut self, start: Token) -> ParseResult<RecordIdKeyLit> {
-		let token = self.lex_compound(start, compound::number_kind)?;
-		let span = token.span;
-		let number_str = compound::prepare_number_str(self.span_str(span));
-		match token.value {
-			NumberKind::Integer => {
-				// Fallback to string for integers that don't fit in i64 — preserves
-				// the legacy parser behaviour where huge digits are treated as a
-				// string record ID (e.g. ULID-like keys that happen to be all digits).
-				match number_str.parse::<i64>() {
-					Ok(i) => Ok(RecordIdKeyLit::Number(Number::Int(i))),
-					Err(_) => Ok(RecordIdKeyLit::String(number_str.into_owned().into())),
-				}
-			}
-			NumberKind::Float => {
-				let bytes = number_str.as_bytes();
-				let f = if bytes[0] == b'N' {
-					f64::NAN
-				} else if bytes[0] == b'-' && bytes.get(1) == Some(&b'I') {
-					f64::NEG_INFINITY
-				} else if bytes[0] == b'I' || (bytes[0] == b'+' && bytes.get(1) == Some(&b'I')) {
-					f64::INFINITY
-				} else {
-					number_str.trim_end_matches('f').parse::<f64>().map_err(
-						|e| crate::syn::error::syntax_error!("Failed to parse number: {e}", @span),
-					)?
-				};
-				if !f.is_finite() {
-					bail!("NaN and ±Infinity are not valid record-id keys", @span)
-				}
-				Ok(RecordIdKeyLit::Number(Number::Float(f)))
-			}
-			NumberKind::Decimal => {
-				let stripped = number_str.trim_end_matches("dec");
-				let d = if stripped.contains(['e', 'E']) {
-					rust_decimal::Decimal::from_scientific(stripped).map_err(
-						|e| crate::syn::error::syntax_error!("Failed to parse decimal: {e}", @span),
-					)?
-				} else {
-					rust_decimal::Decimal::from_str_normalized(stripped).map_err(
-						|e| crate::syn::error::syntax_error!("Failed to parse decimal: {e}", @span),
-					)?
-				};
-				Ok(RecordIdKeyLit::Number(Number::Decimal(d)))
-			}
-		}
-	}
-}
-
-/// Decode a suffixed numeric record-id key literal (e.g. `"1.5f"` for Float,
-/// `"3dec"` for Decimal). The caller is responsible for having matched the
-/// suffix in the token stream; this helper strips the suffix and parses the
-/// numeric mantissa. NaN / ±∞ are rejected. Mirrors
-/// `decode_suffixed_numeric_record_id_key` in `syn/parser/value.rs`, just
-/// returning the SQL/expression `RecordIdKeyLit` instead of the public
-/// `PublicRecordIdKey`.
-fn decode_suffixed_numeric_record_id_key_lit(
-	s: &str,
-	kind: &NumberKind,
-	span: Span,
-) -> ParseResult<RecordIdKeyLit> {
-	match kind {
-		NumberKind::Float => {
-			let trimmed = s.trim_end_matches('f');
-			let f: f64 = trimmed.parse().map_err(|e| {
-				crate::syn::error::syntax_error!(
-					"Failed to parse float record-id key: {e}",
-					@span
-				)
-			})?;
-			if !f.is_finite() {
-				bail!("NaN and ±Infinity are not valid record-id keys", @span);
-			}
-			Ok(RecordIdKeyLit::Number(Number::Float(f)))
-		}
-		NumberKind::Decimal => {
-			let trimmed = s.trim_end_matches("dec");
-			let d = rust_decimal::Decimal::from_str_normalized(trimmed).map_err(|e| {
-				crate::syn::error::syntax_error!(
-					"Failed to parse decimal record-id key: {e}",
-					@span
-				)
-			})?;
-			Ok(RecordIdKeyLit::Number(Number::Decimal(d)))
-		}
-		NumberKind::Integer => {
-			unreachable!("integer kind is never matched with a `f` / `dec` suffix")
-		}
-	}
 }
 
 #[cfg(test)]
@@ -501,21 +355,6 @@ mod tests {
 
 	fn record(i: &str) -> ParseResult<RecordIdLit> {
 		let mut parser = Parser::new(i.as_bytes());
-		let mut stack = Stack::new();
-		stack.enter(|ctx| async move { parser.parse_record_id(ctx).await }).finish()
-	}
-
-	fn record_strict(i: &str) -> ParseResult<RecordIdLit> {
-		// `flexible_record_id = false` so the parser commits to numeric
-		// parsing for digit-prefixed keys and we can exercise the
-		// float/decimal literal paths.
-		let mut parser = Parser::new_with_settings(
-			i.as_bytes(),
-			ParserSettings {
-				flexible_record_id: false,
-				..ParserSettings::default()
-			},
-		);
 		let mut stack = Stack::new();
 		stack.enter(|ctx| async move { parser.parse_record_id(ctx).await }).finish()
 	}
@@ -545,7 +384,7 @@ mod tests {
 			out,
 			RecordIdLit {
 				table: "test".into(),
-				key: RecordIdKeyLit::Number(Number::Int(1)),
+				key: RecordIdKeyLit::Number(1),
 			}
 		);
 	}
@@ -559,7 +398,7 @@ mod tests {
 			out,
 			RecordIdLit {
 				table: "test".into(),
-				key: RecordIdKeyLit::Number(Number::Int(i64::MIN)),
+				key: RecordIdKeyLit::Number(i64::MIN),
 			}
 		);
 	}
@@ -573,65 +412,9 @@ mod tests {
 			out,
 			RecordIdLit {
 				table: "test".into(),
-				key: RecordIdKeyLit::Number(Number::Int(i64::MAX)),
+				key: RecordIdKeyLit::Number(i64::MAX),
 			}
 		);
-	}
-
-	#[test]
-	fn record_float_key() {
-		let out = record_strict("test:1.5").unwrap();
-		assert_eq!(
-			out,
-			RecordIdLit {
-				table: "test".into(),
-				key: RecordIdKeyLit::Number(Number::Float(1.5)),
-			}
-		);
-	}
-
-	#[test]
-	fn record_float_with_f_suffix() {
-		let out = record_strict("test:1.5f").unwrap();
-		assert_eq!(
-			out,
-			RecordIdLit {
-				table: "test".into(),
-				key: RecordIdKeyLit::Number(Number::Float(1.5)),
-			}
-		);
-	}
-
-	#[test]
-	fn record_decimal_key() {
-		let out = record_strict("test:1.5dec").unwrap();
-		let RecordIdKeyLit::Number(Number::Decimal(d)) = out.key else {
-			panic!("expected Decimal key, got: {:?}", out.key);
-		};
-		use crate::val::DecimalExt;
-		assert_eq!(d, rust_decimal::Decimal::from_str_normalized("1.5").unwrap());
-	}
-
-	#[test]
-	fn record_negative_float_key() {
-		// `-` prefix uses the compound numeric path regardless of flexible mode.
-		let out = record("test:-2.25").unwrap();
-		assert_eq!(
-			out,
-			RecordIdLit {
-				table: "test".into(),
-				key: RecordIdKeyLit::Number(Number::Float(-2.25)),
-			}
-		);
-	}
-
-	#[test]
-	fn record_nan_inf_rejected() {
-		// Strict mode: an overflowing float literal like `1e500` becomes
-		// `f64::INFINITY` at parse time. The parser must reject it rather
-		// than silently produce an infinite-valued record id.
-		let res = record_strict("test:1e500");
-		assert!(res.is_err(), "expected rejection for 1e500, got: {res:?}");
 	}
 
 	#[test]
@@ -676,7 +459,7 @@ mod tests {
 			out,
 			RecordIdLit {
 				table: "test".into(),
-				key: RecordIdKeyLit::Number(Number::Int(1)),
+				key: RecordIdKeyLit::Number(1),
 			}
 		);
 
@@ -690,7 +473,7 @@ mod tests {
 			out,
 			RecordIdLit {
 				table: "test".into(),
-				key: RecordIdKeyLit::Number(Number::Int(1)),
+				key: RecordIdKeyLit::Number(1),
 			}
 		);
 	}
@@ -806,13 +589,10 @@ mod tests {
 		assert_ident_parses_correctly("123abc");
 		assert_ident_parses_correctly("123d");
 		assert_ident_parses_correctly("123de");
-		// `123dec` and `123f` are NOT idents — they're the suffixed numeric
-		// record-id forms `Number::Decimal` / `Number::Float` `ToSql` emits.
-		// `1e23dec` / `1e23f` stay as flexible-ident strings because the leading
-		// `1` + identifier `e23dec` / `e23f` doesn't match the `D <suffix>` shape
-		// (the suffix is consumed as part of the trailing identifier).
+		assert_ident_parses_correctly("123dec");
 		assert_ident_parses_correctly("1e23dec");
 		assert_ident_parses_correctly("1e23f");
+		assert_ident_parses_correctly("123f");
 		assert_ident_parses_correctly("1ns");
 		assert_ident_parses_correctly("1ns1");
 		assert_ident_parses_correctly("1ns1h");
@@ -835,107 +615,5 @@ mod tests {
 		assert_ident_parses_correctly("ulid");
 		assert_ident_parses_correctly("uuid");
 		assert_ident_parses_correctly("rand");
-	}
-
-	// ---- flexible-mode suffixed numeric record-id keys (comment #25 / 44ba5a536 mirror) ----
-	//
-	// `Number::Float::to_sql()` emits `1.5f` (and `1f` for integer-valued floats);
-	// `Number::Decimal::to_sql()` emits `1.5dec` / `3dec`. The flexible-mode
-	// statement-context parser must accept these so a record-id key serialised
-	// via `to_sql()` round-trips back through `parse_record_id`.
-
-	fn record_flexible(i: &str) -> ParseResult<RecordIdLit> {
-		let mut parser = Parser::new_with_settings(
-			i.as_bytes(),
-			ParserSettings {
-				flexible_record_id: true,
-				..ParserSettings::default()
-			},
-		);
-		let mut stack = Stack::new();
-		stack.enter(|ctx| async move { parser.parse_record_id(ctx).await }).finish()
-	}
-
-	#[test]
-	fn flexible_float_with_dot_and_f_suffix() {
-		let out = record_flexible("a:1.5f").unwrap();
-		assert_eq!(out.table.as_str(), "a");
-		assert_eq!(out.key, RecordIdKeyLit::Number(Number::Float(1.5)));
-	}
-
-	#[test]
-	fn flexible_float_bare_integer_with_f_suffix() {
-		// `to_sql` for `Float(1.0)` emits `1f` — flexible mode must accept it.
-		let out = record_flexible("a:1f").unwrap();
-		assert_eq!(out.key, RecordIdKeyLit::Number(Number::Float(1.0)));
-	}
-
-	#[test]
-	fn flexible_decimal_with_dec_suffix() {
-		let out = record_flexible("a:3dec").unwrap();
-		let RecordIdKeyLit::Number(Number::Decimal(d)) = out.key else {
-			panic!("expected Decimal key, got: {:?}", out.key);
-		};
-		assert_eq!(d, rust_decimal::Decimal::from(3));
-	}
-
-	#[test]
-	fn flexible_decimal_with_dot_and_dec_suffix() {
-		// `0.1` isn't bit-exact in f64, so it stays in the Decimal slot.
-		let out = record_flexible("a:0.1dec").unwrap();
-		let RecordIdKeyLit::Number(Number::Decimal(d)) = out.key else {
-			panic!("expected Decimal key, got: {:?}", out.key);
-		};
-		assert_eq!(d, rust_decimal::Decimal::from_str_normalized("0.1").unwrap());
-	}
-
-	#[test]
-	fn flexible_negative_float_with_f_suffix() {
-		// `-` prefix routes through the strict-mode `parse_numeric_record_id_key`
-		// path; it already handled `f`/`dec` suffixes — this test just guards
-		// against regressions while the flexible-mode path changes.
-		let out = record_flexible("a:-1.5f").unwrap();
-		assert_eq!(out.key, RecordIdKeyLit::Number(Number::Float(-1.5)));
-	}
-
-	#[test]
-	fn flexible_negative_decimal_with_dec_suffix() {
-		let out = record_flexible("a:-3dec").unwrap();
-		let RecordIdKeyLit::Number(Number::Decimal(d)) = out.key else {
-			panic!("expected Decimal key, got: {:?}", out.key);
-		};
-		assert_eq!(d, rust_decimal::Decimal::from(-3));
-	}
-
-	#[test]
-	fn flexible_ident_only_suffixes_stay_strings() {
-		// `1ns` is a Duration suffix in the flexible-ident grammar — not a
-		// numeric record-id suffix. The `D <ident>` fall-through preserves it.
-		assert_eq!(record_flexible("a:1ns").unwrap().key, RecordIdKeyLit::String("1ns".into()));
-		// `1abc` is a plain flexible-ident string.
-		assert_eq!(record_flexible("a:1abc").unwrap().key, RecordIdKeyLit::String("1abc".into()));
-		// `1e10` is an exponent form; flexible mode keeps it as a string because
-		// `Display::fmt` for `f64` never emits exponent notation for finite
-		// floats, so the round-trip path doesn't need it.
-		assert_eq!(record_flexible("a:1e10").unwrap().key, RecordIdKeyLit::String("1e10".into()));
-	}
-
-	#[test]
-	fn flexible_full_value_round_trip_via_to_sql() {
-		// Build the same record-id values the formatter emits, then re-parse.
-		for (input, expected) in [
-			("a:1.5f", RecordIdKeyLit::Number(Number::Float(1.5))),
-			("a:1f", RecordIdKeyLit::Number(Number::Float(1.0))),
-			("a:3dec", RecordIdKeyLit::Number(Number::Decimal(rust_decimal::Decimal::from(3)))),
-			(
-				"a:0.1dec",
-				RecordIdKeyLit::Number(Number::Decimal(
-					rust_decimal::Decimal::from_str_normalized("0.1").unwrap(),
-				)),
-			),
-		] {
-			let out = record_flexible(input).unwrap_or_else(|e| panic!("{input}: {e:?}"));
-			assert_eq!(out.key, expected, "input = {input}");
-		}
 	}
 }

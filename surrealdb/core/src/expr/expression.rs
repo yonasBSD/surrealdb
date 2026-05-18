@@ -186,20 +186,7 @@ impl Expr {
 				key,
 			}) => {
 				let key_lit = match key {
-					surrealdb_types::RecordIdKey::Number(n) => {
-						RecordIdKeyLit::Number(crate::val::Number::Int(n))
-					}
-					// NaN/±∞ are blocked at construction (Deserialize + from_number);
-					// reaching this arm is a programmer error worth a clear panic.
-					surrealdb_types::RecordIdKey::Float(f) if f.is_finite() => {
-						RecordIdKeyLit::Number(crate::val::Number::Float(f))
-					}
-					surrealdb_types::RecordIdKey::Float(_) => unreachable!(
-						"PublicRecordIdKey::Float must be finite; construct via RecordIdKey::from_number"
-					),
-					surrealdb_types::RecordIdKey::Decimal(d) => {
-						RecordIdKeyLit::Number(crate::val::Number::Decimal(d))
-					}
+					surrealdb_types::RecordIdKey::Number(n) => RecordIdKeyLit::Number(n),
 					surrealdb_types::RecordIdKey::String(s) => RecordIdKeyLit::String(s.into()),
 					surrealdb_types::RecordIdKey::Uuid(u) => {
 						RecordIdKeyLit::Uuid(crate::val::Uuid(u.into_inner()))
@@ -215,18 +202,7 @@ impl Expr {
 							})
 							.collect(),
 					),
-					surrealdb_types::RecordIdKey::Range(_) => {
-						// Range keys aren't representable as a `RecordIdKeyLit`
-						// in this conversion path — preserve the existing
-						// fallthrough to `Literal::None`.
-						return Expr::Literal(Literal::None);
-					}
-					// `PublicRecordIdKey` is `#[non_exhaustive]`. Silently
-					// aliasing unknown variants would be a data-corruption
-					// risk; surface the missed update as a controlled panic.
-					_ => unreachable!(
-						"unknown PublicRecordIdKey variant; surrealdb-core needs updating to handle the new variant"
-					),
+					_ => return Expr::Literal(Literal::None), // For unsupported key types
 				};
 				Expr::Literal(Literal::RecordId(RecordIdLit {
 					table: table.into(),

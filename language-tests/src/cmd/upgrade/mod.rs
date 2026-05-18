@@ -564,16 +564,6 @@ async fn run_task_inner(
 	};
 	process.quit().await?;
 
-	// Rewrite legacy disc-2 / disc-8 / disc-9 record-id keys (records,
-	// indexes, graph edges) under the unified disc-10 layout the `--to`
-	// binary always emits. Idempotent — the migration tool short-
-	// circuits on the `FullNew` sentinel when the `--from` binary
-	// already wrote the new layout. Running unconditionally keeps the
-	// scaffolding agnostic of which `(from, to)` pair we're exercising.
-	process::run_migrate_record_ids(&config, &run.config.to, dir)
-		.await
-		.context("failed to run `surreal migrate-record-ids` between phases")?;
-
 	// run tests on existing dataset.
 	// Loop is a workaround for some cases where the start up of the database suddenly becomes
 	// excessivly slow, so we just retry once in this case.

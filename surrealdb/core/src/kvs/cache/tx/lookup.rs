@@ -191,7 +191,6 @@ mod tests {
 	use rstest::rstest;
 
 	use super::*;
-	use crate::val::Number;
 
 	#[rstest]
 	#[case(Lookup::Nds, Key::Nds, true)]
@@ -284,9 +283,9 @@ mod tests {
 	#[case(Lookup::Ev(NamespaceId(1), DatabaseId(1), "test", "test"), Key::Ev(NamespaceId(1), DatabaseId(1), "test".to_string(), "test".to_string()), true)]
 	#[case(Lookup::Fd(NamespaceId(1), DatabaseId(1), "test", "test"), Key::Fd(NamespaceId(1), DatabaseId(1), "test".to_string(), "test".to_string()), true)]
 	#[case(Lookup::Ix(NamespaceId(1), DatabaseId(1), "test", "test"), Key::Ix(NamespaceId(1), DatabaseId(1), "test".to_string(), "test".to_string()), true)]
-	#[case(Lookup::Record(NamespaceId(1), DatabaseId(1), "test", &RecordIdKey::Number(Number::Int(1))), Key::Record(NamespaceId(1), DatabaseId(1), "test".to_string(), RecordIdKey::Number(Number::Int(1))), true)]
-	#[case(Lookup::Record(NamespaceId(1), DatabaseId(1), "test", &RecordIdKey::Number(Number::Int(1))), Key::Record(NamespaceId(1), DatabaseId(1), "test".to_string(), RecordIdKey::Number(Number::Int(2))), false)]
-	#[case(Lookup::Record(NamespaceId(1), DatabaseId(1), "test", &RecordIdKey::Number(Number::Int(1))), Key::Record(NamespaceId(1), DatabaseId(2), "test".to_string(), RecordIdKey::Number(Number::Int(1))), false)]
+	#[case(Lookup::Record(NamespaceId(1), DatabaseId(1), "test", &RecordIdKey::Number(1)), Key::Record(NamespaceId(1), DatabaseId(1), "test".to_string(), RecordIdKey::Number(1)), true)]
+	#[case(Lookup::Record(NamespaceId(1), DatabaseId(1), "test", &RecordIdKey::Number(1)), Key::Record(NamespaceId(1), DatabaseId(1), "test".to_string(), RecordIdKey::Number(2)), false)]
+	#[case(Lookup::Record(NamespaceId(1), DatabaseId(1), "test", &RecordIdKey::Number(1)), Key::Record(NamespaceId(1), DatabaseId(2), "test".to_string(), RecordIdKey::Number(1)), false)]
 	fn test_equivalent(#[case] l: Lookup<'_>, #[case] k: Key, #[case] expected: bool) {
 		assert_eq!(l.equivalent(&k), expected);
 	}

@@ -52,7 +52,7 @@ pub async fn prepare_version(version: Version, download_permission: bool) -> any
 		.stderr(Stdio::null())
 		.output()
 		.await
-		.is_ok()
+		.is_err()
 	{
 		return prepare_curl(version.clone(), download_permission).await;
 	}

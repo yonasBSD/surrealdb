@@ -115,29 +115,14 @@ mod tests {
 	// RecordId
 	#[case::record_id(Value::RecordId(RecordId::new("test_table", 42)))]
 	#[case::record_id(Value::RecordId(RecordId::new("test_table", "test_key")))]
-	#[case::record_id(Value::RecordId(RecordId::new("test_table", RecordIdKey::Float(1.5))))]
 	#[case::record_id(Value::RecordId(RecordId::new(
-		"test_table",
-		RecordIdKey::Float(-2.25)
-	)))]
-	#[case::record_id(Value::RecordId(RecordId::new(
-		"test_table",
-		// `0.1` isn't bit-exact in f64, so the value must round-trip via the
-		// Decimal slot rather than canonicalising through Float.
-		RecordIdKey::Decimal(<Decimal as std::str::FromStr>::from_str("0.1").unwrap())
-	)))]
-	#[case::record_id(Value::RecordId(RecordId::new(
-		"test_table",
-		RecordIdKey::Decimal(Decimal::new(123, 2))
-	)))]
-	#[case::record_id(Value::RecordId(RecordId::new(
-		"test_table",
+		"test_table", 
 		RecordIdKey::Object(Object(std::collections::BTreeMap::from([
 			("key".to_string(), Value::String("value".to_string()))
 		])))
 	)))]
 	#[case::record_id(Value::RecordId(RecordId::new(
-		"test_table",
+		"test_table", 
 		RecordIdKey::Array(Array(vec![
 			Value::Number(Number::Int(1)),
 			Value::Number(Number::Int(2)),

@@ -1129,67 +1129,8 @@ impl Datastore {
 				actual: version.into(),
 			});
 		}
-		// Initialise (and possibly warn about) the record-id encoding
-		// sentinel. Fresh databases auto-flip to FullNew; databases with
-		// pre-existing legacy disc-2 record-id keys keep the sentinel at
-		// Compat and surface a clear "please run the migration tool"
-		// log message.
-		Self::retry("Init record-id encoding", || self.init_record_id_encoding(is_new)).await?;
 		// Everything ok
 		Ok((version, is_new))
-	}
-
-	/// Determine whether the datastore has any pre-existing legacy
-	/// record-id keys, and initialise the
-	/// [`crate::kvs::record_id_encoding::RecordIdEncoding`] sentinel
-	/// accordingly. Called from [`Self::check_version`].
-	///
-	/// Behaviour:
-	/// - Sentinel already set → no-op.
-	/// - Sentinel absent AND the datastore is brand new (`is_new`) → set sentinel to `FullNew`.
-	/// - Sentinel absent AND data is present → leave the sentinel unwritten and emit a `warn!`
-	///   pointing the operator at `surreal migrate-record-ids`. Lookups by numeric id against
-	///   legacy disc-2 records will fail until the migration tool rewrites every record, index, and
-	///   graph key under the unified disc-10 layout.
-	#[instrument(err, level = "trace", target = "surrealdb::core::kvs::ds", skip_all)]
-	async fn init_record_id_encoding(&self, is_new: bool) -> Result<()> {
-		use crate::kvs::record_id_encoding::RecordIdEncoding;
-		// Start a writeable transaction so we can flip the sentinel in
-		// the same call if needed.
-		let txn = self.transaction(Write, Optimistic).await?.enclose();
-		let key = crate::key::record_id_encoding::new();
-		match catch!(txn, txn.get(&key, None).await) {
-			Some(_) => {
-				// Sentinel already set — nothing to do.
-				catch!(txn, txn.cancel().await);
-				Ok(())
-			}
-			None if is_new => {
-				// Fresh datastore: claim FullNew so any subsequent
-				// reads see the same answer without doing a scan.
-				catch!(txn, txn.replace(&key, &RecordIdEncoding::FullNew).await);
-				catch!(txn, txn.commit().await);
-				Ok(())
-			}
-			None => {
-				// Existing datastore without a sentinel. This is the
-				// 3.0.x / 3.1.0-beta upgrade case. Leave the sentinel
-				// absent and warn the operator — every code path now
-				// emits disc-10 unconditionally, so legacy disc-2 record,
-				// index, and graph keys are not addressable until
-				// `surreal migrate-record-ids` rewrites them.
-				catch!(txn, txn.cancel().await);
-				warn!(
-					target: TARGET,
-					"Record-id encoding sentinel is missing on an existing datastore. \
-					 If this datastore was created by SurrealDB 3.0.x or 3.1.0-beta and \
-					 contains numeric record-ids, run `surreal migrate-record-ids <path>` \
-					 before serving queries — lookups by numeric id will otherwise fail \
-					 to find legacy disc-2 records."
-				);
-				Ok(())
-			}
-		}
 	}
 
 	// Initialise the cluster and run bootstrap utilities
@@ -2903,42 +2844,6 @@ impl Datastore {
 	/// ```
 	pub async fn transaction(&self, write: TransactionType, lock: LockType) -> Result<Transaction> {
 		self.transaction_factory.transaction(write, lock, self.sequences.clone()).await
-	}
-
-	/// Read the current [`RecordIdEncoding`] sentinel.
-	///
-	/// Returns [`RecordIdEncoding::Compat`] when the sentinel is absent
-	/// — that maps to two cases that the caller may want to
-	/// disambiguate via a follow-up record-prefix scan:
-	///
-	/// 1. A fresh datastore that has never been written to. The sentinel should be flipped to
-	///    [`RecordIdEncoding::FullNew`] before any record writes happen.
-	/// 2. A 3.0.x datastore upgraded in place. Existing records use the legacy disc-2 layout. The
-	///    sentinel must stay at [`RecordIdEncoding::Compat`] until [`Self::migrate_record_ids`]
-	///    completes a full rewrite.
-	pub async fn get_record_id_encoding(
-		&self,
-	) -> Result<crate::kvs::record_id_encoding::RecordIdEncoding> {
-		use crate::kvs::record_id_encoding::RecordIdEncoding;
-		let txn = self.transaction(Write, Optimistic).await?.enclose();
-		let key = crate::key::record_id_encoding::new();
-		let res = catch!(txn, txn.get(&key, None).await);
-		let _ = txn.cancel().await;
-		Ok(res.unwrap_or(RecordIdEncoding::Compat))
-	}
-
-	/// Write the [`RecordIdEncoding`] sentinel. Called by
-	/// [`Self::migrate_record_ids`] at the end of a successful migration
-	/// and by datastore bootstrap to initialise fresh databases.
-	pub async fn set_record_id_encoding(
-		&self,
-		mode: crate::kvs::record_id_encoding::RecordIdEncoding,
-	) -> Result<()> {
-		let txn = self.transaction(Write, Optimistic).await?.enclose();
-		let key = crate::key::record_id_encoding::new();
-		catch!(txn, txn.replace(&key, &mode).await);
-		catch!(txn, txn.commit().await);
-		Ok(())
 	}
 
 	pub(crate) fn sequences(&self) -> &Sequences {

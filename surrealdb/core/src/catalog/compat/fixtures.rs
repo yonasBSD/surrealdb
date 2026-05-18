@@ -1631,14 +1631,14 @@ pub fn doc_length_and_count_basic() -> DocLengthAndCount {
 // ===========================================================================
 
 pub fn appending_none() -> Appending {
-	Appending::new(None, None, RecordIdKey::Number(Number::Int(123)))
+	Appending::new(None, None, RecordIdKey::Number(123))
 }
 
 pub fn appending_old_values() -> Appending {
 	Appending::new(
 		Some(vec![Value::String(Strand::new_static("old value"))]),
 		None,
-		RecordIdKey::Number(Number::Int(123)),
+		RecordIdKey::Number(123),
 	)
 }
 
@@ -1646,7 +1646,7 @@ pub fn appending_new_values() -> Appending {
 	Appending::new(
 		None,
 		Some(vec![Value::String(Strand::new_static("new value"))]),
-		RecordIdKey::Number(Number::Int(123)),
+		RecordIdKey::Number(123),
 	)
 }
 
@@ -1654,7 +1654,7 @@ pub fn appending_both() -> Appending {
 	Appending::new(
 		Some(vec![Value::String(Strand::new_static("old value"))]),
 		Some(vec![Value::String(Strand::new_static("new value"))]),
-		RecordIdKey::Number(Number::Int(123)),
+		RecordIdKey::Number(123),
 	)
 }
 
@@ -1718,7 +1718,7 @@ pub fn recordid_uuid() -> RecordId {
 
 /// RecordIdKey with number
 pub fn recordid_key_number() -> RecordIdKey {
-	RecordIdKey::Number(Number::Int(42))
+	RecordIdKey::Number(42)
 }
 
 /// RecordIdKey with string
@@ -1749,7 +1749,7 @@ pub fn recordid_key_object() -> RecordIdKey {
 /// RecordIdKey with range
 pub fn recordid_key_range() -> RecordIdKey {
 	RecordIdKey::Range(Box::new(RecordIdKeyRange {
-		start: Bound::Included(RecordIdKey::Number(Number::Int(1))),
-		end: Bound::Excluded(RecordIdKey::Number(Number::Int(100))),
+		start: Bound::Included(RecordIdKey::Number(1)),
+		end: Bound::Excluded(RecordIdKey::Number(100)),
 	}))
 }

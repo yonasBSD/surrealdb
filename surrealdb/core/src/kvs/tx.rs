@@ -625,22 +625,6 @@ impl Transaction {
 		self.tr.closed()
 	}
 
-	/// Expose the underlying [`Transactor`] for raw byte-level
-	/// operations.
-	///
-	/// Intended for low-level maintenance work (e.g. record-id encoding
-	/// migration) that needs to read and write raw key bytes without
-	/// going through the typed [`KVKey`] / [`KVValue`] layer. Callers
-	/// must ensure the bytes they pass conform to the on-disk schema —
-	/// metrics, caches, and locks owned by [`Transaction`] are NOT
-	/// updated by these calls.
-	///
-	/// [`KVKey`]: crate::kvs::KVKey
-	/// [`KVValue`]: crate::kvs::KVValue
-	pub fn transactor(&self) -> &Transactor {
-		&self.tr
-	}
-
 	/// Cancel a transaction.
 	///
 	/// This reverses all changes made within the transaction.

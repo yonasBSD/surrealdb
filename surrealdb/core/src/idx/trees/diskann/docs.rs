@@ -221,7 +221,6 @@ impl DiskAnnDocs {
 mod tests {
 	use super::*;
 	use crate::kvs::{Datastore, LockType, TransactionType};
-	use crate::val::Number;
 
 	fn ikb() -> IndexKeyBase {
 		IndexKeyBase::new(NamespaceId(1), DatabaseId(2), "tb".into(), IndexId(3))
@@ -238,25 +237,25 @@ mod tests {
 		let cache = DiskAnnCache::new(1024 * 1024);
 		{
 			let tx = ds.transaction(TransactionType::Write, LockType::Optimistic).await?;
-			tx.set(&ikb.new_dd_key(1), &RecordIdKey::Number(Number::Int(11))).await?;
-			tx.set(&ikb.new_dd_key(3), &RecordIdKey::Number(Number::Int(33))).await?;
+			tx.set(&ikb.new_dd_key(1), &RecordIdKey::Number(11)).await?;
+			tx.set(&ikb.new_dd_key(3), &RecordIdKey::Number(33)).await?;
 			tx.commit().await?;
 		}
 
 		let tx = ds.transaction(TransactionType::Read, LockType::Optimistic).await?;
 		let got = DiskAnnDocs::get_things_batch(&ikb, TableId(4), &cache, &tx, &[1, 2, 3], Some(5))
 			.await?;
-		assert_eq!(&got[0].as_ref().unwrap().key, &RecordIdKey::Number(Number::Int(11)));
+		assert_eq!(&got[0].as_ref().unwrap().key, &RecordIdKey::Number(11));
 		assert!(got[1].is_none());
-		assert_eq!(&got[2].as_ref().unwrap().key, &RecordIdKey::Number(Number::Int(33)));
+		assert_eq!(&got[2].as_ref().unwrap().key, &RecordIdKey::Number(33));
 		assert_eq!(
 			cache.get_doc_id(cache_index(), 1, Some(5)).unwrap().as_ref(),
-			&RecordIdKey::Number(Number::Int(11))
+			&RecordIdKey::Number(11)
 		);
 		assert!(cache.get_doc_id(cache_index(), 2, Some(5)).is_none());
 		assert_eq!(
 			cache.get_doc_id(cache_index(), 3, Some(5)).unwrap().as_ref(),
-			&RecordIdKey::Number(Number::Int(33))
+			&RecordIdKey::Number(33)
 		);
 		tx.cancel().await?;
 
@@ -268,7 +267,7 @@ mod tests {
 		assert!(missing.is_none());
 		let cached =
 			DiskAnnDocs::get_things_batch(&ikb, TableId(4), &cache, &tx, &[1], Some(5)).await?;
-		assert_eq!(&cached[0].as_ref().unwrap().key, &RecordIdKey::Number(Number::Int(11)));
+		assert_eq!(&cached[0].as_ref().unwrap().key, &RecordIdKey::Number(11));
 		tx.cancel().await?;
 		Ok(())
 	}
@@ -279,11 +278,11 @@ mod tests {
 		let tx = ds.transaction(TransactionType::Write, LockType::Optimistic).await?;
 		let ikb = ikb();
 		let cache = DiskAnnCache::new(1024 * 1024);
-		tx.set(&ikb.new_dd_key(9), &RecordIdKey::Number(Number::Int(99))).await?;
+		tx.set(&ikb.new_dd_key(9), &RecordIdKey::Number(99)).await?;
 
 		let got =
 			DiskAnnDocs::get_things_batch(&ikb, TableId(4), &cache, &tx, &[9], Some(5)).await?;
-		assert_eq!(&got[0].as_ref().unwrap().key, &RecordIdKey::Number(Number::Int(99)));
+		assert_eq!(&got[0].as_ref().unwrap().key, &RecordIdKey::Number(99));
 		assert!(cache.get_doc_id(cache_index(), 9, Some(5)).is_none());
 		tx.cancel().await?;
 
@@ -304,25 +303,25 @@ mod tests {
 		let cache = DiskAnnCache::new(1024 * 1024);
 		{
 			let tx = ds.transaction(TransactionType::Write, LockType::Optimistic).await?;
-			tx.set(&ikb.new_dd_key(1), &RecordIdKey::Number(Number::Int(11))).await?;
+			tx.set(&ikb.new_dd_key(1), &RecordIdKey::Number(11)).await?;
 			tx.commit().await?;
 		}
 
 		let tx = ds.transaction(TransactionType::Read, LockType::Optimistic).await?;
 		let got =
 			DiskAnnDocs::get_things_batch(&ikb, TableId(4), &cache, &tx, &[1], Some(5)).await?;
-		assert_eq!(&got[0].as_ref().unwrap().key, &RecordIdKey::Number(Number::Int(11)));
+		assert_eq!(&got[0].as_ref().unwrap().key, &RecordIdKey::Number(11));
 		tx.cancel().await?;
 		assert!(cache.get_doc_id(cache_index(), 1, Some(6)).is_none());
 
 		let tx = ds.transaction(TransactionType::Write, LockType::Optimistic).await?;
-		tx.set(&ikb.new_dd_key(1), &RecordIdKey::Number(Number::Int(22))).await?;
+		tx.set(&ikb.new_dd_key(1), &RecordIdKey::Number(22)).await?;
 		tx.commit().await?;
 
 		let tx = ds.transaction(TransactionType::Read, LockType::Optimistic).await?;
 		let got =
 			DiskAnnDocs::get_things_batch(&ikb, TableId(4), &cache, &tx, &[1], Some(6)).await?;
-		assert_eq!(&got[0].as_ref().unwrap().key, &RecordIdKey::Number(Number::Int(22)));
+		assert_eq!(&got[0].as_ref().unwrap().key, &RecordIdKey::Number(22));
 		tx.cancel().await?;
 		Ok(())
 	}
@@ -332,7 +331,7 @@ mod tests {
 		let ds = Datastore::new("memory").await?;
 		let ikb = ikb();
 		let cache = DiskAnnCache::new(1024 * 1024);
-		let id = RecordIdKey::Number(Number::Int(77));
+		let id = RecordIdKey::Number(77);
 		{
 			let tx = ds.transaction(TransactionType::Write, LockType::Optimistic).await?;
 			tx.set(&ikb.new_dd_key(7), &id).await?;

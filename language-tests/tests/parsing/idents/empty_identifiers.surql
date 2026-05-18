@@ -38,9 +38,7 @@ value = "[{ ``: { ``: 2 }, id: ``:2 }]"
 value = "[{ ``: { ``: 3 }, id: ``:`` }]"
 
 [[test.results]]
-# Numeric record-ids encode under disc 10; String record-ids under disc 3.
-# Storage byte order is therefore: String first, then Numbers.
-value = "[{ ``: { ``: 3 }, id: ``:`` }, { ``: { ``: 1 }, id: ``:1 }, { ``: { ``: 2 }, id: ``:2 }]"
+value = "[{ ``: { ``: 1 }, id: ``:1 }, { ``: { ``: 2 }, id: ``:2 }, { ``: { ``: 3 }, id: ``:`` }]"
 
 */
 

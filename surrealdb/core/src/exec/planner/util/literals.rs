@@ -43,11 +43,7 @@ pub(crate) fn try_literal_to_value(
 			// expressions requiring async computation and are skipped.
 			use crate::expr::RecordIdKeyLit;
 			let key = match &rid.key {
-				// Route through the canonicalizing factory so non-finite
-				// floats are rejected at plan time (returning `None`) rather
-				// than slipping through into a `RecordIdKey` that would
-				// only fail later at the storekey encoder.
-				RecordIdKeyLit::Number(n) => crate::val::RecordIdKey::from_number(*n)?,
+				RecordIdKeyLit::Number(n) => crate::val::RecordIdKey::Number(*n),
 				RecordIdKeyLit::String(s) => crate::val::RecordIdKey::String(s.clone()),
 				RecordIdKeyLit::Uuid(u) => crate::val::RecordIdKey::Uuid(*u),
 				_ => return None,
@@ -294,11 +290,7 @@ pub(crate) fn literal_to_value(
 pub(crate) fn key_lit_to_expr(lit: &crate::expr::RecordIdKeyLit) -> Result<Expr, Error> {
 	use crate::expr::RecordIdKeyLit;
 	match lit {
-		RecordIdKeyLit::Number(n) => Ok(Expr::Literal(match n {
-			crate::val::Number::Int(i) => crate::expr::literal::Literal::Integer(*i),
-			crate::val::Number::Float(f) => crate::expr::literal::Literal::Float(*f),
-			crate::val::Number::Decimal(d) => crate::expr::literal::Literal::Decimal(*d),
-		})),
+		RecordIdKeyLit::Number(n) => Ok(Expr::Literal(crate::expr::literal::Literal::Integer(*n))),
 		RecordIdKeyLit::String(s) => {
 			Ok(Expr::Literal(crate::expr::literal::Literal::String(s.clone())))
 		}

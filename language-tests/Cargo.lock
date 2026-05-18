@@ -1264,7 +1264,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1590,6 +1590,7 @@ version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f3901269ec6d4f6068d3f09e5f02f995bd076398dcd1dfec407cd230b02d11b"
 dependencies = [
+ "earcutr",
  "float_next_after",
  "geo-types",
  "geographiclib-rs",
@@ -1601,6 +1602,7 @@ dependencies = [
  "rstar 0.12.2",
  "serde",
  "sif-itree",
+ "spade",
 ]
 
 [[package]]
@@ -2094,7 +2096,7 @@ dependencies = [
  "hyper 1.9.0",
  "libc",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -3562,15 +3564,15 @@ dependencies = [
 
 [[package]]
 name = "revision"
-version = "0.22.0"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3099ed26713a3c553c71b4b6365dd4ad4c5fb6b08e52d9820e403850951fe9c"
+checksum = "2554a8f54f00623ca0008916733357488569874b84bad55d5a15768d4dddf918"
 dependencies = [
  "bytes",
  "chrono",
  "geo 0.31.0",
  "regex",
- "revision-derive 0.22.0",
+ "revision-derive 0.20.0",
  "roaring",
  "rust_decimal",
  "uuid",
@@ -3589,9 +3591,9 @@ dependencies = [
 
 [[package]]
 name = "revision-derive"
-version = "0.22.0"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "555b311180eaf6e4fdf8f155665f8235738b12537fe999ab5248c722f1d775c4"
+checksum = "424de6e69cad1f9f0d7d26aeff49471164ec5f73d159b6df9047167a87398d32"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3898,7 +3900,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4011,7 +4013,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4301,7 +4303,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 name = "surrealdb-collections"
 version = "3.1.0-beta"
 dependencies = [
- "revision 0.22.0",
+ "revision 0.20.0",
  "storekey",
 ]
 
@@ -4366,7 +4368,7 @@ dependencies = [
  "rayon",
  "reblessive",
  "regex",
- "revision 0.22.0",
+ "revision 0.20.0",
  "ring",
  "roaring",
  "rquickjs",
@@ -4422,9 +4424,9 @@ dependencies = [
 
 [[package]]
 name = "surrealdb-protocol"
-version = "0.10.2"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f4e06f586c9179a02349b88b0c18e3a0850c55431aa513e0cd66529c00da1af"
+checksum = "f57065763bbd36486c449132252b3aac5a5e20f5669393ded0e967e8f8289ea2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4432,7 +4434,7 @@ dependencies = [
  "chrono",
  "flatbuffers",
  "futures",
- "geo 0.31.0",
+ "geo 0.32.0",
  "prost 0.14.3",
  "prost-types",
  "rust_decimal",
@@ -4458,7 +4460,7 @@ dependencies = [
 name = "surrealdb-strand"
 version = "3.1.0-beta"
 dependencies = [
- "revision 0.22.0",
+ "revision 0.20.0",
  "serde",
  "storekey",
 ]
@@ -4685,7 +4687,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5496,7 +5498,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
