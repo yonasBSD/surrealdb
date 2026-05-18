@@ -27,7 +27,6 @@ defaults:
 
 permissions:
   contents: read
-  checks: write
 
 jobs:
   # ----------------------------------------

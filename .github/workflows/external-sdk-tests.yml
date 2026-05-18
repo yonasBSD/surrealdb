@@ -24,7 +24,6 @@ defaults:
 
 permissions:
   contents: read
-  checks: write
 
 jobs:
   # ----------------------------------------
@@ -68,6 +67,9 @@ jobs:
     name: SDK - JavaScript (${{ matrix.version }}, ${{ matrix.protocol }})
     runs-on: depot-ubuntu-24.04-8
     needs: build
+    permissions:
+      contents: read
+      checks: write
     strategy:
       fail-fast: false
       matrix:
