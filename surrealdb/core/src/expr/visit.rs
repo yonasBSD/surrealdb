@@ -2489,8 +2489,7 @@ implement_visitor_mut! {
 	fn visit_mut_config_inner(this, d: &mut ConfigInner){
 		match d {
 			ConfigInner::GraphQL(graph_qlconfig) => {
-				// TODO: Reintroduce once graphql is fixed.
-				//this.visit_mut_graphql_config(graph_qlconfig)?;
+				this.visit_mut_graphql_config(graph_qlconfig)?;
 			},
 			ConfigInner::Api(api_config) => {
 				this.visit_mut_api_config(api_config)?;
@@ -2499,6 +2498,10 @@ implement_visitor_mut! {
 				this.visit_mut_default_config(default_config)?;
 			},
 		}
+		Ok(())
+	}
+
+	fn visit_mut_graphql_config(this, d: &mut GraphQLConfig){
 		Ok(())
 	}
 
