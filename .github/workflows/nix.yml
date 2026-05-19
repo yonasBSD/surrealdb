@@ -4,10 +4,13 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
     paths:
       - '**/*.rs'
       - '**/Cargo.toml'
       - '**/Cargo.lock'
+      - 'rust-toolchain.toml'
       - 'flake.nix'
       - 'flake.lock'
       - 'pkg/nix/**'
@@ -24,76 +27,26 @@ permissions:  # added using https://github.com/step-security/secure-repo
   contents: read
 
 jobs:
-  # TODO: Figure out why it fails to build
-  # 
-  # build-static:
-  #   name: Build static Linux binary
-  #   if: ${{ github.ref == 'refs/heads/main' || github.event.label.name == 'nix' }}
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-  #     - uses: cachix/install-nix-action@616559265b40713947b9c190a8ff4b507b5df49b # v31.10.4
-  #     - uses: cachix/cachix-action@1eb2ef646ac0255473d23a5907ad7b04ce94065c # v17
-  #       with:
-  #         name: surrealdb
-  #         authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
-  #         extraPullNames: nix-community
-  #     - run: nix build .#static-binary
-  #     - run: ./result/bin/surreal help
-
-  build-docker:
-    name: Build Docker image
-    needs: [build-native-linux]
-    if: ${{ github.ref == 'refs/heads/main' || github.event.label.name == 'nix' || contains(github.event.pull_request.labels.*.name, 'nix') }}
-    runs-on: ubuntu-latest
+  build:
+    name: Build native Linux binary and Docker image
+    if: ${{ github.ref == 'refs/heads/main' || github.ref_type == 'tag' || github.event.label.name == 'nix' || contains(github.event.pull_request.labels.*.name, 'nix') }}
+    runs-on: [ runner-amd64-2xlarge ]
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
         with:
           egress-policy: audit
 
-      - name: Create swap space
-        run: |
-          sudo swapoff /swapfile || true
-          sudo fallocate -l 8G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # (Actions must be pinned by commit hash) v6.0.2
       - uses: cachix/install-nix-action@616559265b40713947b9c190a8ff4b507b5df49b # (Actions must be pinned by commit hash) v31.10.4
       - uses: cachix/cachix-action@1eb2ef646ac0255473d23a5907ad7b04ce94065c # (Actions must be pinned by commit hash) v17
-        with:
-          name: surrealdb
-          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
-          extraPullNames: nix-community
-      - run: nix build .#docker-image
-      - run: docker load --input ./result
-
-  build-native-linux:
-    name: Build native Linux binary
-    if: ${{ github.ref == 'refs/heads/main' || github.event.label.name == 'nix' || contains(github.event.pull_request.labels.*.name, 'nix') }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
-        with:
-          egress-policy: audit
-
-      - name: Create swap space
-        run: |
-          sudo swapoff /swapfile || true
-          sudo fallocate -l 8G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # (Actions must be pinned by commit hash) v6.0.2
-      - uses: cachix/install-nix-action@616559265b40713947b9c190a8ff4b507b5df49b # (Actions must be pinned by commit hash) v31.10.4
-      - uses: cachix/cachix-action@1eb2ef646ac0255473d23a5907ad7b04ce94065c # (Actions must be pinned by commit hash) v17
+        env:
+          USER: runner
         with:
           name: surrealdb
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
           extraPullNames: nix-community
       - run: nix build .#x86_64-unknown-linux-gnu
       - run: ./result/bin/surreal help
+      - run: nix build .#docker-image
+      - run: docker load --input ./result
