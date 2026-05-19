@@ -8,7 +8,7 @@ allow-experimental = ["files"]
 
 [test.results]
 parsing-error = '''
-Unexpected end of file string, missing bucket seperator `:/`
+Unexpected end of file string, missing bucket separator `:/`
   --> [20:5]
    |
 20 | f"fo";
