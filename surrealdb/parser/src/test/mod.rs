@@ -1,10 +1,9 @@
 #![cfg(test)]
 
-use std::env;
 use std::path::Path;
+use std::{env, fmt};
 
 use ast::Query;
-use common::fmt_from_fn;
 
 use crate::Config;
 
@@ -110,7 +109,7 @@ fn text_test() {
 
 		let found = match res {
 			Ok((node, ast)) => {
-				fmt_from_fn(|fmt| ast::vis::visualize_ast(&node, &ast, fmt)).to_string()
+				fmt::from_fn(|fmt| ast::vis::visualize_ast(&node, &ast, fmt)).to_string()
 			}
 			Err(e) => {
 				format!("ERROR:{}", e.render_char_buffer().write_to_string())
