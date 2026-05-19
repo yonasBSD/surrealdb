@@ -338,22 +338,23 @@ impl DiskAnnProvider {
 		// element cache with any entries touched during the fallback scan.
 		let rng =
 			context.ikb.new_de_range().map_err(|e| ANNError::log_index_error(e.to_string()))?;
-		let mut stream = context.tx.stream_keys_vals(
-			rng,
-			None,
-			None,
-			0,
-			crate::idx::planner::ScanDirection::Forward,
-			false,
-			None,
-		);
-		use futures::StreamExt;
-		while let Some(res) = stream.next().await {
-			let batch = res.map_err(|e| ANNError::log_index_error(e.to_string()))?;
-			for (key, value) in batch {
-				let key: crate::key::index::de::De<'_> = storekey::decode_borrow(&key)
+		let mut cursor = context
+			.tx
+			.open_vals_cursor(rng, crate::idx::planner::ScanDirection::Forward, 0, None)
+			.await
+			.map_err(|e| ANNError::log_index_error(e.to_string()))?;
+		loop {
+			let batch = cursor
+				.next_batch(crate::kvs::ScanLimit::Count(crate::kvs::NORMAL_BATCH_SIZE))
+				.await
+				.map_err(|e| ANNError::log_index_error(e.to_string()))?;
+			if batch.is_empty() {
+				break;
+			}
+			for (key, value) in &batch {
+				let key: crate::key::index::de::De<'_> = storekey::decode_borrow(key)
 					.map_err(|e| ANNError::log_index_error(e.to_string()))?;
-				let element = DiskAnnElement::kv_decode_value(&value, ())
+				let element = DiskAnnElement::kv_decode_value(value, ())
 					.map_err(|e| ANNError::log_index_error(e.to_string()))?;
 				let deleted = element.deleted;
 				self.cache.insert_element(self.cache_index(), key.element_id, element);

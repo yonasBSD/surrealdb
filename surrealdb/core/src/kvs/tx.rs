@@ -19,15 +19,14 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::Utc;
-use futures::TryStreamExt;
 use futures::future::try_join_all;
-use futures::stream::Stream;
 use tokio::sync::{Mutex, Notify};
 use tokio::time::sleep;
 use tracing::Instrument;
 use uuid::Uuid;
 use web_time::Instant;
 
+use super::api::{KeysBatch, ScanCursorKeys, ScanCursorVals, ScanLimit, ValsBatch};
 use super::batch::Batch;
 use super::{Key, LockType, TransactionFactory, TransactionType, Val, util};
 use crate::catalog::providers::{
@@ -57,7 +56,6 @@ use crate::kvs::index::{
 	BuildGeneration, BuildTicket, BuildTicketMutationSeq, IndexBuildPhase, IndexBuildReportStatus,
 	IndexBuildState, IndexBuilder,
 };
-use crate::kvs::scanner::Direction;
 use crate::kvs::sequences::Sequences;
 #[cfg(test)]
 use crate::kvs::testing::{
@@ -65,8 +63,8 @@ use crate::kvs::testing::{
 	maybe_inject_retryable_conflict,
 };
 use crate::kvs::{
-	BoxTimeStamp, BoxTimeStampImpl, Error as KvsError, KVKey, KVValue, Transactor, cache,
-	is_retryable_transaction_conflict,
+	BoxTimeStamp, BoxTimeStampImpl, Direction, Error as KvsError, KVKey, KVValue, Transactor,
+	cache, is_retryable_transaction_conflict,
 };
 use crate::observe::{
 	ExecutionObserver, Outcome, TenantIdentity, TransactionEvent, TransactionEventSafe,
@@ -114,7 +112,7 @@ pub struct Transaction {
 	/// can still attach identity after the fact via
 	/// [`Self::set_tenant_identity`].
 	tenant_identity: OnceLock<Arc<TenantIdentity>>,
-	/// The underlying transactor
+	/// The underlying transactor.
 	tr: Transactor,
 	/// The query cache for this store
 	cache: TransactionCache,
@@ -606,6 +604,56 @@ impl Deref for Transaction {
 
 	fn deref(&self) -> &Self::Target {
 		&self.tr
+	}
+}
+
+/// Caller-owned keys-only scan cursor that records scan metrics into the
+/// parent transaction as it pumps batches.
+///
+/// Returned by [`Transaction::open_keys_cursor`]. Holds a borrow into the
+/// parent transaction's metrics counter, so it cannot outlive the
+/// transaction at the type level. Each call to `next_batch` advances the
+/// underlying RocksDB-or-default cursor and records the batch's keys/bytes
+/// against the transaction's scan metrics.
+pub struct MeteredKeysCursor<'a> {
+	/// The underlying backend-provided cursor (RocksDB-specialised, or the
+	/// default impl that wraps single-shot `keys`/`keysr`).
+	inner: Box<dyn ScanCursorKeys + 'a>,
+	/// Borrow into the parent transaction's metrics counter; updated on
+	/// each batch.
+	metrics: &'a TransactionMetrics,
+}
+
+impl<'a> MeteredKeysCursor<'a> {
+	/// Advance the cursor and return up to `limit` keys borrowed from the
+	/// cursor's internal buffer. An empty batch signals end of range.
+	///
+	/// The returned `KeysBatch` borrows from the cursor; the borrow
+	/// checker forbids calling `next_batch` again while the previous
+	/// batch is still in scope.
+	pub async fn next_batch<'s>(&'s mut self, limit: ScanLimit) -> Result<KeysBatch<'s>> {
+		let batch = self.inner.next_batch(limit).await.map_err(Error::from)?;
+		self.metrics.record_scan(batch.len() as u64, batch.key_bytes, 0);
+		Ok(batch)
+	}
+}
+
+/// Caller-owned key+value scan cursor with metrics recording. See
+/// [`MeteredKeysCursor`] for the rationale.
+pub struct MeteredValsCursor<'a> {
+	/// The underlying backend-provided cursor.
+	inner: Box<dyn ScanCursorVals + 'a>,
+	/// Borrow into the parent transaction's metrics counter.
+	metrics: &'a TransactionMetrics,
+}
+
+impl<'a> MeteredValsCursor<'a> {
+	/// Advance the cursor and return up to `limit` `(key, value)` pairs
+	/// borrowed from the cursor's internal buffer.
+	pub async fn next_batch<'s>(&'s mut self, limit: ScanLimit) -> Result<ValsBatch<'s>> {
+		let batch = self.inner.next_batch(limit).await.map_err(Error::from)?;
+		self.metrics.record_scan(batch.len() as u64, batch.key_bytes, batch.value_bytes);
+		Ok(batch)
 	}
 }
 
@@ -1425,6 +1473,73 @@ impl Transaction {
 	}
 
 	// --------------------------------------------------
+	// Cursor functions
+	// --------------------------------------------------
+
+	/// Open a stateful keys-only scan cursor over a typed range.
+	///
+	/// The cursor reuses one underlying iterator across batches for the
+	/// duration of a single logical scan (e.g. an outer table walk or one
+	/// prefix of a graph traversal). Each [`ScanCursorKeys::next_batch`]
+	/// call advances the same iterator instead of re-seeking from scratch.
+	/// `skip` is applied once on the first batch.
+	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip_all)]
+	pub async fn open_keys_cursor(
+		&self,
+		rng: Range<Key>,
+		dir: ScanDirection,
+		skip: u32,
+		version: Option<u64>,
+	) -> Result<MeteredKeysCursor<'_>> {
+		let inner = self
+			.tr
+			.open_keys_cursor(
+				rng,
+				match dir {
+					ScanDirection::Forward => Direction::Forward,
+					ScanDirection::Backward => Direction::Backward,
+				},
+				skip,
+				version,
+			)
+			.await
+			.map_err(Error::from)?;
+		Ok(MeteredKeysCursor {
+			inner,
+			metrics: &self.metrics,
+		})
+	}
+
+	/// Open a stateful key+value scan cursor over a raw-byte range. See
+	/// [`Self::open_keys_cursor`].
+	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip_all)]
+	pub async fn open_vals_cursor(
+		&self,
+		rng: Range<Key>,
+		dir: ScanDirection,
+		skip: u32,
+		version: Option<u64>,
+	) -> Result<MeteredValsCursor<'_>> {
+		let inner = self
+			.tr
+			.open_vals_cursor(
+				rng,
+				match dir {
+					ScanDirection::Forward => Direction::Forward,
+					ScanDirection::Backward => Direction::Backward,
+				},
+				skip,
+				version,
+			)
+			.await
+			.map_err(Error::from)?;
+		Ok(MeteredValsCursor {
+			inner,
+			metrics: &self.metrics,
+		})
+	}
+
+	// --------------------------------------------------
 	// Batch functions
 	// --------------------------------------------------
 
@@ -1464,78 +1579,6 @@ impl Transaction {
 		let beg = rng.start.encode_key()?;
 		let end = rng.end.encode_key()?;
 		Ok(self.tr.batch_keys_vals(beg..end, batch, version).await.map_err(Error::from)?)
-	}
-
-	// --------------------------------------------------
-	// Stream functions
-	// --------------------------------------------------
-
-	/// Retrieve a stream of key batches over a specific range in the datastore.
-	///
-	/// This function returns a stream that yields batches of keys. The scanner:
-	/// - Fetches an initial batch of up to 100 items
-	/// - Fetches subsequent batches of up to 16 MiB (local) or 4 MiB (remote)
-	/// - Prefetches the next batch while the current batch is being processed
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip_all)]
-	pub fn stream_keys(
-		&self,
-		rng: Range<Key>,
-		version: Option<u64>,
-		limit: Option<usize>,
-		skip: u32,
-		dir: ScanDirection,
-	) -> impl Stream<Item = Result<Vec<Key>>> + '_ {
-		self.tr
-			.stream_keys(
-				rng,
-				version,
-				limit,
-				skip,
-				match dir {
-					ScanDirection::Forward => Direction::Forward,
-					ScanDirection::Backward => Direction::Backward,
-				},
-			)
-			.map_err(Error::from)
-			.map_err(Into::into)
-	}
-
-	/// Retrieve a stream of key-value batches over a specific range in the datastore.
-	///
-	/// This function returns a stream that yields batches of key-value pairs. The scanner:
-	/// - Fetches an initial batch of up to 100 items (or 500 when `prefetch` is enabled)
-	/// - Fetches subsequent batches of up to 16 MiB (local) or 4 MiB (remote)
-	/// - When `prefetch` is true, prefetches the next batch while the current batch is being
-	///   processed, and uses a larger initial batch size (500 items)
-	/// - When `limit_hint` is provided, caps the initial batch size to avoid over-fetching for
-	///   small-limit queries
-	#[allow(clippy::too_many_arguments)]
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tx", skip_all)]
-	pub fn stream_keys_vals(
-		&self,
-		rng: Range<Key>,
-		version: Option<u64>,
-		limit: Option<usize>,
-		skip: u32,
-		dir: ScanDirection,
-		prefetch: bool,
-		limit_hint: Option<u32>,
-	) -> impl Stream<Item = Result<Vec<(Key, Val)>>> + '_ {
-		self.tr
-			.stream_keys_vals(
-				rng,
-				version,
-				limit,
-				skip,
-				match dir {
-					ScanDirection::Forward => Direction::Forward,
-					ScanDirection::Backward => Direction::Backward,
-				},
-				prefetch,
-				limit_hint,
-			)
-			.map_err(Error::from)
-			.map_err(Into::into)
 	}
 
 	// --------------------------------------------------

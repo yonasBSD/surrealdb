@@ -21,11 +21,11 @@ mod api;
 mod batch;
 mod clock;
 mod consts;
+mod direction;
 mod ds;
 mod err;
 mod into;
 mod key;
-mod scanner;
 mod threadpool;
 mod timestamp;
 mod tr;
@@ -48,11 +48,14 @@ pub(crate) mod slowlog;
 pub(crate) mod tasklease;
 pub(crate) mod version;
 
-pub use api::{GetMultiResult, KeysResult, ScanLimit, ScanResult, Transactable};
+pub use api::{
+	GetMultiResult, KeysResult, ScanCursorKeys, ScanCursorVals, ScanLimit, ScanResult, Transactable,
+};
 pub use consts::{
 	COUNT_BATCH_SIZE, ESTIMATED_BYTES_PER_KEY, ESTIMATED_BYTES_PER_KV, INDEXING_BATCH_SIZE,
 	NORMAL_BATCH_SIZE,
 };
+pub use direction::Direction;
 pub(crate) use ds::TransactionFactory;
 pub use ds::requirements::{TransactionBuilderFactoryRequirements, TransactionBuilderRequirements};
 pub use ds::{
@@ -62,7 +65,6 @@ pub use ds::{
 pub use err::{Error, Result};
 pub use into::IntoBytes;
 pub(crate) use key::{KVKey, KVValue, impl_kv_key_storekey, impl_kv_value_revisioned};
-pub use scanner::{Direction, Scanner};
 pub use timestamp::{
 	BoxTimeStamp, BoxTimeStampImpl, HlcTimeStamp, HlcTimeStampImpl, IncTimeStampImpl,
 	MAX_TIMESTAMP_BYTES, TimeStamp, TimeStampImpl,

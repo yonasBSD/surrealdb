@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::vec;
 
 use anyhow::{Result, bail};
-use futures::StreamExt;
 use reblessive::tree::Stk;
 
 use crate::catalog::providers::TableProvider;
@@ -20,7 +19,7 @@ use crate::expr::statements::relate::RelateThrough;
 use crate::idx::planner::iterators::{IndexItemRecord, IteratorRef, RecordIterator};
 use crate::idx::planner::{IterationStage, RecordStrategy, ScanDirection};
 use crate::key::{graph, record, r#ref};
-use crate::kvs::{KVKey, KVValue, Key, NORMAL_BATCH_SIZE, Transaction, Val};
+use crate::kvs::{KVKey, KVValue, Key, NORMAL_BATCH_SIZE, ScanLimit, Transaction, Val};
 use crate::val::{RecordId, RecordIdKey, RecordIdKeyRange, TableName, Value};
 
 impl Iterable {
@@ -747,16 +746,25 @@ pub(super) trait Collector {
 		// Get the transaction
 		let txn = ctx.tx();
 		// We only need to iterate over keys.
-		let mut stream = txn.stream_keys(rng.clone(), opt.version, Some(skippable), 0, sc);
+		let mut cursor = txn.open_keys_cursor(rng.clone(), sc, 0, opt.version).await?;
 		let mut skipped = 0;
-		let mut last_key = vec![];
-		'outer: while let Some(res) = stream.next().await {
-			let batch = res?;
-			for key in batch {
+		let mut last_key: Vec<u8> = vec![];
+		'outer: loop {
+			// Cap the remaining budget so we don't pull past `skippable`.
+			let remaining = skippable.saturating_sub(skipped).min(NORMAL_BATCH_SIZE as usize);
+			if remaining == 0 {
+				break;
+			}
+			let batch = cursor.next_batch(ScanLimit::Count(remaining as u32)).await?;
+			if batch.is_empty() {
+				break;
+			}
+			for key in &batch {
 				if ctx.is_done(Some(skipped)).await? {
 					break 'outer;
 				}
-				last_key = key;
+				last_key.clear();
+				last_key.extend_from_slice(key);
 				skipped += 1;
 			}
 		}
@@ -802,18 +810,24 @@ pub(super) trait Collector {
 
 		// Create a new iterable range
 		let txn = ctx.tx();
-		let mut stream = txn.stream_keys_vals(rng, opt.version, None, 0, sc, false, None);
-
+		let mut cursor = txn.open_vals_cursor(rng, sc, 0, opt.version).await?;
 		// Loop until no more entries
 		let mut count = 0;
-		'outer: while let Some(res) = stream.next().await {
-			let batch = res?;
-			for (k, v) in batch {
-				// Check if the context is finished
+		'outer: loop {
+			let batch = cursor.next_batch(ScanLimit::Count(NORMAL_BATCH_SIZE)).await?;
+			if batch.is_empty() {
+				break;
+			}
+			// Materialise owned `(Key, Val)` pairs up front because the
+			// per-item `self.collect(...)` await may need to call back into
+			// the cursor's transaction, which can't co-exist with the
+			// outstanding `&mut self` borrow on the cursor.
+			let owned: Vec<(Key, Val)> =
+				batch.iter().map(|(k, v)| (k.to_vec(), v.to_vec())).collect();
+			for (k, v) in owned {
 				if ctx.is_done(Some(count)).await? {
 					break 'outer;
 				}
-				// Parse the data from the store
 				self.collect(Collectable::KeyVal(doc_ctx.clone(), k, v)).await?;
 				count += 1;
 			}
@@ -847,17 +861,19 @@ pub(super) trait Collector {
 		};
 		// Create a new iterable range
 		let txn = ctx.tx();
-		let mut stream = txn.stream_keys(rng, opt.version, None, 0, sc);
+		let mut cursor = txn.open_keys_cursor(rng, sc, 0, opt.version).await?;
 		// Loop until no more entries
 		let mut count = 0;
-		'outer: while let Some(res) = stream.next().await {
-			let batch = res?;
-			for k in batch {
-				// Check if the context is finished
+		'outer: loop {
+			let batch = cursor.next_batch(ScanLimit::Count(NORMAL_BATCH_SIZE)).await?;
+			if batch.is_empty() {
+				break;
+			}
+			let owned: Vec<Key> = batch.iter().map(|k| k.to_vec()).collect();
+			for k in owned {
 				if ctx.is_done(Some(count)).await? {
 					break 'outer;
 				}
-				// Collect the key
 				self.collect(Collectable::TableKey(doc_ctx.clone(), k)).await?;
 				count += 1;
 			}
@@ -939,17 +955,20 @@ pub(super) trait Collector {
 		};
 		// Create a new iterable range
 		let txn = ctx.tx();
-		let mut stream = txn.stream_keys_vals(rng, None, None, 0, sc, false, None);
+		let mut cursor = txn.open_vals_cursor(rng, sc, 0, None).await?;
 		// Loop until no more entries
 		let mut count = 0;
-		'outer: while let Some(res) = stream.next().await {
-			let batch = res?;
-			for (k, v) in batch {
-				// Check if the context is finished
+		'outer: loop {
+			let batch = cursor.next_batch(ScanLimit::Count(NORMAL_BATCH_SIZE)).await?;
+			if batch.is_empty() {
+				break;
+			}
+			let owned: Vec<(Key, Val)> =
+				batch.iter().map(|(k, v)| (k.to_vec(), v.to_vec())).collect();
+			for (k, v) in owned {
 				if ctx.is_done(Some(count)).await? {
 					break 'outer;
 				}
-				// Collect
 				self.collect(Collectable::KeyVal(doc_ctx.clone(), k, v)).await?;
 				count += 1;
 			}
@@ -984,17 +1003,19 @@ pub(super) trait Collector {
 			return Ok(());
 		};
 		// Create a new iterable range
-		let mut stream = txn.stream_keys(rng, opt.version, None, 0, sc);
+		let mut cursor = txn.open_keys_cursor(rng, sc, 0, opt.version).await?;
 		// Loop until no more entries
 		let mut count = 0;
-		'outer: while let Some(res) = stream.next().await {
-			let batch = res?;
-			for k in batch {
-				// Check if the context is finished
+		'outer: loop {
+			let batch = cursor.next_batch(ScanLimit::Count(NORMAL_BATCH_SIZE)).await?;
+			if batch.is_empty() {
+				break;
+			}
+			let owned: Vec<Key> = batch.iter().map(|k| k.to_vec()).collect();
+			for k in owned {
 				if ctx.is_done(Some(count)).await? {
 					break 'outer;
 				}
-				// Collect the key
 				self.collect(Collectable::RangeKey(doc_ctx.clone(), k)).await?;
 				count += 1;
 			}
@@ -1080,18 +1101,20 @@ pub(super) trait Collector {
 		// Loop over the chosen edge types
 		'keys: for (beg, end) in keys {
 			// Create a new iterable range
-			let mut stream =
-				txn.stream_keys(beg..end, opt.version, None, 0, ScanDirection::Forward);
+			let mut cursor =
+				txn.open_keys_cursor(beg..end, ScanDirection::Forward, 0, opt.version).await?;
 			// Loop until no more entries
 			let mut count = 0;
-			while let Some(res) = stream.next().await {
-				let batch = res?;
-				for key in batch {
-					// Check if the context is finished
+			loop {
+				let batch = cursor.next_batch(ScanLimit::Count(NORMAL_BATCH_SIZE)).await?;
+				if batch.is_empty() {
+					break;
+				}
+				let owned: Vec<Key> = batch.iter().map(|k| k.to_vec()).collect();
+				for key in owned {
 					if ctx.is_done(Some(count)).await? {
 						break 'keys;
 					}
-					// Collect the key
 					self.collect(Collectable::Lookup(doc_ctx.clone(), kind.clone(), key)).await?;
 					count += 1;
 				}

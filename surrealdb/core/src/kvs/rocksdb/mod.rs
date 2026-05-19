@@ -1,4 +1,8 @@
 #![cfg(feature = "kv-rocksdb")]
+// Belt-and-suspenders against regressing the per-Transaction `inner` mutex
+// back to a synchronous type (parking_lot or std). Tokio mutex guards are not
+// flagged by this lint, so the current `inner.lock().await` sites are fine.
+#![deny(clippy::await_holding_lock)]
 
 mod background_flusher;
 mod cnf;
@@ -9,13 +13,14 @@ mod garbage_collector;
 mod memory_manager;
 mod prefix_extractor;
 mod range_shard;
+mod scan_cursor;
 #[cfg(test)]
 mod tests;
 
 use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use background_flusher::BackgroundFlusher;
@@ -27,14 +32,21 @@ use memory_manager::MemoryManager;
 use range_shard::{COUNT_PARALLEL_MAX_SHARDS, shard_range};
 use rocksdb::{
 	BottommostLevelCompaction, ColumnFamilyDescriptor, CompactOptions, DBCompactionStyle,
-	DBCompressionType, FlushOptions, LogLevel, OptimisticTransactionDB,
-	OptimisticTransactionOptions, Options, ReadOptions, SnapshotWithThreadMode,
-	UniversalCompactOptions, UniversalCompactionStopStyle, WaitForCompactOptions, WriteOptions,
-	properties,
+	DBCompressionType, DBRawIteratorWithThreadMode, FlushOptions, LogLevel,
+	OptimisticTransactionDB, OptimisticTransactionOptions, Options, ReadOptions,
+	SnapshotWithThreadMode, UniversalCompactOptions, UniversalCompactionStopStyle,
+	WaitForCompactOptions, WriteOptions, properties,
+};
+use scan_cursor::{
+	AliveGuard, RocksDbKeysCursor, RocksDbValsCursor, ScanIter, ScanStateKeys, ScanStateVals,
 };
 use tokio::sync::{Mutex, MutexGuard};
+use web_time::Instant;
 
-use super::api::{GetMultiResult, KeysResult, ScanLimit, ScanResult};
+use super::api::{
+	BoxFut, GetMultiResult, KeySpan, KeyValSpan, KeysBatch, KeysResult, ScanCursorKeys,
+	ScanCursorVals, ScanLimit, ScanResult, ValsBatch,
+};
 use super::config::SyncMode;
 use super::err::{Error, Result};
 use super::{Direction, ESTIMATED_BYTES_PER_KEY, ESTIMATED_BYTES_PER_KV};
@@ -81,6 +93,15 @@ pub struct Datastore {
 }
 
 pub struct Transaction {
+	/// Number of open caller-owned cursors. Each `open_*_cursor`
+	/// increments after passing the `done` check; each cursor handle's
+	/// `AliveGuard` decrements on `Drop`. `commit`/`cancel` drain-wait
+	/// on this counter before consuming `inner` so that no cursor's
+	/// iterator can outlive the snapshot/tx it references.
+	///
+	/// See `scan_cursor.rs` for the safety contract and SeqCst
+	/// ordering rationale.
+	pub(super) cursors_alive: AtomicUsize,
 	/// Is the transaction complete?
 	done: AtomicBool,
 	/// Is the transaction writeable?
@@ -89,7 +110,26 @@ pub struct Transaction {
 	versioned: bool,
 	/// The read options containing the snapshot
 	read_options: ReadOptions,
-	/// The inner transaction and the transaction snapshot
+	/// The inner transaction and the transaction snapshot.
+	///
+	/// `tokio::sync::Mutex` so a contending tokio worker yields (the runtime
+	/// can run other tasks while it waits) rather than parks during slow
+	/// critical sections — cold-cache `get_opt`, inline scans, and the
+	/// writable `count` path can each hold the guard for tens of ms to
+	/// seconds. With a synchronous mutex the contending worker would be
+	/// blocked for that whole window; with this one it yields.
+	///
+	/// Tokio's `Mutex` is **not reentrant**: a recursive `self.inner.lock()`
+	/// from inside a method already holding the guard will hang the future.
+	/// Callers must still acquire the lock once and pass the guard down to
+	/// helpers (`count_blocking`, `keys_blocking`, `scan_blocking`) rather
+	/// than re-acquiring it.
+	///
+	/// For `affinitypool::spawn_local` dispatches: acquire `.lock().await`
+	/// *before* `spawn_local(...)` and move the `MutexGuard` into the closure.
+	/// `MutexGuard<'_, Option<TransactionInner>>` is `Send` (because
+	/// `TransactionInner: Send`), and `spawn_local`'s `'pool` lifetime
+	/// admits non-`'static` borrows from `&self`.
 	inner: Mutex<Option<TransactionInner>>,
 	/// The current transaction state
 	transaction_state: Arc<AtomicU8>,
@@ -747,6 +787,7 @@ impl Datastore {
 		}
 		// Create a new transaction
 		Ok(Box::new(Transaction {
+			cursors_alive: AtomicUsize::new(0),
 			done: AtomicBool::new(false),
 			write,
 			versioned: self.versioned,
@@ -902,8 +943,19 @@ impl Transaction {
 	}
 
 	/// Build a fresh `ReadOptions` for a count operation.
-	/// Sets the iterate bounds, the captured snapshot, async-io, disables
-	/// caching flags, and (when applicable) the version timestamp.
+	///
+	/// Count is the known-bulk path: it walks the full range, never
+	/// stopping early, and doesn't fill the block cache (`fill_cache =
+	/// false`) so it can't pollute the cache with one-off data. We set
+	/// an explicit `set_readahead_size` of 2 MiB so the dedicated
+	/// prefetch buffer reads big chunks instead of waiting for the
+	/// DB-level auto-readahead to ramp up from 8 KiB to its 256 KiB cap
+	/// (the auto-readahead's exponential ramp pays a measurable
+	/// per-block latency tax during the warm-up; explicit
+	/// `set_readahead_size` skips the ramp). The explicit prefetch
+	/// buffer is safe to combine with `fill_cache = false` — it's
+	/// per-iterator and freed when the iterator drops, so it cannot
+	/// outlive the count.
 	fn count_read_options(
 		&self,
 		rng: &Range<Key>,
@@ -915,6 +967,9 @@ impl Transaction {
 		ro.set_iterate_lower_bound(rng.start.clone());
 		ro.set_iterate_upper_bound(rng.end.clone());
 		ro.set_auto_readahead_size(true);
+		// 2 MiB per-iterator prefetch buffer for the known-bulk count
+		// path. See function docstring for rationale.
+		ro.set_readahead_size(2 * 1024 * 1024);
 		ro.set_async_io(true);
 		ro.fill_cache(false);
 		ro.set_verify_checksums(self.scan_verify_checksums);
@@ -1150,10 +1205,629 @@ impl Transaction {
 			consume_vals(&mut iter, limit, skip, dir)
 		}
 	}
+
+	/// Build a fresh `DBRawIterator` for a stateful scan and erase its
+	/// borrow lifetime to `'static`. The variant is chosen by `self.write`:
+	/// writable transactions iterate on `inner.tx` so pending writes in
+	/// this logical tx are visible through `BaseDeltaIterator`; read-only
+	/// transactions iterate on `self.db` directly to avoid the
+	/// `BaseDeltaIterator` wrapper.
+	///
+	/// The iterator is **not** seeked here — the first `next_batch` call
+	/// performs the seek so a caller that opens a cursor and never pumps
+	/// pays no LSM-seek cost.
+	///
+	/// SAFETY: the `'static` lifetime on the returned iterator is an
+	/// erasure of the borrow into `inner.tx` (writable) or `self.db`
+	/// (read-only). Sound because the iterator is moved into a
+	/// caller-owned cursor handle whose drop order is load-bearing:
+	///
+	/// * On the cursor handle (`RocksDbKeysCursor` / `RocksDbValsCursor`), the `ScanState` field
+	///   (which carries this iterator) is declared before `_alive_guard`. Rust drops fields in
+	///   declaration order, so the iterator's destructor runs while the parent (snapshot, tx, db)
+	///   is still alive; only after that does `AliveGuard::drop` decrement `cursors_alive`.
+	/// * `commit`/`cancel` set `done = true` (SeqCst) and then `drain_cursors` until `cursors_alive
+	///   == 0` before consuming `inner`. Paired with the open-protocol `fetch_add(SeqCst)` then
+	///   `load(done, SeqCst)` on `open_*_cursor`, any cursor either completes and drops (drain
+	///   observes it and waits) or sees `done == true` and aborts before allocating its iterator.
+	///
+	/// Both invariants are documented at `Transaction::cursors_alive` and
+	/// the cursor handle field order in `scan_cursor.rs`.
+	fn build_scan_iter(
+		&self,
+		rng: &Range<Key>,
+		version: Option<u64>,
+		inner: &TransactionInner,
+	) -> ScanIter {
+		let ro = self.scan_read_options(rng, version, inner);
+		if self.write {
+			let iter = inner.tx.raw_iterator_opt(ro);
+			// SAFETY: erasing the iterator's borrow into `inner.tx` to
+			// `'static`. Sound iff the four invariants below all hold;
+			// changing any of them silently produces use-after-free.
+			//
+			//   I1. CURSOR FIELD ORDER. `RocksDbValsCursor` / `RocksDbKeysCursor` declare
+			//       `state` BEFORE `_alive_guard`. Rust drops fields in declaration order, so the
+			//       iterator (inside `state`) is destroyed before `_alive_guard` decrements
+			//       `cursors_alive`. Do not reorder these fields, do not extract `ScanState` into a
+			//       separately-owned helper, and do not introduce any helper that moves the
+			// iterator       out of the cursor.
+			//
+			//   I2. DRAIN ON COMMIT/CANCEL. `commit`/`cancel` set `done = true` (SeqCst), then
+			//       `drain_cursors().await` until `cursors_alive == 0` BEFORE consuming `inner`.
+			//       Without the drain, the boxed `rocksdb::Transaction` could be dropped while an
+			//       iterator still references it.
+			//
+			//   I3. SEQCST OPEN PROTOCOL. `open_*_cursor` does `fetch_add(cursors_alive, SeqCst)`
+			//       then `load(done, SeqCst)`. Paired against commit's `swap(done, SeqCst)` then
+			//       `load(cursors_alive, SeqCst)`, the four-op SeqCst total order rules out the
+			//       interleaving where a cursor opens AFTER commit has observed
+			//       `cursors_alive == 0`.
+			//
+			//   I4. BORROW-CHECKER-TIED CURSOR LIFETIME. The cursor handle returned to the caller
+			// is       `Box<dyn ScanCursorKeys + 'a>` where `'a` is the borrow of `&'a
+			// Transaction`. The       cursor cannot outlive the `Transaction` at the type level.
+			// If you ever expose a       way to upgrade this to `'static` (e.g. through
+			// `Arc<Transaction>`), invariants       I1–I3 alone are no longer sufficient — you
+			// must additionally hold the parent       alive past every cursor's drop.
+			//
+			// Migrating to `self_cell` or `ouroboros` would express the
+			// self-referential borrow at the type level and remove this
+			// transmute. See the module comment in `scan_cursor.rs`.
+			let iter: DBRawIteratorWithThreadMode<
+				'static,
+				rocksdb::Transaction<'static, OptimisticTransactionDB>,
+			> = unsafe {
+				std::mem::transmute::<
+					DBRawIteratorWithThreadMode<
+						'_,
+						rocksdb::Transaction<'static, OptimisticTransactionDB>,
+					>,
+					DBRawIteratorWithThreadMode<
+						'static,
+						rocksdb::Transaction<'static, OptimisticTransactionDB>,
+					>,
+				>(iter)
+			};
+			ScanIter::Tx(iter)
+		} else {
+			let iter = self.db.raw_iterator_opt(ro);
+			// SAFETY: same four invariants as the writable branch above
+			// (cursor field order, drain on commit/cancel, SeqCst open
+			// protocol, borrow-checker-tied cursor lifetime). The erased
+			// borrow here is into `self.db` (`Pin<Arc<OptimisticTransactionDB>>`)
+			// rather than `inner.tx`; `db` is held by the `Transaction`
+			// itself so the drain on `cursors_alive` is what keeps it
+			// alive until every iterator has destructed.
+			let iter: DBRawIteratorWithThreadMode<'static, OptimisticTransactionDB> = unsafe {
+				std::mem::transmute::<
+					DBRawIteratorWithThreadMode<'_, OptimisticTransactionDB>,
+					DBRawIteratorWithThreadMode<'static, OptimisticTransactionDB>,
+				>(iter)
+			};
+			ScanIter::Db(iter)
+		}
+	}
 }
 
-#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+/// Drain wait: yield-loop until no caller-owned cursors are alive on
+/// this transaction. Called as the first action of `commit`/`cancel`
+/// (after `done` has been set to `true`, so no new cursors can open).
+///
+/// Uses `SeqCst` to participate in the same total order as the cursor's
+/// open protocol (`fetch_add(SeqCst)` then `load(done, SeqCst)`) and
+/// commit's own `done.swap(SeqCst)`. The four operations together rule
+/// out the case where commit reads `count == 0` and cursor reads
+/// `done == false`: in any SeqCst total order, either the cursor's
+/// `fetch_add` precedes this load (commit sees `count >= 1`, waits), or
+/// the cursor's `done` load follows commit's `done` swap (cursor sees
+/// `done == true`, aborts). The SeqCst load is also at least as strong as
+/// Acquire, so each cursor's `AliveGuard::drop` (`Release`) synchronises
+/// with this load — any iterator-destructor side effects on the rocksdb
+/// parent's refcount are visible to the commit thread before it proceeds
+/// to consume `inner`.
+///
+/// In practice the wait is one or zero yields — callers conventionally
+/// drop cursors before committing — but the loop is correct under
+/// arbitrary scheduling.
+///
+/// # Stuck drain
+///
+/// We cannot time out: if `cursors_alive > 0`, an iterator destructor
+/// has not yet decremented the rocksdb parent's refcount, and giving up
+/// here would let `commit`/`cancel` consume `inner` underneath a live
+/// iterator (use-after-free). So a stuck cursor-holding task causes the
+/// drain to wait forever — silent hang.
+///
+/// To make that loud rather than silent, we emit one `warn!` per drain
+/// once the wait exceeds [`DRAIN_STUCK_WARN_AFTER`]. The warning fires
+/// at most once per `drain_cursors` call to avoid log spam, with an
+/// escalating second warning at `10×` the threshold for confirmation.
+/// The clock is consulted only every 1024 yields to keep the steady-state
+/// (zero or one yield) cost unchanged.
+async fn drain_cursors(tx: &Transaction) {
+	if tx.cursors_alive.load(Ordering::SeqCst) == 0 {
+		return;
+	}
+	let started = Instant::now();
+	let mut warned = false;
+	let mut escalated = false;
+	let mut yields: u32 = 0;
+	while tx.cursors_alive.load(Ordering::SeqCst) > 0 {
+		tokio::task::yield_now().await;
+		yields = yields.wrapping_add(1);
+		// Cheap mask check — only consult the wall clock once per ~1024
+		// yields so the hot path (drain completing in 0–1 yields) is
+		// unaffected.
+		if yields & 1023 == 0 {
+			let elapsed = started.elapsed();
+			if !warned && elapsed >= DRAIN_STUCK_WARN_AFTER {
+				let alive = tx.cursors_alive.load(Ordering::SeqCst);
+				warn!(
+					target: TARGET,
+					"drain_cursors waiting unusually long: {alive} cursor(s) still alive after {elapsed:?}; \
+					possible stuck task holding a cursor handle past commit/cancel"
+				);
+				warned = true;
+			}
+			if !escalated && elapsed >= DRAIN_STUCK_WARN_AFTER * 10 {
+				let alive = tx.cursors_alive.load(Ordering::SeqCst);
+				warn!(
+					target: TARGET,
+					"drain_cursors still blocked: {alive} cursor(s) alive after {elapsed:?}; \
+					commit/cancel will not progress until every cursor handle is dropped"
+				);
+				escalated = true;
+			}
+		}
+	}
+}
+
+/// How long [`drain_cursors`] waits before logging a warning. Chosen so
+/// the routine drain (single-digit microseconds) never trips it and a
+/// truly stuck cursor produces a loud, single-line signal in logs.
+const DRAIN_STUCK_WARN_AFTER: Duration = Duration::from_secs(5);
+
+/// Perform the first-time seek (if not yet done), then iterate the
+/// underlying `DBRawIterator`, copying each key into `state.key_buf` and
+/// recording its `(offset, len)` in `state.key_spans`. Returns the total
+/// key bytes for the batch. Both buffers are reused across calls — the
+/// caller is responsible for clearing them before invoking this helper.
+fn fill_keys_into_state(state: &mut ScanStateKeys, limit: ScanLimit) -> Result<u64> {
+	if !state.started {
+		match (&mut state.iter, state.dir) {
+			(ScanIter::Db(iter), Direction::Forward) => iter.seek(&state.start),
+			(ScanIter::Db(iter), Direction::Backward) => iter.seek_for_prev(&state.end),
+			(ScanIter::Tx(iter), Direction::Forward) => iter.seek(&state.start),
+			(ScanIter::Tx(iter), Direction::Backward) => iter.seek_for_prev(&state.end),
+		}
+		state.started = true;
+		// Burn the pending skip directly against the iterator without
+		// materialising or copying anything.
+		let skip = std::mem::take(&mut state.skip);
+		for _ in 0..skip {
+			let still_valid = match &mut state.iter {
+				ScanIter::Db(iter) => iter.valid().then(|| match state.dir {
+					Direction::Forward => iter.next(),
+					Direction::Backward => iter.prev(),
+				}),
+				ScanIter::Tx(iter) => iter.valid().then(|| match state.dir {
+					Direction::Forward => iter.next(),
+					Direction::Backward => iter.prev(),
+				}),
+			};
+			if still_valid.is_none() {
+				match &state.iter {
+					ScanIter::Db(iter) => iter.status()?,
+					ScanIter::Tx(iter) => iter.status()?,
+				}
+				return Ok(0);
+			}
+		}
+	}
+	match &mut state.iter {
+		ScanIter::Db(iter) => {
+			fill_keys_inner(iter, limit, state.dir, &mut state.key_buf, &mut state.key_spans)
+		}
+		ScanIter::Tx(iter) => {
+			fill_keys_inner(iter, limit, state.dir, &mut state.key_buf, &mut state.key_spans)
+		}
+	}
+}
+
+/// Same as [`fill_keys_into_state`], for key+value pairs. Fills
+/// `state.key_buf`, `state.val_buf`, and `state.spans`. Returns
+/// `(key_bytes, value_bytes)` for the batch.
+fn fill_vals_into_state(state: &mut ScanStateVals, limit: ScanLimit) -> Result<(u64, u64)> {
+	if !state.started {
+		match (&mut state.iter, state.dir) {
+			(ScanIter::Db(iter), Direction::Forward) => iter.seek(&state.start),
+			(ScanIter::Db(iter), Direction::Backward) => iter.seek_for_prev(&state.end),
+			(ScanIter::Tx(iter), Direction::Forward) => iter.seek(&state.start),
+			(ScanIter::Tx(iter), Direction::Backward) => iter.seek_for_prev(&state.end),
+		}
+		state.started = true;
+		let skip = std::mem::take(&mut state.skip);
+		for _ in 0..skip {
+			let still_valid = match &mut state.iter {
+				ScanIter::Db(iter) => iter.valid().then(|| match state.dir {
+					Direction::Forward => iter.next(),
+					Direction::Backward => iter.prev(),
+				}),
+				ScanIter::Tx(iter) => iter.valid().then(|| match state.dir {
+					Direction::Forward => iter.next(),
+					Direction::Backward => iter.prev(),
+				}),
+			};
+			if still_valid.is_none() {
+				match &state.iter {
+					ScanIter::Db(iter) => iter.status()?,
+					ScanIter::Tx(iter) => iter.status()?,
+				}
+				return Ok((0, 0));
+			}
+		}
+	}
+	match &mut state.iter {
+		ScanIter::Db(iter) => fill_vals_inner(
+			iter,
+			limit,
+			state.dir,
+			&mut state.key_buf,
+			&mut state.val_buf,
+			&mut state.spans,
+		),
+		ScanIter::Tx(iter) => fill_vals_inner(
+			iter,
+			limit,
+			state.dir,
+			&mut state.key_buf,
+			&mut state.val_buf,
+			&mut state.spans,
+		),
+	}
+}
+
+/// Estimate the bytes/items a keys-only batch will need and reserve
+/// capacity on the cursor's buffers up front. Saves the
+/// `Vec::extend_from_slice` reallocations on the first batch of a fresh
+/// cursor; subsequent batches already have capacity from peak usage.
+#[inline]
+fn reserve_for_keys(limit: ScanLimit, key_buf: &mut Vec<u8>, key_spans: &mut Vec<KeySpan>) {
+	let (bytes, count) = match limit {
+		ScanLimit::Count(c) => {
+			let c = c as usize;
+			(c.saturating_mul(ESTIMATED_BYTES_PER_KEY as usize), c)
+		}
+		ScanLimit::Bytes(b) => (b as usize, b as usize / ESTIMATED_BYTES_PER_KEY as usize),
+		ScanLimit::BytesOrCount(b, c) => {
+			let c = c as usize;
+			((b as usize).min(c.saturating_mul(ESTIMATED_BYTES_PER_KEY as usize)), c)
+		}
+	};
+	let need_buf = bytes.saturating_sub(key_buf.capacity());
+	if need_buf > 0 {
+		key_buf.reserve(need_buf);
+	}
+	let need_spans = count.saturating_sub(key_spans.capacity());
+	if need_spans > 0 {
+		key_spans.reserve(need_spans);
+	}
+}
+
+/// Reserve capacity for a key+value batch. See [`reserve_for_keys`].
+#[inline]
+fn reserve_for_vals(
+	limit: ScanLimit,
+	key_buf: &mut Vec<u8>,
+	val_buf: &mut Vec<u8>,
+	spans: &mut Vec<KeyValSpan>,
+) {
+	let (bytes, count) = match limit {
+		ScanLimit::Count(c) => {
+			let c = c as usize;
+			(c.saturating_mul(ESTIMATED_BYTES_PER_KV as usize), c)
+		}
+		ScanLimit::Bytes(b) => (b as usize, b as usize / ESTIMATED_BYTES_PER_KV as usize),
+		ScanLimit::BytesOrCount(b, c) => {
+			let c = c as usize;
+			((b as usize).min(c.saturating_mul(ESTIMATED_BYTES_PER_KV as usize)), c)
+		}
+	};
+	// Split the byte budget across key and value buffers roughly evenly;
+	// the exact split is an estimate, growth past it is one extra
+	// reallocation per buffer per batch in the worst case.
+	//
+	// TODO(perf): the 50/50 split is workload-agnostic. Record tables
+	// in SurrealDB typically have values much larger than keys, so
+	// `val_buf` is the buffer that actually grows. A weighted split
+	// (e.g. 1/4 keys, 3/4 values) backed by per-cursor running averages
+	// would eliminate the first-batch `val_buf` reallocation on
+	// value-heavy scans. Holding off because the win is one
+	// reallocation per cursor (not per batch — capacity persists), so
+	// it's only worth doing once we have a benchmark that isolates it.
+	let half = bytes / 2;
+	let need_kbuf = half.saturating_sub(key_buf.capacity());
+	if need_kbuf > 0 {
+		key_buf.reserve(need_kbuf);
+	}
+	let need_vbuf = half.saturating_sub(val_buf.capacity());
+	if need_vbuf > 0 {
+		val_buf.reserve(need_vbuf);
+	}
+	let need_spans = count.saturating_sub(spans.capacity());
+	if need_spans > 0 {
+		spans.reserve(need_spans);
+	}
+}
+
+/// Generic-over-`D: DBAccess` inner loop that writes each key into
+/// `key_buf` and pushes its [`KeySpan`]. No per-item heap allocation;
+/// the only allocation is any capacity growth on `key_buf` /
+/// `key_spans` itself (avoided after the first batch since capacity
+/// persists).
+fn fill_keys_inner<D: rocksdb::DBAccess>(
+	iter: &mut rocksdb::DBRawIteratorWithThreadMode<'_, D>,
+	limit: ScanLimit,
+	dir: Direction,
+	key_buf: &mut Vec<u8>,
+	key_spans: &mut Vec<KeySpan>,
+) -> Result<u64> {
+	let mut key_bytes: u64 = 0;
+	// Pre-reserve from the limit hint so the first batch doesn't pay
+	// log2(N) `Vec::reserve` reallocations as `extend_from_slice` grows
+	// the buffer. Subsequent batches already hit the cached capacity.
+	reserve_for_keys(limit, key_buf, key_spans);
+	let push_key = |k: &[u8], key_buf: &mut Vec<u8>, key_spans: &mut Vec<KeySpan>| {
+		let offset = key_buf.len();
+		let len = k.len();
+		key_buf.extend_from_slice(k);
+		key_spans.push(KeySpan {
+			offset,
+			len,
+		});
+	};
+	match limit {
+		ScanLimit::Count(c) => {
+			let c = c as u64;
+			let mut count = 0u64;
+			while count < c {
+				let Some(k) = iter.key() else {
+					break;
+				};
+				push_key(k, key_buf, key_spans);
+				key_bytes += k.len() as u64;
+				count += 1;
+				match dir {
+					Direction::Forward => iter.next(),
+					Direction::Backward => iter.prev(),
+				};
+			}
+		}
+		ScanLimit::Bytes(b) => {
+			let b = b as u64;
+			while key_bytes < b {
+				let Some(k) = iter.key() else {
+					break;
+				};
+				push_key(k, key_buf, key_spans);
+				key_bytes += k.len() as u64;
+				match dir {
+					Direction::Forward => iter.next(),
+					Direction::Backward => iter.prev(),
+				};
+			}
+		}
+		ScanLimit::BytesOrCount(b, c) => {
+			let b = b as u64;
+			let c = c as u64;
+			let mut count = 0u64;
+			while count < c && key_bytes < b {
+				let Some(k) = iter.key() else {
+					break;
+				};
+				push_key(k, key_buf, key_spans);
+				key_bytes += k.len() as u64;
+				count += 1;
+				match dir {
+					Direction::Forward => iter.next(),
+					Direction::Backward => iter.prev(),
+				};
+			}
+		}
+	}
+	iter.status()?;
+	Ok(key_bytes)
+}
+
+/// Generic-over-`D: DBAccess` inner loop for key+value batches. See
+/// [`fill_keys_inner`].
+fn fill_vals_inner<D: rocksdb::DBAccess>(
+	iter: &mut rocksdb::DBRawIteratorWithThreadMode<'_, D>,
+	limit: ScanLimit,
+	dir: Direction,
+	key_buf: &mut Vec<u8>,
+	val_buf: &mut Vec<u8>,
+	spans: &mut Vec<KeyValSpan>,
+) -> Result<(u64, u64)> {
+	let mut key_bytes: u64 = 0;
+	let mut value_bytes: u64 = 0;
+	// See `reserve_for_keys` — same rationale for the key+value path.
+	reserve_for_vals(limit, key_buf, val_buf, spans);
+	let push_pair = |k: &[u8],
+	                 v: &[u8],
+	                 key_buf: &mut Vec<u8>,
+	                 val_buf: &mut Vec<u8>,
+	                 spans: &mut Vec<KeyValSpan>| {
+		let key_offset = key_buf.len();
+		let key_len = k.len();
+		key_buf.extend_from_slice(k);
+		let val_offset = val_buf.len();
+		let val_len = v.len();
+		val_buf.extend_from_slice(v);
+		spans.push(KeyValSpan {
+			key_offset,
+			key_len,
+			val_offset,
+			val_len,
+		});
+	};
+	match limit {
+		ScanLimit::Count(c) => {
+			let c = c as u64;
+			let mut count = 0u64;
+			while count < c {
+				let Some((k, v)) = iter.item() else {
+					break;
+				};
+				push_pair(k, v, key_buf, val_buf, spans);
+				key_bytes += k.len() as u64;
+				value_bytes += v.len() as u64;
+				count += 1;
+				match dir {
+					Direction::Forward => iter.next(),
+					Direction::Backward => iter.prev(),
+				};
+			}
+		}
+		ScanLimit::Bytes(b) => {
+			let b = b as u64;
+			let mut bytes_fetched = 0u64;
+			while bytes_fetched < b {
+				let Some((k, v)) = iter.item() else {
+					break;
+				};
+				let kl = k.len() as u64;
+				let vl = v.len() as u64;
+				push_pair(k, v, key_buf, val_buf, spans);
+				bytes_fetched += kl + vl;
+				key_bytes += kl;
+				value_bytes += vl;
+				match dir {
+					Direction::Forward => iter.next(),
+					Direction::Backward => iter.prev(),
+				};
+			}
+		}
+		ScanLimit::BytesOrCount(b, c) => {
+			let b = b as u64;
+			let c = c as u64;
+			let mut count = 0u64;
+			let mut bytes_fetched = 0u64;
+			while count < c && bytes_fetched < b {
+				let Some((k, v)) = iter.item() else {
+					break;
+				};
+				let kl = k.len() as u64;
+				let vl = v.len() as u64;
+				push_pair(k, v, key_buf, val_buf, spans);
+				bytes_fetched += kl + vl;
+				key_bytes += kl;
+				value_bytes += vl;
+				count += 1;
+				match dir {
+					Direction::Forward => iter.next(),
+					Direction::Backward => iter.prev(),
+				};
+			}
+		}
+	}
+	iter.status()?;
+	Ok((key_bytes, value_bytes))
+}
+
+/// Advance the cursor by one batch of keys. Returns a [`KeysBatch`]
+/// borrowed from the cursor's internal buffer for the lifetime of the
+/// `&mut self` borrow. The cursor handle owns `state` directly (no
+/// per-tx map lookup, no per-batch lock); the only synchronisation here
+/// is the `done` check, which lets us bail cleanly if `commit`/`cancel`
+/// raced ahead of us.
+///
+/// Dispatches inline or to `affinitypool::spawn_local` depending on
+/// `should_offload`. The pending skip stored on the cursor state is
+/// folded into the byte estimate so a `START 5000 LIMIT 100`-style
+/// open's first batch — which still iterates the 5000-row skip prefix
+/// inline — is offloaded if its total work exceeds the threshold.
+/// After the first batch, `state.skip` is 0 and subsequent batches use
+/// only `limit`.
+pub(in crate::kvs::rocksdb) async fn cursor_next_keys<'s>(
+	cursor: &'s mut RocksDbKeysCursor<'_>,
+	limit: ScanLimit,
+) -> Result<KeysBatch<'s>> {
+	// Best-effort early-exit on a stale handle. Cursor-vs-commit safety
+	// is already guaranteed by the `cursors_alive` drain + the borrow
+	// checker on the cursor handle, so a stale read here only delays the
+	// error by at most one batch — well worth the cheaper load.
+	if cursor.tx.done.load(Ordering::Relaxed) {
+		return Err(Error::TransactionFinished);
+	}
+	// Reset the reusable buffers before each batch. The allocations
+	// themselves persist via Vec's capacity.
+	cursor.state.key_buf.clear();
+	cursor.state.key_spans.clear();
+	let inline_scan_threshold = cursor.tx.inline_scan_threshold;
+	let pending_skip = cursor.state.skip;
+	let state: &mut ScanStateKeys = &mut cursor.state;
+	let key_bytes = if Transaction::should_offload(
+		inline_scan_threshold,
+		limit,
+		pending_skip,
+		ESTIMATED_BYTES_PER_KEY,
+	) {
+		affinitypool::spawn_local(move || -> Result<u64> { fill_keys_into_state(state, limit) })
+			.await?
+	} else {
+		fill_keys_into_state(state, limit)?
+	};
+	// Borrow the freshly-populated buffers back out as the batch. Zero
+	// allocations here — the batch is just a `&[u8]` + `&[KeySpan]` over
+	// the cursor's own storage.
+	Ok(KeysBatch::from_parts(&cursor.state.key_buf, &cursor.state.key_spans, key_bytes))
+}
+
+/// Advance the cursor by one batch of key+value pairs. See
+/// [`cursor_next_keys`].
+pub(in crate::kvs::rocksdb) async fn cursor_next_vals<'s>(
+	cursor: &'s mut RocksDbValsCursor<'_>,
+	limit: ScanLimit,
+) -> Result<ValsBatch<'s>> {
+	// Best-effort early-exit on a stale handle. Cursor-vs-commit safety
+	// is already guaranteed by the `cursors_alive` drain + the borrow
+	// checker on the cursor handle, so a stale read here only delays the
+	// error by at most one batch — well worth the cheaper load.
+	if cursor.tx.done.load(Ordering::Relaxed) {
+		return Err(Error::TransactionFinished);
+	}
+	cursor.state.key_buf.clear();
+	cursor.state.val_buf.clear();
+	cursor.state.spans.clear();
+	let inline_scan_threshold = cursor.tx.inline_scan_threshold;
+	let pending_skip = cursor.state.skip;
+	let state: &mut ScanStateVals = &mut cursor.state;
+	let (key_bytes, value_bytes) = if Transaction::should_offload(
+		inline_scan_threshold,
+		limit,
+		pending_skip,
+		ESTIMATED_BYTES_PER_KV,
+	) {
+		affinitypool::spawn_local(move || -> Result<(u64, u64)> {
+			fill_vals_into_state(state, limit)
+		})
+		.await?
+	} else {
+		fill_vals_into_state(state, limit)?
+	};
+	// Borrow the freshly-populated buffers back out as the batch. Zero
+	// allocations here.
+	Ok(ValsBatch::from_parts(
+		&cursor.state.key_buf,
+		&cursor.state.val_buf,
+		&cursor.state.spans,
+		key_bytes,
+		value_bytes,
+	))
+}
+
 impl Transactable for Transaction {
 	fn kind(&self) -> &'static str {
 		"rocksdb"
@@ -1171,311 +1845,347 @@ impl Transactable for Transaction {
 
 	/// Cancel a transaction.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self))]
-	async fn cancel(&self) -> Result<()> {
-		// Atomically mark transaction as done and check if it was already closed
-		if self.done.swap(true, Ordering::AcqRel) {
-			return Err(Error::TransactionFinished);
-		}
-		// Lock the inner transaction
-		let inner = self.inner.lock().await;
-		// Get the inner transaction
-		let inner =
-			inner.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-		// Cancel this transaction
-		inner.tx.rollback()?;
-		// Continue
-		Ok(())
+	fn cancel(&self) -> BoxFut<'_, Result<()>> {
+		Box::pin(async move {
+			// Atomically mark transaction as done and check if it was already
+			// closed. SeqCst pairs with the cursor open protocol — see
+			// `drain_cursors` for the full ordering argument.
+			if self.done.swap(true, Ordering::SeqCst) {
+				return Err(Error::TransactionFinished);
+			}
+			// Wait for any caller-owned cursors to drop before we consume
+			// `inner`. Each cursor's `AliveGuard` decrements `cursors_alive`
+			// only AFTER its iterator's destructor runs (field-declaration
+			// order on the cursor handle), so by the time we observe
+			// `cursors_alive == 0` every iterator has decremented its
+			// parent's refcount. `done` was already swapped to `true`
+			// above, so no new cursor can open. See `scan_cursor.rs` for
+			// the SeqCst ordering rationale.
+			drain_cursors(self).await;
+			// Lock the inner transaction
+			let inner = self.inner.lock().await;
+			// Get the inner transaction
+			let inner =
+				inner.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+			// Cancel this transaction
+			inner.tx.rollback()?;
+			// Continue
+			Ok(())
+		})
 	}
 
 	/// Commit a transaction.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self))]
-	async fn commit(&self) -> Result<()> {
-		// Atomically mark transaction as done and check if it was already closed
-		if self.done.swap(true, Ordering::AcqRel) {
-			return Err(Error::TransactionFinished);
-		}
-		// Check to see if transaction is writable
-		if !self.writeable() {
-			return Err(Error::TransactionReadonly);
-		}
-		// Check if we are in read-and-deletion-only mode
-		if self.is_restricted(true) && self.contains_writes() {
-			return Err(Error::ReadAndDeleteOnly);
-		}
-		// Take ownership of the transaction state. The sync mutex guard is
-		// released as soon as this statement completes, so no lock is held
-		// across subsequent awaits (e.g. the commit coordinator wait below).
-		let TransactionInner {
-			tx: inner,
-			snapshot,
-		} = self
-			.inner
-			.lock()
-			.await
-			.take()
-			.ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-		// Explicitly drop the snapshot before consuming the boxed transaction.
-		// `snapshot` borrows the transaction inside `inner`, and `commit` consumes
-		// it, so the snapshot must be released first.
-		drop(snapshot);
-		// When versioned, stamp all writes with the current HLC timestamp
-		if self.versioned {
-			let ts = HlcTimeStamp::next();
-			inner.set_commit_timestamp(ts.0);
-		}
-		// Always commit the RocksDB transaction on the caller thread for parallel commits
-		(*inner).commit()?;
-		// If we have a coordinator, wait for the grouped fsync
-		if let Some(coordinator) = &self.commit_coordinator {
-			coordinator.wait_for_sync().await?;
-		}
-		// Perform compaction if necessary
-		if self.is_restricted(true) && self.contains_deletes() {
-			self.compact(None).await?;
-		}
-		// Continue
-		Ok(())
+	fn commit(&self) -> BoxFut<'_, Result<()>> {
+		Box::pin(async move {
+			// Atomically mark transaction as done and check if it was already
+			// closed. SeqCst pairs with the cursor open protocol — see
+			// `drain_cursors` for the full ordering argument.
+			if self.done.swap(true, Ordering::SeqCst) {
+				return Err(Error::TransactionFinished);
+			}
+			// Check to see if transaction is writable
+			if !self.writeable() {
+				return Err(Error::TransactionReadonly);
+			}
+			// Check if we are in read-and-deletion-only mode
+			if self.is_restricted(true) && self.contains_writes() {
+				return Err(Error::ReadAndDeleteOnly);
+			}
+			// Wait for any caller-owned cursors to drop before we consume
+			// `inner`. See the matching comment in `cancel` for rationale.
+			drain_cursors(self).await;
+			// Take ownership of the transaction state. The tokio mutex guard
+			// is dropped at the end of this statement, so no lock is held
+			// across subsequent awaits (e.g. the commit coordinator wait below).
+			let TransactionInner {
+				tx: inner,
+				snapshot,
+			} = self
+				.inner
+				.lock()
+				.await
+				.take()
+				.ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+			// Explicitly drop the snapshot before consuming the boxed transaction.
+			// `snapshot` borrows the transaction inside `inner`, and `commit` consumes
+			// it, so the snapshot must be released first.
+			drop(snapshot);
+			// When versioned, stamp all writes with the current HLC timestamp
+			if self.versioned {
+				let ts = HlcTimeStamp::next();
+				inner.set_commit_timestamp(ts.0);
+			}
+			// Always commit the RocksDB transaction on the caller thread for parallel commits
+			(*inner).commit()?;
+			// If we have a coordinator, wait for the grouped fsync
+			if let Some(coordinator) = &self.commit_coordinator {
+				coordinator.wait_for_sync().await?;
+			}
+			// Perform compaction if necessary
+			if self.is_restricted(true) && self.contains_deletes() {
+				self.compact(None).await?;
+			}
+			// Continue
+			Ok(())
+		})
 	}
 
 	/// Check if a key exists.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(key = key.sprint()))]
-	async fn exists(&self, key: Key, version: Option<u64>) -> Result<bool> {
-		// Versioned queries require a versioned datastore
-		if !self.versioned && version.is_some() {
-			return Err(Error::UnsupportedVersionedQueries);
-		}
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Lock the inner transaction
-		let guard = self.inner.lock().await;
-		// Get the inner transaction
-		let inner =
-			guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-		// Get the key
-		let res = if version.is_some() {
-			inner.tx.get_pinned_opt(key, &self.versioned_read_options(version, inner))
-		} else {
-			inner.tx.get_pinned_opt(key, &self.read_options)
-		}?
-		.is_some();
-		// Return result
-		Ok(res)
+	fn exists(&self, key: Key, version: Option<u64>) -> BoxFut<'_, Result<bool>> {
+		Box::pin(async move {
+			// Versioned queries require a versioned datastore
+			if !self.versioned && version.is_some() {
+				return Err(Error::UnsupportedVersionedQueries);
+			}
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
+			}
+			// Lock the inner transaction
+			let guard = self.inner.lock().await;
+			// Get the inner transaction
+			let inner =
+				guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+			// Get the key
+			let res = if version.is_some() {
+				inner.tx.get_pinned_opt(key, &self.versioned_read_options(version, inner))
+			} else {
+				inner.tx.get_pinned_opt(key, &self.read_options)
+			}?
+			.is_some();
+			// Return result
+			Ok(res)
+		})
 	}
 
 	/// Fetch a key from the database.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(key = key.sprint()))]
-	async fn get(&self, key: Key, version: Option<u64>) -> Result<Option<Val>> {
-		// Versioned queries require a versioned datastore
-		if !self.versioned && version.is_some() {
-			return Err(Error::UnsupportedVersionedQueries);
-		}
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Lock the transaction inner
-		let guard = self.inner.lock().await;
-		// Get the inner transaction
-		let inner =
-			guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-		// Get the key
-		let res = if version.is_some() {
-			inner.tx.get_opt(key, &self.versioned_read_options(version, inner))
-		} else {
-			inner.tx.get_opt(key, &self.read_options)
-		}?;
-		// Return result
-		Ok(res)
+	fn get(&self, key: Key, version: Option<u64>) -> BoxFut<'_, Result<Option<Val>>> {
+		Box::pin(async move {
+			// Versioned queries require a versioned datastore
+			if !self.versioned && version.is_some() {
+				return Err(Error::UnsupportedVersionedQueries);
+			}
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
+			}
+			// Lock the transaction inner
+			let guard = self.inner.lock().await;
+			// Get the inner transaction
+			let inner =
+				guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+			// Get the key
+			let res = if version.is_some() {
+				inner.tx.get_opt(key, &self.versioned_read_options(version, inner))
+			} else {
+				inner.tx.get_opt(key, &self.read_options)
+			}?;
+			// Return result
+			Ok(res)
+		})
 	}
 
 	/// Fetch many keys from the datastore.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(keys = keys.sprint()))]
-	async fn getm(&self, keys: Vec<Key>, version: Option<u64>) -> Result<GetMultiResult> {
-		// Versioned queries require a versioned datastore
-		if !self.versioned && version.is_some() {
-			return Err(Error::UnsupportedVersionedQueries);
-		}
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Lock the transaction inner
-		let guard = self.inner.lock().await;
-		// Get the transaction inner
-		let inner =
-			guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-		// Get the keys
-		let res = if version.is_some() {
-			inner.tx.multi_get_opt(keys, &self.versioned_read_options(version, inner))
-		} else {
-			inner.tx.multi_get_opt(keys, &self.read_options)
-		};
-		// Convert result, accumulating the hit count and value bytes during
-		// the same pass so callers do not need to re-walk the result.
-		let mut records = 0u64;
-		let mut value_bytes = 0u64;
-		let values = res
-			.into_iter()
-			.map(|r| match r {
-				Ok(Some(v)) => {
-					records += 1;
-					value_bytes += v.len() as u64;
-					Ok(Some(v))
-				}
-				Ok(None) => Ok(None),
-				Err(e) => Err(e.into()),
+	fn getm(&self, keys: Vec<Key>, version: Option<u64>) -> BoxFut<'_, Result<GetMultiResult>> {
+		Box::pin(async move {
+			// Versioned queries require a versioned datastore
+			if !self.versioned && version.is_some() {
+				return Err(Error::UnsupportedVersionedQueries);
+			}
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
+			}
+			// Lock the transaction inner
+			let guard = self.inner.lock().await;
+			// Get the transaction inner
+			let inner =
+				guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+			// Get the keys
+			let res = if version.is_some() {
+				inner.tx.multi_get_opt(keys, &self.versioned_read_options(version, inner))
+			} else {
+				inner.tx.multi_get_opt(keys, &self.read_options)
+			};
+			// Convert result, accumulating the hit count and value bytes during
+			// the same pass so callers do not need to re-walk the result.
+			let mut records = 0u64;
+			let mut value_bytes = 0u64;
+			let values = res
+				.into_iter()
+				.map(|r| match r {
+					Ok(Some(v)) => {
+						records += 1;
+						value_bytes += v.len() as u64;
+						Ok(Some(v))
+					}
+					Ok(None) => Ok(None),
+					Err(e) => Err(e.into()),
+				})
+				.collect::<Result<Vec<Option<Val>>>>()?;
+			Ok(GetMultiResult {
+				values,
+				records,
+				value_bytes,
 			})
-			.collect::<Result<Vec<Option<Val>>>>()?;
-		Ok(GetMultiResult {
-			values,
-			records,
-			value_bytes,
 		})
 	}
 
 	/// Insert or update a key in the database.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(key = key.sprint()))]
-	async fn set(&self, key: Key, val: Val) -> Result<()> {
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Check to see if transaction is writable
-		if !self.writeable() {
-			return Err(Error::TransactionReadonly);
-		}
-		// Check if we are in read-and-deletion-only mode
-		if self.is_restricted(false) {
-			return Err(Error::ReadAndDeleteOnly);
-		}
-		// Lock the transaction inner
-		let guard = self.inner.lock().await;
-		// Get the transaction inner
-		let inner =
-			guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-		// Set the key
-		inner.tx.put(key, val)?;
-		// Mark this transaction as containing a write operation
-		self.store_writes();
-		// Return result
-		Ok(())
+	fn set(&self, key: Key, val: Val) -> BoxFut<'_, Result<()>> {
+		Box::pin(async move {
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
+			}
+			// Check to see if transaction is writable
+			if !self.writeable() {
+				return Err(Error::TransactionReadonly);
+			}
+			// Check if we are in read-and-deletion-only mode
+			if self.is_restricted(false) {
+				return Err(Error::ReadAndDeleteOnly);
+			}
+			// Lock the transaction inner
+			let guard = self.inner.lock().await;
+			// Get the transaction inner
+			let inner =
+				guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+			// Set the key
+			inner.tx.put(key, val)?;
+			// Mark this transaction as containing a write operation
+			self.store_writes();
+			// Return result
+			Ok(())
+		})
 	}
 
 	/// Insert a key if it doesn't exist in the database.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(key = key.sprint()))]
-	async fn put(&self, key: Key, val: Val) -> Result<()> {
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Check to see if transaction is writable
-		if !self.writeable() {
-			return Err(Error::TransactionReadonly);
-		}
-		// Check if we are in read-and-deletion-only mode
-		if self.is_restricted(false) {
-			return Err(Error::ReadAndDeleteOnly);
-		}
-		// Lock the transaction inner
-		let guard = self.inner.lock().await;
-		// Get the transaction inner
-		let inner =
-			guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-		// Set the key if empty
-		match inner.tx.get_pinned_opt(&key, &self.read_options)? {
-			None => inner.tx.put(key, val)?,
-			_ => return Err(Error::TransactionKeyAlreadyExists),
-		};
-		// Mark this transaction as containing a write operation
-		self.store_writes();
-		// Return result
-		Ok(())
+	fn put(&self, key: Key, val: Val) -> BoxFut<'_, Result<()>> {
+		Box::pin(async move {
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
+			}
+			// Check to see if transaction is writable
+			if !self.writeable() {
+				return Err(Error::TransactionReadonly);
+			}
+			// Check if we are in read-and-deletion-only mode
+			if self.is_restricted(false) {
+				return Err(Error::ReadAndDeleteOnly);
+			}
+			// Lock the transaction inner
+			let guard = self.inner.lock().await;
+			// Get the transaction inner
+			let inner =
+				guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+			// Set the key if empty
+			match inner.tx.get_pinned_opt(&key, &self.read_options)? {
+				None => inner.tx.put(key, val)?,
+				_ => return Err(Error::TransactionKeyAlreadyExists),
+			};
+			// Mark this transaction as containing a write operation
+			self.store_writes();
+			// Return result
+			Ok(())
+		})
 	}
 
 	/// Insert a key if the current value matches a condition.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(key = key.sprint()))]
-	async fn putc(&self, key: Key, val: Val, chk: Option<Val>) -> Result<()> {
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Check to see if transaction is writable
-		if !self.writeable() {
-			return Err(Error::TransactionReadonly);
-		}
-		// Check if we are in read-and-deletion-only mode
-		if self.is_restricted(false) {
-			return Err(Error::ReadAndDeleteOnly);
-		}
-		// Lock the transaction inner
-		let guard = self.inner.lock().await;
-		// Get the transaction inner
-		let inner =
-			guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-		// Set the key if empty
-		match (inner.tx.get_pinned_opt(&key, &self.read_options)?, chk) {
-			(Some(v), Some(w)) if v.eq(&w) => inner.tx.put(key, val)?,
-			(None, None) => inner.tx.put(key, val)?,
-			_ => return Err(Error::TransactionConditionNotMet),
-		};
-		// Mark this transaction as containing a write operation
-		self.store_writes();
-		// Return result
-		Ok(())
+	fn putc(&self, key: Key, val: Val, chk: Option<Val>) -> BoxFut<'_, Result<()>> {
+		Box::pin(async move {
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
+			}
+			// Check to see if transaction is writable
+			if !self.writeable() {
+				return Err(Error::TransactionReadonly);
+			}
+			// Check if we are in read-and-deletion-only mode
+			if self.is_restricted(false) {
+				return Err(Error::ReadAndDeleteOnly);
+			}
+			// Lock the transaction inner
+			let guard = self.inner.lock().await;
+			// Get the transaction inner
+			let inner =
+				guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+			// Set the key if empty
+			match (inner.tx.get_pinned_opt(&key, &self.read_options)?, chk) {
+				(Some(v), Some(w)) if v.eq(&w) => inner.tx.put(key, val)?,
+				(None, None) => inner.tx.put(key, val)?,
+				_ => return Err(Error::TransactionConditionNotMet),
+			};
+			// Mark this transaction as containing a write operation
+			self.store_writes();
+			// Return result
+			Ok(())
+		})
 	}
 
 	/// Delete a key.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(key = key.sprint()))]
-	async fn del(&self, key: Key) -> Result<()> {
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Check to see if transaction is writable
-		if !self.writeable() {
-			return Err(Error::TransactionReadonly);
-		}
-		// Lock the transaction inner
-		let guard = self.inner.lock().await;
-		// Get the transaction inner
-		let inner =
-			guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-		// Remove the key
-		inner.tx.delete(key)?;
-		// Mark this transaction as containing a delete operation
-		self.store_deletes();
-		// Return result
-		Ok(())
+	fn del(&self, key: Key) -> BoxFut<'_, Result<()>> {
+		Box::pin(async move {
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
+			}
+			// Check to see if transaction is writable
+			if !self.writeable() {
+				return Err(Error::TransactionReadonly);
+			}
+			// Lock the transaction inner
+			let guard = self.inner.lock().await;
+			// Get the transaction inner
+			let inner =
+				guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+			// Remove the key
+			inner.tx.delete(key)?;
+			// Mark this transaction as containing a delete operation
+			self.store_deletes();
+			// Return result
+			Ok(())
+		})
 	}
 
 	/// Delete a key if the current value matches a condition.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(key = key.sprint()))]
-	async fn delc(&self, key: Key, chk: Option<Val>) -> Result<()> {
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Check to see if transaction is writable
-		if !self.writeable() {
-			return Err(Error::TransactionReadonly);
-		}
-		// Lock the transaction inner
-		let guard = self.inner.lock().await;
-		// Get the transaction inner
-		let inner =
-			guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-		// Delete the key if valid
-		match (inner.tx.get_pinned_opt(&key, &self.read_options)?, chk) {
-			(Some(v), Some(w)) if v.eq(&w) => inner.tx.delete(key)?,
-			(None, None) => inner.tx.delete(key)?,
-			_ => return Err(Error::TransactionConditionNotMet),
-		};
-		// Mark this transaction as containing a delete operation
-		self.store_deletes();
-		// Return result
-		Ok(())
+	fn delc(&self, key: Key, chk: Option<Val>) -> BoxFut<'_, Result<()>> {
+		Box::pin(async move {
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
+			}
+			// Check to see if transaction is writable
+			if !self.writeable() {
+				return Err(Error::TransactionReadonly);
+			}
+			// Lock the transaction inner
+			let guard = self.inner.lock().await;
+			// Get the transaction inner
+			let inner =
+				guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+			// Delete the key if valid
+			match (inner.tx.get_pinned_opt(&key, &self.read_options)?, chk) {
+				(Some(v), Some(w)) if v.eq(&w) => inner.tx.delete(key)?,
+				(None, None) => inner.tx.delete(key)?,
+				_ => return Err(Error::TransactionConditionNotMet),
+			};
+			// Mark this transaction as containing a delete operation
+			self.store_deletes();
+			// Return result
+			Ok(())
+		})
 	}
 
 	/// Count the total number of keys within a range.
@@ -1491,284 +2201,451 @@ impl Transactable for Transaction {
 	/// scan all shards in parallel against a shared snapshot, which is a
 	/// significant speed-up on large ranges (e.g. full-table `COUNT(*)`).
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(rng = rng.sprint()))]
-	async fn count(&self, rng: Range<Key>, version: Option<u64>) -> Result<usize> {
-		// Versioned queries require a versioned datastore
-		if !self.versioned && version.is_some() {
-			return Err(Error::UnsupportedVersionedQueries);
-		}
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Writable transactions iterate on the inner transaction so that
-		// pending writes are visible; this cannot safely be sharded across
-		// threads, so we fall back to a single serial scan.
-		if self.write {
-			return affinitypool::spawn_local(move || {
-				// Acquire the inner lock inside the task
-				let guard = self.inner.blocking_lock();
-				// Run the serial count
-				self.count_blocking(rng, version, guard)
-			})
-			.await;
-		}
-		// Decide how many shards to dispatch, bounded by the machine
-		// parallelism so we don't oversubscribe the affinitypool, and
-		// further bounded by `COUNT_PARALLEL_MAX_SHARDS` so very large
-		// CPU counts don't produce many tiny shards that all touch the
-		// same SSTs.
-		let desired = std::thread::available_parallelism()
-			.map(|n| n.get())
-			.unwrap_or(8)
-			.min(COUNT_PARALLEL_MAX_SHARDS);
-		// Compute the disjoint sub-ranges that together cover `[start, end)`.
-		// Returns a single shard when the range is too narrow to split
-		// meaningfully along its first differing byte.
-		let sub_ranges = shard_range(&rng.start, &rng.end, desired);
-		// Fall back to a single serial scan when the range is too narrow
-		// to split: dispatching a single shard would just add the overhead
-		// of an extra task hop with no parallelism benefit.
-		if sub_ranges.len() <= 1 {
-			return affinitypool::spawn_local(move || {
-				// Acquire the inner lock inside the task
-				let guard = self.inner.blocking_lock();
-				// Run the serial count
-				self.count_blocking(rng, version, guard)
-			})
-			.await;
-		}
-		// Build all shard `ReadOptions` under the inner lock so each shard
-		// captures the same snapshot pointer. The lock is dropped before
-		// dispatching shards: the snapshot stays alive for as long as
-		// `inner.tx` is alive (owned by this `Transaction`), and read-only
-		// transactions never take the inner out of the mutex.
-		let scans = {
-			// Acquire the inner lock
-			let guard = self.inner.lock().await;
-			// Get the inner transaction state
-			let inner =
-				guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-			// Build one (sub-range, ReadOptions) pair per shard
-			sub_ranges
-				.into_iter()
-				.map(|(lo, hi)| {
-					// Construct the shard's sub-range
-					let sub_rng = lo..hi;
-					// Build the ReadOptions for this shard
-					let ro = self.count_read_options(&sub_rng, version, inner);
-					(sub_rng, ro)
+	fn count(&self, rng: Range<Key>, version: Option<u64>) -> BoxFut<'_, Result<usize>> {
+		Box::pin(async move {
+			// Versioned queries require a versioned datastore
+			if !self.versioned && version.is_some() {
+				return Err(Error::UnsupportedVersionedQueries);
+			}
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
+			}
+			// Writable transactions iterate on the inner transaction so that
+			// pending writes are visible; this cannot safely be sharded across
+			// threads, so we fall back to a single serial scan.
+			if self.write {
+				// Acquire the lock before dispatching: tokio Mutex requires an
+				// async context, which `spawn_local`'s closure does not have.
+				let guard = self.inner.lock().await;
+				return affinitypool::spawn_local(move || {
+					// Run the serial count
+					self.count_blocking(rng, version, guard)
 				})
-				.collect::<Vec<_>>()
-		};
-		let mut tasks = Vec::with_capacity(scans.len());
-		for (sub_rng, ro) in scans {
-			// Clone the Arc'd handle so each shard owns its own reference
-			let db = self.db.clone();
-			tasks.push(affinitypool::spawn_local(move || -> Result<usize> {
-				// Create the iterator on the database
-				let mut iter = db.raw_iterator_opt(ro);
-				// Seek to the start key
-				iter.seek(&sub_rng.start);
-				// Initialize the per-shard count
-				let mut res: usize = 0;
-				// Count the items
-				while iter.valid() {
-					res += 1;
-					iter.next();
-				}
-				// Catch any iterator errors
-				iter.status()?;
-				// Return the per-shard count
-				Ok(res)
-			}));
-		}
-		// Run all shard scans concurrently and sum the per-shard counts
-		let counts = futures::future::try_join_all(tasks).await?;
-		// Return result
-		Ok(counts.into_iter().sum())
+				.await;
+			}
+			// Decide how many shards to dispatch, bounded by the machine
+			// parallelism so we don't oversubscribe the affinitypool, and
+			// further bounded by `COUNT_PARALLEL_MAX_SHARDS` so very large
+			// CPU counts don't produce many tiny shards that all touch the
+			// same SSTs.
+			let desired = std::thread::available_parallelism()
+				.map(|n| n.get())
+				.unwrap_or(8)
+				.min(COUNT_PARALLEL_MAX_SHARDS);
+			// Compute the disjoint sub-ranges that together cover `[start, end)`.
+			// Returns a single shard when the range is too narrow to split
+			// meaningfully along its first differing byte.
+			let sub_ranges = shard_range(&rng.start, &rng.end, desired);
+			// Fall back to a single serial scan when the range is too narrow
+			// to split: dispatching a single shard would just add the overhead
+			// of an extra task hop with no parallelism benefit.
+			if sub_ranges.len() <= 1 {
+				// Acquire the lock before dispatching: tokio Mutex requires an
+				// async context, which `spawn_local`'s closure does not have.
+				let guard = self.inner.lock().await;
+				return affinitypool::spawn_local(move || {
+					// Run the serial count
+					self.count_blocking(rng, version, guard)
+				})
+				.await;
+			}
+			// Build all shard `ReadOptions` under the inner lock so each shard
+			// captures the same snapshot pointer. The lock is dropped before
+			// dispatching shards: the snapshot stays alive for as long as
+			// `inner.tx` is alive (owned by this `Transaction`), and read-only
+			// transactions never take the inner out of the mutex.
+			let scans = {
+				// Acquire the inner lock
+				let guard = self.inner.lock().await;
+				// Get the inner transaction state
+				let inner = guard
+					.as_ref()
+					.ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+				// Build one (sub-range, ReadOptions) pair per shard
+				sub_ranges
+					.into_iter()
+					.map(|(lo, hi)| {
+						// Construct the shard's sub-range
+						let sub_rng = lo..hi;
+						// Build the ReadOptions for this shard
+						let ro = self.count_read_options(&sub_rng, version, inner);
+						(sub_rng, ro)
+					})
+					.collect::<Vec<_>>()
+			};
+			let mut tasks = Vec::with_capacity(scans.len());
+			for (sub_rng, ro) in scans {
+				// Clone the Arc'd handle so each shard owns its own reference
+				let db = self.db.clone();
+				tasks.push(affinitypool::spawn_local(move || -> Result<usize> {
+					// Create the iterator on the database
+					let mut iter = db.raw_iterator_opt(ro);
+					// Seek to the start key
+					iter.seek(&sub_rng.start);
+					// Initialize the per-shard count
+					let mut res: usize = 0;
+					// Count the items
+					while iter.valid() {
+						res += 1;
+						iter.next();
+					}
+					// Catch any iterator errors
+					iter.status()?;
+					// Return the per-shard count
+					Ok(res)
+				}));
+			}
+			// Run all shard scans concurrently and sum the per-shard counts
+			let counts = futures::future::try_join_all(tasks).await?;
+			// Return result
+			Ok(counts.into_iter().sum())
+		})
 	}
 
 	/// Retrieve a range of keys.
 	///
-	/// Small bounded scans run inline on the async executor thread to avoid
-	/// the cross-thread wakeup latency of the blocking threadpool. Large
-	/// bounded scans are offloaded to avoid stalling other async tasks on the
-	/// executor. See `ROCKSDB_INLINE_SCAN_THRESHOLD`. The unbounded `count()`
-	/// path is always offloaded separately and does not use `ScanLimit`.
+	/// Read-only transactions use the byte-estimate threshold: small bounded
+	/// scans run inline (to skip the cross-thread wakeup), large ones offload.
+	/// `keys_blocking` releases the inner lock before iterating on read-only
+	/// txs, so the inline branch only briefly blocks the calling worker while
+	/// building the iterator.
+	///
+	/// Writable transactions always offload. The iterator must run on
+	/// `inner.tx` (`BaseDeltaIterator`) so pending writes are visible, which
+	/// means the inner-lock guard is held for the full iteration window — if
+	/// that ran inline on the tokio executor, the worker would be blocked for
+	/// the entire iter. The thread-hop cost is dominated by the iter work in
+	/// every realistic case. Mirrors the writable-`count()` policy.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(rng = rng.sprint()))]
-	async fn keys(
+	fn keys(
 		&self,
 		rng: Range<Key>,
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<KeysResult> {
-		// Versioned queries require a versioned datastore
-		if !self.versioned && version.is_some() {
-			return Err(Error::UnsupportedVersionedQueries);
-		}
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Dispatch inline for small bounded scans, offload for large bounded
-		if Self::should_offload(self.inline_scan_threshold, limit, skip, ESTIMATED_BYTES_PER_KEY) {
-			affinitypool::spawn_local(move || {
-				let guard = self.inner.blocking_lock();
+	) -> BoxFut<'_, Result<KeysResult>> {
+		Box::pin(async move {
+			// Versioned queries require a versioned datastore
+			if !self.versioned && version.is_some() {
+				return Err(Error::UnsupportedVersionedQueries);
+			}
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
+			}
+			// Always offload writable; for read-only, dispatch by byte estimate.
+			if self.write
+				|| Self::should_offload(
+					self.inline_scan_threshold,
+					limit,
+					skip,
+					ESTIMATED_BYTES_PER_KEY,
+				) {
+				let guard = self.inner.lock().await;
+				affinitypool::spawn_local(move || {
+					self.keys_blocking(rng, limit, skip, version, Direction::Forward, guard)
+				})
+				.await
+			} else {
+				let guard = self.inner.lock().await;
 				self.keys_blocking(rng, limit, skip, version, Direction::Forward, guard)
-			})
-			.await
-		} else {
-			let guard = self.inner.lock().await;
-			self.keys_blocking(rng, limit, skip, version, Direction::Forward, guard)
-		}
+			}
+		})
 	}
 
-	/// Retrieve a range of keys, in reverse.
+	/// Retrieve a range of keys, in reverse. See [`Self::keys`] for the
+	/// inline-vs-offload policy.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(rng = rng.sprint()))]
-	async fn keysr(
+	fn keysr(
 		&self,
 		rng: Range<Key>,
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<KeysResult> {
-		// Versioned queries require a versioned datastore
-		if !self.versioned && version.is_some() {
-			return Err(Error::UnsupportedVersionedQueries);
-		}
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Dispatch inline for small bounded scans, offload for large bounded
-		if Self::should_offload(self.inline_scan_threshold, limit, skip, ESTIMATED_BYTES_PER_KEY) {
-			affinitypool::spawn_local(move || {
-				let guard = self.inner.blocking_lock();
+	) -> BoxFut<'_, Result<KeysResult>> {
+		Box::pin(async move {
+			// Versioned queries require a versioned datastore
+			if !self.versioned && version.is_some() {
+				return Err(Error::UnsupportedVersionedQueries);
+			}
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
+			}
+			// Always offload writable; for read-only, dispatch by byte estimate.
+			if self.write
+				|| Self::should_offload(
+					self.inline_scan_threshold,
+					limit,
+					skip,
+					ESTIMATED_BYTES_PER_KEY,
+				) {
+				let guard = self.inner.lock().await;
+				affinitypool::spawn_local(move || {
+					self.keys_blocking(rng, limit, skip, version, Direction::Backward, guard)
+				})
+				.await
+			} else {
+				let guard = self.inner.lock().await;
 				self.keys_blocking(rng, limit, skip, version, Direction::Backward, guard)
-			})
-			.await
-		} else {
-			let guard = self.inner.lock().await;
-			self.keys_blocking(rng, limit, skip, version, Direction::Backward, guard)
-		}
+			}
+		})
 	}
 
-	/// Retrieve a range of key-value pairs.
+	/// Retrieve a range of key-value pairs. See [`Self::keys`] for the
+	/// inline-vs-offload policy.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(rng = rng.sprint()))]
-	async fn scan(
+	fn scan(
 		&self,
 		rng: Range<Key>,
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<ScanResult> {
-		// Versioned queries require a versioned datastore
-		if !self.versioned && version.is_some() {
-			return Err(Error::UnsupportedVersionedQueries);
-		}
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Dispatch inline for small bounded scans, offload for large bounded
-		if Self::should_offload(self.inline_scan_threshold, limit, skip, ESTIMATED_BYTES_PER_KV) {
-			affinitypool::spawn_local(move || {
-				let guard = self.inner.blocking_lock();
+	) -> BoxFut<'_, Result<ScanResult>> {
+		Box::pin(async move {
+			// Versioned queries require a versioned datastore
+			if !self.versioned && version.is_some() {
+				return Err(Error::UnsupportedVersionedQueries);
+			}
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
+			}
+			// Always offload writable; for read-only, dispatch by byte estimate.
+			if self.write
+				|| Self::should_offload(
+					self.inline_scan_threshold,
+					limit,
+					skip,
+					ESTIMATED_BYTES_PER_KV,
+				) {
+				let guard = self.inner.lock().await;
+				affinitypool::spawn_local(move || {
+					self.scan_blocking(rng, limit, skip, version, Direction::Forward, guard)
+				})
+				.await
+			} else {
+				let guard = self.inner.lock().await;
 				self.scan_blocking(rng, limit, skip, version, Direction::Forward, guard)
-			})
-			.await
-		} else {
-			let guard = self.inner.lock().await;
-			self.scan_blocking(rng, limit, skip, version, Direction::Forward, guard)
-		}
+			}
+		})
 	}
 
-	/// Retrieve a range of key-value pairs, in reverse.
+	/// Retrieve a range of key-value pairs, in reverse. See [`Self::keys`] for
+	/// the inline-vs-offload policy.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(rng = rng.sprint()))]
-	async fn scanr(
+	fn scanr(
 		&self,
 		rng: Range<Key>,
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<ScanResult> {
-		// Versioned queries require a versioned datastore
-		if !self.versioned && version.is_some() {
-			return Err(Error::UnsupportedVersionedQueries);
-		}
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Dispatch inline for small bounded scans, offload for large bounded
-		if Self::should_offload(self.inline_scan_threshold, limit, skip, ESTIMATED_BYTES_PER_KV) {
-			affinitypool::spawn_local(move || {
-				let guard = self.inner.blocking_lock();
+	) -> BoxFut<'_, Result<ScanResult>> {
+		Box::pin(async move {
+			// Versioned queries require a versioned datastore
+			if !self.versioned && version.is_some() {
+				return Err(Error::UnsupportedVersionedQueries);
+			}
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
+			}
+			// Always offload writable; for read-only, dispatch by byte estimate.
+			if self.write
+				|| Self::should_offload(
+					self.inline_scan_threshold,
+					limit,
+					skip,
+					ESTIMATED_BYTES_PER_KV,
+				) {
+				let guard = self.inner.lock().await;
+				affinitypool::spawn_local(move || {
+					self.scan_blocking(rng, limit, skip, version, Direction::Backward, guard)
+				})
+				.await
+			} else {
+				let guard = self.inner.lock().await;
 				self.scan_blocking(rng, limit, skip, version, Direction::Backward, guard)
-			})
-			.await
-		} else {
+			}
+		})
+	}
+
+	/// Open a stateful keys-only scan cursor over `rng`.
+	///
+	/// Builds the iterator under the `inner` lock so the snapshot pointer
+	/// and (for writable transactions) the `Transaction` allocation are
+	/// observed consistently. The iterator itself is **not** seeked here;
+	/// the first [`ScanCursorKeys::next_batch`] call performs the seek.
+	/// This keeps a cursor that is opened then aborted before pumping
+	/// (e.g. early `LIMIT 0` paths) free of the LSM-seek cost.
+	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(rng = rng.sprint()))]
+	fn open_keys_cursor<'a>(
+		&'a self,
+		rng: Range<Key>,
+		dir: Direction,
+		skip: u32,
+		version: Option<u64>,
+	) -> BoxFut<'a, Result<Box<dyn ScanCursorKeys + 'a>>> {
+		Box::pin(async move {
+			if !self.versioned && version.is_some() {
+				return Err(Error::UnsupportedVersionedQueries);
+			}
+			// Open protocol: increment `cursors_alive` (SeqCst), then claim
+			// the slot via `AliveGuard` so every subsequent exit — the
+			// `done == true` re-check, the future being dropped at the
+			// `self.inner.lock().await` below (query cancel / timeout), the
+			// `?` early-out on `guard.as_ref()` — decrements via Drop.
+			// Without the guard, those error/cancel paths would leak the
+			// increment and stall `drain_cursors` forever.
+			//
+			// The SeqCst increment + SeqCst `done` load paired against
+			// commit's `done.store` + `cursors_alive.load` rule out the
+			// race where a cursor proceeds against a transaction that's
+			// already mid-commit. See `scan_cursor.rs` for the proof.
+			//
+			// `AliveGuard::drop` decrements with Release. That's safe on
+			// the error/cancel paths (no iterator has been built, so there
+			// are no destructor side-effects to publish) and on the
+			// success path (the iterator destructor runs *before* the
+			// guard drops, because the guard is the last field in the
+			// cursor struct, so the Release publishes its side-effects).
+			self.cursors_alive.fetch_add(1, Ordering::SeqCst);
+			let alive_guard = AliveGuard::new(self);
+			if self.done.load(Ordering::SeqCst) {
+				return Err(Error::TransactionFinished);
+			}
+			// Build the iterator under the inner lock so we observe a
+			// consistent (tx, snapshot) pair. Once built, the iterator
+			// owns the snapshot pointer via its captured `ReadOptions`;
+			// no further inner access is needed for cursor advance.
 			let guard = self.inner.lock().await;
-			self.scan_blocking(rng, limit, skip, version, Direction::Backward, guard)
-		}
+			let inner =
+				guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+			let iter = self.build_scan_iter(&rng, version, inner);
+			drop(guard);
+			Ok(Box::new(RocksDbKeysCursor {
+				tx: self,
+				state: ScanStateKeys {
+					iter,
+					dir,
+					started: false,
+					skip,
+					start: rng.start,
+					end: rng.end,
+					key_buf: Vec::new(),
+					key_spans: Vec::new(),
+				},
+				_alive_guard: alive_guard,
+			}) as Box<dyn ScanCursorKeys + 'a>)
+		})
+	}
+
+	/// Open a stateful key+value scan cursor over `rng`. See
+	/// [`Transactable::open_keys_cursor`] for the rationale.
+	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(rng = rng.sprint()))]
+	fn open_vals_cursor<'a>(
+		&'a self,
+		rng: Range<Key>,
+		dir: Direction,
+		skip: u32,
+		version: Option<u64>,
+	) -> BoxFut<'a, Result<Box<dyn ScanCursorVals + 'a>>> {
+		Box::pin(async move {
+			if !self.versioned && version.is_some() {
+				return Err(Error::UnsupportedVersionedQueries);
+			}
+			// See `open_keys_cursor` for the open-protocol rationale and
+			// why the `AliveGuard` must be bound before the `lock().await`.
+			self.cursors_alive.fetch_add(1, Ordering::SeqCst);
+			let alive_guard = AliveGuard::new(self);
+			if self.done.load(Ordering::SeqCst) {
+				return Err(Error::TransactionFinished);
+			}
+			let guard = self.inner.lock().await;
+			let inner =
+				guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+			let iter = self.build_scan_iter(&rng, version, inner);
+			drop(guard);
+			Ok(Box::new(RocksDbValsCursor {
+				tx: self,
+				state: ScanStateVals {
+					iter,
+					dir,
+					started: false,
+					skip,
+					start: rng.start,
+					end: rng.end,
+					key_buf: Vec::new(),
+					val_buf: Vec::new(),
+					spans: Vec::new(),
+				},
+				_alive_guard: alive_guard,
+			}) as Box<dyn ScanCursorVals + 'a>)
+		})
 	}
 
 	/// Set a new save point on the transaction.
-	async fn new_save_point(&self) -> Result<()> {
-		let guard = self.inner.lock().await;
-		if let Some(state) = guard.as_ref() {
-			state.tx.set_savepoint();
-		}
-		Ok(())
+	fn new_save_point(&self) -> BoxFut<'_, Result<()>> {
+		Box::pin(async move {
+			let guard = self.inner.lock().await;
+			if let Some(state) = guard.as_ref() {
+				state.tx.set_savepoint();
+			}
+			Ok(())
+		})
 	}
 
 	/// Rollback to the last save point.
-	async fn rollback_to_save_point(&self) -> Result<()> {
-		let guard = self.inner.lock().await;
-		if let Some(state) = guard.as_ref() {
-			state.tx.rollback_to_savepoint()?;
-		}
-		Ok(())
+	fn rollback_to_save_point(&self) -> BoxFut<'_, Result<()>> {
+		Box::pin(async move {
+			let guard = self.inner.lock().await;
+			if let Some(state) = guard.as_ref() {
+				state.tx.rollback_to_savepoint()?;
+			}
+			Ok(())
+		})
 	}
 
 	/// Release the last save point.
-	async fn release_last_save_point(&self) -> Result<()> {
-		Ok(())
+	fn release_last_save_point(&self) -> BoxFut<'_, Result<()>> {
+		Box::pin(async move { Ok(()) })
 	}
 
-	async fn compact(&self, range: Option<Range<Key>>) -> anyhow::Result<()> {
-		// Create new flush options
-		let mut fopts = FlushOptions::default();
-		// Wait for the sync to finish
-		fopts.set_wait(true);
-		// Create new compact options
-		let mut copts = CompactOptions::default();
-		// Set the exclusive manual compaction flag
-		copts.set_exclusive_manual_compaction(true);
-		// Allow files to move to a higher level
-		copts.set_change_level(true);
-		// Set the target level for SSTs
-		copts.set_target_level(6);
-		// Force the bottommost SSTs to be rewritten
-		copts.set_bottommost_level_compaction(BottommostLevelCompaction::Force);
-		// Spawn a new task to compact the range
-		affinitypool::spawn_local(move || {
-			// Flush the WAL to storage
-			self.db.flush_wal(true)?;
-			// Flush the memtables to SST
-			self.db.flush_opt(&fopts)?;
-			// Get the compaction range
-			let (start, end) = match range {
-				Some(r) => (Some(r.start), Some(r.end)),
-				None => (None, None),
-			};
-			// Compact the specified range with the bottommost target.
-			self.db.compact_range_opt(start, end, &copts);
-			// All ok
-			Ok(())
+	fn compact(&self, range: Option<Range<Key>>) -> BoxFut<'_, anyhow::Result<()>> {
+		Box::pin(async move {
+			// Create new flush options
+			let mut fopts = FlushOptions::default();
+			// Wait for the sync to finish
+			fopts.set_wait(true);
+			// Create new compact options
+			let mut copts = CompactOptions::default();
+			// Set the exclusive manual compaction flag
+			copts.set_exclusive_manual_compaction(true);
+			// Allow files to move to a higher level
+			copts.set_change_level(true);
+			// Set the target level for SSTs
+			copts.set_target_level(6);
+			// Force the bottommost SSTs to be rewritten
+			copts.set_bottommost_level_compaction(BottommostLevelCompaction::Force);
+			// Spawn a new task to compact the range
+			affinitypool::spawn_local(move || {
+				// Flush the WAL to storage
+				self.db.flush_wal(true)?;
+				// Flush the memtables to SST
+				self.db.flush_opt(&fopts)?;
+				// Get the compaction range
+				let (start, end) = match range {
+					Some(r) => (Some(r.start), Some(r.end)),
+					None => (None, None),
+				};
+				// Compact the specified range with the bottommost target.
+				self.db.compact_range_opt(start, end, &copts);
+				// All ok
+				Ok(())
+			})
+			.await
 		})
-		.await
 	}
 }
 

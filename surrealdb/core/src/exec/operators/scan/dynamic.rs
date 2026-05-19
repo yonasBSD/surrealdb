@@ -733,8 +733,6 @@ async fn resolve_table_scan_stream(
 		_ => {
 			let beg = record::prefix(cfg.ns_id, cfg.db_id, &cfg.table_name)?;
 			let end = record::suffix(cfg.ns_id, cfg.db_id, &cfg.table_name)?;
-			// Enable prefetching for full scans (no limit pushed)
-			let prefetch = cfg.storage_limit.is_none();
 			let stream = kv_scan_stream(
 				txn,
 				beg,
@@ -743,7 +741,6 @@ async fn resolve_table_scan_stream(
 				cfg.storage_limit,
 				cfg.direction,
 				cfg.pre_skip,
-				prefetch,
 				cfg.limit_hint,
 				cfg.pre_decode_filter.clone(),
 			);

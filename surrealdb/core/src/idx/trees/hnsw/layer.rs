@@ -1,6 +1,5 @@
 use ahash::HashSet;
 use anyhow::{Result, bail};
-use futures::StreamExt;
 use reblessive::tree::Stk;
 use revision::revisioned;
 use roaring::RoaringTreemap;
@@ -540,20 +539,25 @@ where
 		// for each node and take precedence over the Hl data loaded above.
 		let range = self.ikb.new_hn_layer_range(self.level)?;
 		let mut count = 0;
-		let mut stream =
-			tx.stream_keys_vals(range, None, None, 0, ScanDirection::Forward, false, None);
-		while let Some(res) = stream.next().await {
-			let batch = res?;
-			for (k, v) in batch {
+		let mut cursor = tx.open_vals_cursor(range, ScanDirection::Forward, 0, None).await?;
+		loop {
+			let batch = cursor
+				.next_batch(crate::kvs::ScanLimit::Count(crate::kvs::NORMAL_BATCH_SIZE))
+				.await?;
+			if batch.is_empty() {
+				break;
+			}
+			for (k, v) in &batch {
 				// Check if the context is finished
 				if ctx.is_done(Some(count)).await? {
 					bail!(Error::QueryCancelled);
 				}
-				let key = HnswNode::decode_key(&k)?;
-				self.graph.load_node(key.node, &v);
+				let key = HnswNode::decode_key(k)?;
+				self.graph.load_node(key.node, v);
 				count += 1;
 			}
 		}
+		drop(cursor);
 
 		// If we can write, complete the migration:
 		// persist every node as an Hn key and remove the old Hl chunk keys.

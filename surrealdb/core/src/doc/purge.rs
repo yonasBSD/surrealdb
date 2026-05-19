@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
-use futures::StreamExt;
 use reblessive::tree::Stk;
 use surrealdb_types::ToSql;
 
@@ -130,19 +129,26 @@ impl Document {
 		let suffix = crate::key::r#ref::suffix(ns, db, &rid.table, &rid.key)?;
 		let range = prefix..suffix;
 
-		// Obtain a stream of keys
-		let mut stream = txn.stream_keys(range.clone(), None, None, 0, ScanDirection::Forward);
+		// Obtain a cursor over the reference range.
+		let mut cursor =
+			txn.open_keys_cursor(range.clone(), ScanDirection::Forward, 0, None).await?;
 		// Avoid staging a no-op range delete when the reference scan is empty.
 		let mut saw_reference_key = false;
 		// Loop until no more entries
-		while let Some(res) = stream.next().await {
-			// Get the batch of keys
-			let batch = res?;
-			if !batch.is_empty() {
-				saw_reference_key = true;
+		loop {
+			let batch = cursor
+				.next_batch(crate::kvs::ScanLimit::Count(crate::kvs::NORMAL_BATCH_SIZE))
+				.await?;
+			if batch.is_empty() {
+				break;
 			}
-			// Process each key in the batch
-			for key in batch {
+			saw_reference_key = true;
+			// Copy each borrowed key into an owned `Vec<u8>` up front so
+			// that the downstream `await`s (which call back into the same
+			// transaction via `get_tb_field` etc.) don't conflict with
+			// the cursor's `&mut self` borrow.
+			let keys: Vec<Vec<u8>> = batch.iter().map(|k| k.to_vec()).collect();
+			for key in keys {
 				yield_now!();
 				// Decode the key
 				let ref_key = Ref::decode_key(&key)?;

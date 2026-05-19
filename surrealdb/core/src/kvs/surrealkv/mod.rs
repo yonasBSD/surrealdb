@@ -18,7 +18,7 @@ use surrealkv::{
 };
 use tokio::sync::RwLock;
 
-use super::api::{KeysResult, ScanLimit, ScanResult};
+use super::api::{BoxFut, KeysResult, ScanLimit, ScanResult};
 use super::config::SyncMode;
 use super::err::{Error, Result};
 use super::{Direction, ESTIMATED_BYTES_PER_KEY, ESTIMATED_BYTES_PER_KV};
@@ -169,8 +169,6 @@ impl Datastore {
 	}
 }
 
-#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl Transactable for Transaction {
 	fn kind(&self) -> &'static str {
 		"surrealkv"
@@ -188,574 +186,612 @@ impl Transactable for Transaction {
 
 	/// Cancels the transaction.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self))]
-	async fn cancel(&self) -> Result<()> {
-		// Atomically mark transaction as done and check if it was already closed
-		if self.done.swap(true, Ordering::AcqRel) {
-			return Err(Error::TransactionFinished);
-		}
-		// Load the inner transaction
-		let mut inner = self.inner.write().await;
-		// Rollback this transaction
-		inner.rollback();
-		// Continue
-		Ok(())
+	fn cancel(&self) -> BoxFut<'_, Result<()>> {
+		Box::pin(async move {
+			// Atomically mark transaction as done and check if it was already closed
+			if self.done.swap(true, Ordering::AcqRel) {
+				return Err(Error::TransactionFinished);
+			}
+			// Load the inner transaction
+			let mut inner = self.inner.write().await;
+			// Rollback this transaction
+			inner.rollback();
+			// Continue
+			Ok(())
+		})
 	}
 
 	/// Commits the transaction.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self))]
-	async fn commit(&self) -> Result<()> {
-		// Atomically mark transaction as done and check if it was already closed
-		if self.done.swap(true, Ordering::AcqRel) {
-			return Err(Error::TransactionFinished);
-		}
-		// Check to see if transaction is writable
-		if !self.writeable() {
-			return Err(Error::TransactionReadonly);
-		}
-		// Load the inner transaction
-		let mut inner = self.inner.write().await;
-		// Commit the transaction (writes to WAL)
-		inner.commit().await?;
-		// If we have a coordinator, wait for the grouped fsync
-		if let Some(coordinator) = &self.commit_coordinator {
-			coordinator.wait_for_sync().await?;
-		}
-		// Continue
-		Ok(())
+	fn commit(&self) -> BoxFut<'_, Result<()>> {
+		Box::pin(async move {
+			// Atomically mark transaction as done and check if it was already closed
+			if self.done.swap(true, Ordering::AcqRel) {
+				return Err(Error::TransactionFinished);
+			}
+			// Check to see if transaction is writable
+			if !self.writeable() {
+				return Err(Error::TransactionReadonly);
+			}
+			// Load the inner transaction
+			let mut inner = self.inner.write().await;
+			// Commit the transaction (writes to WAL)
+			inner.commit().await?;
+			// If we have a coordinator, wait for the grouped fsync
+			if let Some(coordinator) = &self.commit_coordinator {
+				coordinator.wait_for_sync().await?;
+			}
+			// Continue
+			Ok(())
+		})
 	}
 
 	/// Checks if a key exists in the database.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(key = key.sprint()))]
-	async fn exists(&self, key: Key, version: Option<u64>) -> Result<bool> {
-		// Versioned queries require a versioned datastore
-		if !self.versioned && version.is_some() {
-			return Err(Error::UnsupportedVersionedQueries);
-		}
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Load the inner transaction
-		let inner = self.inner.read().await;
-		// Get the key
-		let res = match version {
-			Some(ts) => inner.get_at(&key, ts)?.is_some(),
-			None => inner.get(&key)?.is_some(),
-		};
-		// Return result
-		Ok(res)
+	fn exists(&self, key: Key, version: Option<u64>) -> BoxFut<'_, Result<bool>> {
+		Box::pin(async move {
+			// Versioned queries require a versioned datastore
+			if !self.versioned && version.is_some() {
+				return Err(Error::UnsupportedVersionedQueries);
+			}
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
+			}
+			// Load the inner transaction
+			let inner = self.inner.read().await;
+			// Get the key
+			let res = match version {
+				Some(ts) => inner.get_at(&key, ts)?.is_some(),
+				None => inner.get(&key)?.is_some(),
+			};
+			// Return result
+			Ok(res)
+		})
 	}
 
 	/// Fetch a key from the database.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(key = key.sprint()))]
-	async fn get(&self, key: Key, version: Option<u64>) -> Result<Option<Val>> {
-		// Versioned queries require a versioned datastore
-		if !self.versioned && version.is_some() {
-			return Err(Error::UnsupportedVersionedQueries);
-		}
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Load the inner transaction
-		let inner = self.inner.read().await;
-		// Get the key
-		let res = match version {
-			Some(ts) => inner.get_at(&key, ts)?,
-			None => inner.get(&key)?,
-		};
-		// Return result
-		Ok(res)
+	fn get(&self, key: Key, version: Option<u64>) -> BoxFut<'_, Result<Option<Val>>> {
+		Box::pin(async move {
+			// Versioned queries require a versioned datastore
+			if !self.versioned && version.is_some() {
+				return Err(Error::UnsupportedVersionedQueries);
+			}
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
+			}
+			// Load the inner transaction
+			let inner = self.inner.read().await;
+			// Get the key
+			let res = match version {
+				Some(ts) => inner.get_at(&key, ts)?,
+				None => inner.get(&key)?,
+			};
+			// Return result
+			Ok(res)
+		})
 	}
 
 	/// Insert or update a key in the database.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(key = key.sprint()))]
-	async fn set(&self, key: Key, val: Val) -> Result<()> {
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Check to see if transaction is writable
-		if !self.writeable() {
-			return Err(Error::TransactionReadonly);
-		}
-		// Load the inner transaction
-		let mut inner = self.inner.write().await;
-		// Set the key
-		inner.set(&key, &val)?;
-		// Return result
-		Ok(())
+	fn set(&self, key: Key, val: Val) -> BoxFut<'_, Result<()>> {
+		Box::pin(async move {
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
+			}
+			// Check to see if transaction is writable
+			if !self.writeable() {
+				return Err(Error::TransactionReadonly);
+			}
+			// Load the inner transaction
+			let mut inner = self.inner.write().await;
+			// Set the key
+			inner.set(&key, &val)?;
+			// Return result
+			Ok(())
+		})
 	}
 
 	/// Insert or replace a key in the database.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(key = key.sprint()))]
-	async fn replace(&self, key: Key, val: Val) -> Result<()> {
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Check to see if transaction is writable
-		if !self.writeable() {
-			return Err(Error::TransactionReadonly);
-		}
-		// Load the inner transaction
-		let mut inner = self.inner.write().await;
-		// Replace the key
-		inner.replace(&key, &val)?;
-		// Return result
-		Ok(())
+	fn replace(&self, key: Key, val: Val) -> BoxFut<'_, Result<()>> {
+		Box::pin(async move {
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
+			}
+			// Check to see if transaction is writable
+			if !self.writeable() {
+				return Err(Error::TransactionReadonly);
+			}
+			// Load the inner transaction
+			let mut inner = self.inner.write().await;
+			// Replace the key
+			inner.replace(&key, &val)?;
+			// Return result
+			Ok(())
+		})
 	}
 
 	/// Insert a key if it doesn't exist in the database.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(key = key.sprint()))]
-	async fn put(&self, key: Key, val: Val) -> Result<()> {
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Check to see if transaction is writable
-		if !self.writeable() {
-			return Err(Error::TransactionReadonly);
-		}
-		// Load the inner transaction
-		let mut inner = self.inner.write().await;
-		// Set the key if empty
-		match inner.get(&key)? {
-			None => inner.set(&key, &val)?,
-			_ => return Err(Error::TransactionKeyAlreadyExists),
-		}
-		// Return result
-		Ok(())
+	fn put(&self, key: Key, val: Val) -> BoxFut<'_, Result<()>> {
+		Box::pin(async move {
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
+			}
+			// Check to see if transaction is writable
+			if !self.writeable() {
+				return Err(Error::TransactionReadonly);
+			}
+			// Load the inner transaction
+			let mut inner = self.inner.write().await;
+			// Set the key if empty
+			match inner.get(&key)? {
+				None => inner.set(&key, &val)?,
+				_ => return Err(Error::TransactionKeyAlreadyExists),
+			}
+			// Return result
+			Ok(())
+		})
 	}
 
 	/// Insert a key if the current value matches a condition.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(key = key.sprint()))]
-	async fn putc(&self, key: Key, val: Val, chk: Option<Val>) -> Result<()> {
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Check to see if transaction is writable
-		if !self.writeable() {
-			return Err(Error::TransactionReadonly);
-		}
-		// Load the inner transaction
-		let mut inner = self.inner.write().await;
-		// Set the key if valid
-		match (inner.get(&key)?, chk) {
-			(Some(v), Some(w)) if v == w => inner.set(&key, &val)?,
-			(None, None) => inner.set(&key, &val)?,
-			_ => return Err(Error::TransactionConditionNotMet),
-		};
-		// Return result
-		Ok(())
+	fn putc(&self, key: Key, val: Val, chk: Option<Val>) -> BoxFut<'_, Result<()>> {
+		Box::pin(async move {
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
+			}
+			// Check to see if transaction is writable
+			if !self.writeable() {
+				return Err(Error::TransactionReadonly);
+			}
+			// Load the inner transaction
+			let mut inner = self.inner.write().await;
+			// Set the key if valid
+			match (inner.get(&key)?, chk) {
+				(Some(v), Some(w)) if v == w => inner.set(&key, &val)?,
+				(None, None) => inner.set(&key, &val)?,
+				_ => return Err(Error::TransactionConditionNotMet),
+			};
+			// Return result
+			Ok(())
+		})
 	}
 
 	/// Delete a key from the database.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(key = key.sprint()))]
-	async fn del(&self, key: Key) -> Result<()> {
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Check to see if transaction is writable
-		if !self.writeable() {
-			return Err(Error::TransactionReadonly);
-		}
-		// Load the inner transaction
-		let mut inner = self.inner.write().await;
-		// Delete the key
-		if self.versioned {
-			inner.soft_delete(&key)?;
-		} else {
-			inner.delete(&key)?;
-		}
-		// Return result
-		Ok(())
+	fn del(&self, key: Key) -> BoxFut<'_, Result<()>> {
+		Box::pin(async move {
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
+			}
+			// Check to see if transaction is writable
+			if !self.writeable() {
+				return Err(Error::TransactionReadonly);
+			}
+			// Load the inner transaction
+			let mut inner = self.inner.write().await;
+			// Delete the key
+			if self.versioned {
+				inner.soft_delete(&key)?;
+			} else {
+				inner.delete(&key)?;
+			}
+			// Return result
+			Ok(())
+		})
 	}
 
 	/// Delete a key if the current value matches a condition.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(key = key.sprint()))]
-	async fn delc(&self, key: Key, chk: Option<Val>) -> Result<()> {
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Check to see if transaction is writable
-		if !self.writeable() {
-			return Err(Error::TransactionReadonly);
-		}
-		// Load the inner transaction
-		let mut inner = self.inner.write().await;
-		// Delete the key if valid
-		if self.versioned {
-			match (inner.get(&key)?, chk) {
-				(Some(v), Some(w)) if v == w => inner.soft_delete(&key)?,
-				(None, None) => inner.soft_delete(&key)?,
-				_ => return Err(Error::TransactionConditionNotMet),
-			};
-		} else {
+	fn delc(&self, key: Key, chk: Option<Val>) -> BoxFut<'_, Result<()>> {
+		Box::pin(async move {
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
+			}
+			// Check to see if transaction is writable
+			if !self.writeable() {
+				return Err(Error::TransactionReadonly);
+			}
+			// Load the inner transaction
+			let mut inner = self.inner.write().await;
+			// Delete the key if valid
+			if self.versioned {
+				match (inner.get(&key)?, chk) {
+					(Some(v), Some(w)) if v == w => inner.soft_delete(&key)?,
+					(None, None) => inner.soft_delete(&key)?,
+					_ => return Err(Error::TransactionConditionNotMet),
+				};
+			} else {
+				match (inner.get(&key)?, chk) {
+					(Some(v), Some(w)) if v == w => inner.delete(&key)?,
+					(None, None) => inner.delete(&key)?,
+					_ => return Err(Error::TransactionConditionNotMet),
+				};
+			}
+			// Return result
+			Ok(())
+		})
+	}
+
+	/// Deletes all versions of a key from the database.
+	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(key = key.sprint()))]
+	fn clr(&self, key: Key) -> BoxFut<'_, Result<()>> {
+		Box::pin(async move {
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
+			}
+			// Check to see if transaction is writable
+			if !self.writeable() {
+				return Err(Error::TransactionReadonly);
+			}
+			// Load the inner transaction
+			let mut inner = self.inner.write().await;
+			// Delete the key
+			inner.delete(&key)?;
+			// Return result
+			Ok(())
+		})
+	}
+
+	/// Delete all versions of a key if the current value matches a condition.
+	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(key = key.sprint()))]
+	fn clrc(&self, key: Key, chk: Option<Val>) -> BoxFut<'_, Result<()>> {
+		Box::pin(async move {
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
+			}
+			// Check to see if transaction is writable
+			if !self.writeable() {
+				return Err(Error::TransactionReadonly);
+			}
+			// Load the inner transaction
+			let mut inner = self.inner.write().await;
+			// Delete the key if valid
 			match (inner.get(&key)?, chk) {
 				(Some(v), Some(w)) if v == w => inner.delete(&key)?,
 				(None, None) => inner.delete(&key)?,
 				_ => return Err(Error::TransactionConditionNotMet),
 			};
-		}
-		// Return result
-		Ok(())
-	}
-
-	/// Deletes all versions of a key from the database.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(key = key.sprint()))]
-	async fn clr(&self, key: Key) -> Result<()> {
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Check to see if transaction is writable
-		if !self.writeable() {
-			return Err(Error::TransactionReadonly);
-		}
-		// Load the inner transaction
-		let mut inner = self.inner.write().await;
-		// Delete the key
-		inner.delete(&key)?;
-		// Return result
-		Ok(())
-	}
-
-	/// Delete all versions of a key if the current value matches a condition.
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(key = key.sprint()))]
-	async fn clrc(&self, key: Key, chk: Option<Val>) -> Result<()> {
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Check to see if transaction is writable
-		if !self.writeable() {
-			return Err(Error::TransactionReadonly);
-		}
-		// Load the inner transaction
-		let mut inner = self.inner.write().await;
-		// Delete the key if valid
-		match (inner.get(&key)?, chk) {
-			(Some(v), Some(w)) if v == w => inner.delete(&key)?,
-			(None, None) => inner.delete(&key)?,
-			_ => return Err(Error::TransactionConditionNotMet),
-		};
-		// Return result
-		Ok(())
+			// Return result
+			Ok(())
+		})
 	}
 
 	/// Count the total number of keys within a range.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(rng = rng.sprint()))]
-	async fn count(&self, rng: Range<Key>, version: Option<u64>) -> Result<usize> {
-		// Versioned queries require a versioned datastore
-		if !self.versioned && version.is_some() {
-			return Err(Error::UnsupportedVersionedQueries);
-		}
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Set the key range
-		let beg = rng.start;
-		let end = rng.end;
-		// Load the inner transaction
-		let inner = self.inner.read().await;
-		// Execute on the blocking threadpool
-		let res = affinitypool::spawn_local(move || -> Result<_> {
-			// Store the count
-			let mut count = 0;
-			//
-			match version {
-				Some(ts) => {
-					// Include tombstones so we can detect deleted keys
-					let opts = HistoryOptions::new().with_tombstones(true);
-					// Create the iterator with tombstone visibility
-					let mut iter = inner.history_with_options(beg, end, &opts)?;
-					// Seek to the first key
-					iter.seek_first()?;
-					// History entries are sorted (key ASC, timestamp DESC),
-					// so the first entry with timestamp <= ts is the latest
-					// version for each key. We skip newer versions and only
-					// count non-tombstone entries.
-					while iter.valid() {
-						let key_ref = iter.key();
-						// This is the latest relevant version for this key
-						if key_ref.timestamp() <= ts {
-							// Store the current user key
-							let user_key = key_ref.user_key().to_vec();
-							// Check if this is a tombstone
-							let is_tombstone = key_ref.is_tombstone();
-							// Skip remaining older versions of this key
-							loop {
-								iter.next()?;
-								if !iter.valid() || iter.key().user_key() != user_key {
-									break;
+	fn count(&self, rng: Range<Key>, version: Option<u64>) -> BoxFut<'_, Result<usize>> {
+		Box::pin(async move {
+			// Versioned queries require a versioned datastore
+			if !self.versioned && version.is_some() {
+				return Err(Error::UnsupportedVersionedQueries);
+			}
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
+			}
+			// Set the key range
+			let beg = rng.start;
+			let end = rng.end;
+			// Load the inner transaction
+			let inner = self.inner.read().await;
+			// Execute on the blocking threadpool
+			let res = affinitypool::spawn_local(move || -> Result<_> {
+				// Store the count
+				let mut count = 0;
+				//
+				match version {
+					Some(ts) => {
+						// Include tombstones so we can detect deleted keys
+						let opts = HistoryOptions::new().with_tombstones(true);
+						// Create the iterator with tombstone visibility
+						let mut iter = inner.history_with_options(beg, end, &opts)?;
+						// Seek to the first key
+						iter.seek_first()?;
+						// History entries are sorted (key ASC, timestamp DESC),
+						// so the first entry with timestamp <= ts is the latest
+						// version for each key. We skip newer versions and only
+						// count non-tombstone entries.
+						while iter.valid() {
+							let key_ref = iter.key();
+							// This is the latest relevant version for this key
+							if key_ref.timestamp() <= ts {
+								// Store the current user key
+								let user_key = key_ref.user_key().to_vec();
+								// Check if this is a tombstone
+								let is_tombstone = key_ref.is_tombstone();
+								// Skip remaining older versions of this key
+								loop {
+									iter.next()?;
+									if !iter.valid() || iter.key().user_key() != user_key {
+										break;
+									}
 								}
+								// Count values which are not deletes
+								if !is_tombstone {
+									count += 1;
+								}
+							} else {
+								// This version is newer, skip it
+								iter.next()?;
 							}
-							// Count values which are not deletes
-							if !is_tombstone {
-								count += 1;
-							}
-						} else {
-							// This version is newer, skip it
+						}
+					}
+					None => {
+						// Create the iterator
+						let mut iter = inner.range(beg, end)?;
+						// Seek to the first key
+						iter.seek_first()?;
+						// Loop over all keys
+						while iter.valid() {
+							count += 1;
 							iter.next()?;
 						}
 					}
 				}
-				None => {
-					// Create the iterator
-					let mut iter = inner.range(beg, end)?;
-					// Seek to the first key
-					iter.seek_first()?;
-					// Loop over all keys
-					while iter.valid() {
-						count += 1;
-						iter.next()?;
-					}
-				}
-			}
+				// Return result
+				Ok(count)
+			})
+			.await?;
 			// Return result
-			Ok(count)
+			Ok(res)
 		})
-		.await?;
-		// Return result
-		Ok(res)
 	}
 
 	/// Retrieve a range of keys.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(rng = rng.sprint()))]
-	async fn keys(
+	fn keys(
 		&self,
 		rng: Range<Key>,
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<KeysResult> {
-		// Versioned queries require a versioned datastore
-		if !self.versioned && version.is_some() {
-			return Err(Error::UnsupportedVersionedQueries);
-		}
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Set the key range
-		let beg = rng.start;
-		let end = rng.end;
-		// Load the inner transaction
-		let inner = self.inner.read().await;
-		// Retrieve the scan range
-		let res = match version {
-			Some(ts) => {
-				// Create the iterator
-				let mut iter = inner.history(&beg, &end)?;
-				// Seek to the first key
-				iter.seek_first()?;
-				// Consume the iterator
-				let mut cursor = HistoryCursor {
-					inner: Box::new(iter),
-					dir: Direction::Forward,
-					ts,
-				};
-				consume_keys(&mut cursor, limit, skip)?
+	) -> BoxFut<'_, Result<KeysResult>> {
+		Box::pin(async move {
+			// Versioned queries require a versioned datastore
+			if !self.versioned && version.is_some() {
+				return Err(Error::UnsupportedVersionedQueries);
 			}
-			None => {
-				// Create the iterator
-				let mut iter = inner.range(&beg, &end)?;
-				// Seek to the first key
-				iter.seek_first()?;
-				// Consume the iterator
-				let mut cursor = RangeCursor {
-					inner: Box::new(iter),
-					dir: Direction::Forward,
-				};
-				consume_keys(&mut cursor, limit, skip)?
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
 			}
-		};
-		// Return result
-		Ok(res)
+			// Set the key range
+			let beg = rng.start;
+			let end = rng.end;
+			// Load the inner transaction
+			let inner = self.inner.read().await;
+			// Retrieve the scan range
+			let res = match version {
+				Some(ts) => {
+					// Create the iterator
+					let mut iter = inner.history(&beg, &end)?;
+					// Seek to the first key
+					iter.seek_first()?;
+					// Consume the iterator
+					let mut cursor = HistoryCursor {
+						inner: Box::new(iter),
+						dir: Direction::Forward,
+						ts,
+					};
+					consume_keys(&mut cursor, limit, skip)?
+				}
+				None => {
+					// Create the iterator
+					let mut iter = inner.range(&beg, &end)?;
+					// Seek to the first key
+					iter.seek_first()?;
+					// Consume the iterator
+					let mut cursor = RangeCursor {
+						inner: Box::new(iter),
+						dir: Direction::Forward,
+					};
+					consume_keys(&mut cursor, limit, skip)?
+				}
+			};
+			// Return result
+			Ok(res)
+		})
 	}
 
 	/// Retrieve a range of keys, in reverse.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(rng = rng.sprint()))]
-	async fn keysr(
+	fn keysr(
 		&self,
 		rng: Range<Key>,
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<KeysResult> {
-		// Versioned queries require a versioned datastore
-		if !self.versioned && version.is_some() {
-			return Err(Error::UnsupportedVersionedQueries);
-		}
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Set the key range
-		let beg = rng.start;
-		let end = rng.end;
-		// Load the inner transaction
-		let inner = self.inner.read().await;
-		// Retrieve the scan range
-		let res = match version {
-			Some(ts) => {
-				// Create the iterator
-				let mut iter = inner.history(&beg, &end)?;
-				// Seek to the last key
-				iter.seek_last()?;
-				// Consume the iterator
-				let mut cursor = HistoryCursor {
-					inner: Box::new(iter),
-					dir: Direction::Backward,
-					ts,
-				};
-				consume_keys(&mut cursor, limit, skip)?
+	) -> BoxFut<'_, Result<KeysResult>> {
+		Box::pin(async move {
+			// Versioned queries require a versioned datastore
+			if !self.versioned && version.is_some() {
+				return Err(Error::UnsupportedVersionedQueries);
 			}
-			None => {
-				// Create the iterator
-				let mut iter = inner.range(&beg, &end)?;
-				// Seek to the last key
-				iter.seek_last()?;
-				// Consume the iterator
-				let mut cursor = RangeCursor {
-					inner: Box::new(iter),
-					dir: Direction::Backward,
-				};
-				consume_keys(&mut cursor, limit, skip)?
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
 			}
-		};
-		// Return result
-		Ok(res)
+			// Set the key range
+			let beg = rng.start;
+			let end = rng.end;
+			// Load the inner transaction
+			let inner = self.inner.read().await;
+			// Retrieve the scan range
+			let res = match version {
+				Some(ts) => {
+					// Create the iterator
+					let mut iter = inner.history(&beg, &end)?;
+					// Seek to the last key
+					iter.seek_last()?;
+					// Consume the iterator
+					let mut cursor = HistoryCursor {
+						inner: Box::new(iter),
+						dir: Direction::Backward,
+						ts,
+					};
+					consume_keys(&mut cursor, limit, skip)?
+				}
+				None => {
+					// Create the iterator
+					let mut iter = inner.range(&beg, &end)?;
+					// Seek to the last key
+					iter.seek_last()?;
+					// Consume the iterator
+					let mut cursor = RangeCursor {
+						inner: Box::new(iter),
+						dir: Direction::Backward,
+					};
+					consume_keys(&mut cursor, limit, skip)?
+				}
+			};
+			// Return result
+			Ok(res)
+		})
 	}
 
 	/// Retrieve a range of key-value pairs.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(rng = rng.sprint()))]
-	async fn scan(
+	fn scan(
 		&self,
 		rng: Range<Key>,
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<ScanResult> {
-		// Versioned queries require a versioned datastore
-		if !self.versioned && version.is_some() {
-			return Err(Error::UnsupportedVersionedQueries);
-		}
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Set the key range
-		let beg = rng.start;
-		let end = rng.end;
-		// Load the inner transaction
-		let inner = self.inner.read().await;
-		// Retrieve the scan range
-		let res = match version {
-			Some(ts) => {
-				// Create the iterator
-				let mut iter = inner.history(&beg, &end)?;
-				// Seek to the first key
-				iter.seek_first()?;
-				// Consume the iterator
-				let mut cursor = HistoryCursor {
-					inner: Box::new(iter),
-					dir: Direction::Forward,
-					ts,
-				};
-				consume_vals(&mut cursor, limit, skip)?
+	) -> BoxFut<'_, Result<ScanResult>> {
+		Box::pin(async move {
+			// Versioned queries require a versioned datastore
+			if !self.versioned && version.is_some() {
+				return Err(Error::UnsupportedVersionedQueries);
 			}
-			None => {
-				// Create the iterator
-				let mut iter = inner.range(&beg, &end)?;
-				// Seek to the first key
-				iter.seek_first()?;
-				// Consume the iterator
-				let mut cursor = RangeCursor {
-					inner: Box::new(iter),
-					dir: Direction::Forward,
-				};
-				consume_vals(&mut cursor, limit, skip)?
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
 			}
-		};
-		// Return result
-		Ok(res)
+			// Set the key range
+			let beg = rng.start;
+			let end = rng.end;
+			// Load the inner transaction
+			let inner = self.inner.read().await;
+			// Retrieve the scan range
+			let res = match version {
+				Some(ts) => {
+					// Create the iterator
+					let mut iter = inner.history(&beg, &end)?;
+					// Seek to the first key
+					iter.seek_first()?;
+					// Consume the iterator
+					let mut cursor = HistoryCursor {
+						inner: Box::new(iter),
+						dir: Direction::Forward,
+						ts,
+					};
+					consume_vals(&mut cursor, limit, skip)?
+				}
+				None => {
+					// Create the iterator
+					let mut iter = inner.range(&beg, &end)?;
+					// Seek to the first key
+					iter.seek_first()?;
+					// Consume the iterator
+					let mut cursor = RangeCursor {
+						inner: Box::new(iter),
+						dir: Direction::Forward,
+					};
+					consume_vals(&mut cursor, limit, skip)?
+				}
+			};
+			// Return result
+			Ok(res)
+		})
 	}
 
 	/// Retrieve a range of key-value pairs, in reverse.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(rng = rng.sprint()))]
-	async fn scanr(
+	fn scanr(
 		&self,
 		rng: Range<Key>,
 		limit: ScanLimit,
 		skip: u32,
 		version: Option<u64>,
-	) -> Result<ScanResult> {
-		// Versioned queries require a versioned datastore
-		if !self.versioned && version.is_some() {
-			return Err(Error::UnsupportedVersionedQueries);
-		}
-		// Check to see if transaction is closed
-		if self.closed() {
-			return Err(Error::TransactionFinished);
-		}
-		// Set the key range
-		let beg = rng.start;
-		let end = rng.end;
-		// Load the inner transaction
-		let inner = self.inner.read().await;
-		// Retrieve the scan range
-		let res = match version {
-			Some(ts) => {
-				// Create the iterator
-				let mut iter = inner.history(&beg, &end)?;
-				// Seek to the last key
-				iter.seek_last()?;
-				// Consume the iterator
-				let mut cursor = HistoryCursor {
-					inner: Box::new(iter),
-					dir: Direction::Backward,
-					ts,
-				};
-				consume_vals(&mut cursor, limit, skip)?
+	) -> BoxFut<'_, Result<ScanResult>> {
+		Box::pin(async move {
+			// Versioned queries require a versioned datastore
+			if !self.versioned && version.is_some() {
+				return Err(Error::UnsupportedVersionedQueries);
 			}
-			None => {
-				// Create the iterator
-				let mut iter = inner.range(&beg, &end)?;
-				// Seek to the last key
-				iter.seek_last()?;
-				// Consume the iterator
-				let mut cursor = RangeCursor {
-					inner: Box::new(iter),
-					dir: Direction::Backward,
-				};
-				consume_vals(&mut cursor, limit, skip)?
+			// Check to see if transaction is closed
+			if self.closed() {
+				return Err(Error::TransactionFinished);
 			}
-		};
-		// Return result
-		Ok(res)
+			// Set the key range
+			let beg = rng.start;
+			let end = rng.end;
+			// Load the inner transaction
+			let inner = self.inner.read().await;
+			// Retrieve the scan range
+			let res = match version {
+				Some(ts) => {
+					// Create the iterator
+					let mut iter = inner.history(&beg, &end)?;
+					// Seek to the last key
+					iter.seek_last()?;
+					// Consume the iterator
+					let mut cursor = HistoryCursor {
+						inner: Box::new(iter),
+						dir: Direction::Backward,
+						ts,
+					};
+					consume_vals(&mut cursor, limit, skip)?
+				}
+				None => {
+					// Create the iterator
+					let mut iter = inner.range(&beg, &end)?;
+					// Seek to the last key
+					iter.seek_last()?;
+					// Consume the iterator
+					let mut cursor = RangeCursor {
+						inner: Box::new(iter),
+						dir: Direction::Backward,
+					};
+					consume_vals(&mut cursor, limit, skip)?
+				}
+			};
+			// Return result
+			Ok(res)
+		})
 	}
 
 	/// Set a new save point on the transaction.
-	async fn new_save_point(&self) -> Result<()> {
-		self.inner.write().await.set_savepoint()?;
-		Ok(())
+	fn new_save_point(&self) -> BoxFut<'_, Result<()>> {
+		Box::pin(async move {
+			self.inner.write().await.set_savepoint()?;
+			Ok(())
+		})
 	}
 
 	/// Rollback to the last save point.
-	async fn rollback_to_save_point(&self) -> Result<()> {
-		self.inner.write().await.rollback_to_savepoint()?;
-		Ok(())
+	fn rollback_to_save_point(&self) -> BoxFut<'_, Result<()>> {
+		Box::pin(async move {
+			self.inner.write().await.rollback_to_savepoint()?;
+			Ok(())
+		})
 	}
 
 	/// Release the last save point.
-	async fn release_last_save_point(&self) -> Result<()> {
-		Ok(())
+	fn release_last_save_point(&self) -> BoxFut<'_, Result<()>> {
+		Box::pin(async move { Ok(()) })
 	}
 
 	fn timestamp_impl(&self) -> BoxTimeStampImpl {

@@ -16,8 +16,6 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Bound;
 use std::sync::Arc;
 
-use futures::StreamExt;
-
 use crate::catalog::providers::TableProvider;
 use crate::catalog::{DatabaseId, NamespaceId};
 use crate::exec::permission::{
@@ -208,9 +206,12 @@ pub(crate) fn determine_scan_direction(
 /// for rows that will be discarded anyway (the fast-path optimisation for
 /// `START` without a pushdown predicate).
 ///
-/// When `limit_hint` is provided, the scanner's initial batch size is capped
-/// to avoid over-fetching for small-limit queries (e.g. `LIMIT 10` fetches
-/// 10 records instead of 500). Subsequent batches are unaffected.
+/// When `limit_hint` is provided, the first batch is capped to that count so
+/// small-limit queries (e.g. `LIMIT 10`) don't fetch 500 records from
+/// storage. Subsequent batches use [`crate::kvs::NORMAL_BATCH_SIZE`].
+///
+/// Iterates the cursor's borrowed `&[u8]` slices directly — record decode
+/// happens inline, no intermediate owned `Vec<u8>` allocation per row.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn kv_scan_stream(
 	txn: Arc<Transaction>,
@@ -220,28 +221,69 @@ pub(crate) fn kv_scan_stream(
 	storage_limit: Option<usize>,
 	direction: ScanDirection,
 	pre_skip: usize,
-	prefetch: bool,
 	limit_hint: Option<u32>,
 	pre_decode_filter: Option<Arc<PreDecodeFilter>>,
 ) -> ValueBatchStream {
 	let skip = pre_skip.min(u32::MAX as usize) as u32;
 	let stream = async_stream::try_stream! {
-		let kv_stream = txn.stream_keys_vals(beg..end, version, storage_limit, skip, direction, prefetch, limit_hint);
-		futures::pin_mut!(kv_stream);
-
-		while let Some(result) = kv_stream.next().await {
-			let entries = result.context("Failed to scan record")?;
-			let mut batch = Vec::with_capacity(entries.len());
-			for (key, val) in entries {
-				if let Some(ref pdf) = pre_decode_filter
-					&& pdf.apply(&key, val.as_slice()) == PreDecodeFilterOutcome::Reject
-				{
-					continue;
-				}
-				batch.push(decode_record(&key, &val)?);
+		let mut cursor = txn
+			.open_vals_cursor(beg..end, direction, skip, version)
+			.await
+			.context("Failed to open scan cursor")?;
+		let mut first = true;
+		let mut yielded: usize = 0;
+		loop {
+			// Each fetch is capped by NORMAL_BATCH_SIZE, by the remaining
+			// `storage_limit` (so a `LIMIT 600` query never asks storage for
+			// more than 600 records total), and on the first iteration by
+			// `limit_hint` (small-LIMIT fast path; subsequent batches may
+			// need to over-fetch when row filtering reduces the visible
+			// count downstream, so the hint applies only once).
+			let mut batch_size = crate::kvs::NORMAL_BATCH_SIZE;
+			if first
+				&& let Some(h) = limit_hint
+			{
+				batch_size = batch_size.min(h);
 			}
-			if !batch.is_empty() {
-				yield ValueBatch { values: batch };
+			if let Some(cap) = storage_limit {
+				let remaining = cap.saturating_sub(yielded);
+				let remaining_u32 = remaining.min(u32::MAX as usize) as u32;
+				batch_size = batch_size.min(remaining_u32);
+			}
+			if batch_size == 0 {
+				break;
+			}
+			let batch = cursor
+				.next_batch(crate::kvs::ScanLimit::Count(batch_size))
+				.await
+				.context("Failed to scan record")?;
+			if batch.is_empty() {
+				break;
+			}
+			let mut decoded = Vec::with_capacity(batch.len());
+			// Hoist the pre-decode-filter branch out of the per-item loop:
+			// `pre_decode_filter` is `Option<Arc<…>>` and doesn't change
+			// across iterations, so we pay the `Option`-check once per
+			// batch instead of per row.
+			match &pre_decode_filter {
+				Some(pdf) => {
+					for (key, val) in &batch {
+						if pdf.apply(key, val) == PreDecodeFilterOutcome::Reject {
+							continue;
+						}
+						decoded.push(decode_record(key, val)?);
+					}
+				}
+				None => {
+					for (key, val) in &batch {
+						decoded.push(decode_record(key, val)?);
+					}
+				}
+			}
+			first = false;
+			yielded += batch.len();
+			if !decoded.is_empty() {
+				yield ValueBatch { values: decoded };
 			}
 		}
 	};

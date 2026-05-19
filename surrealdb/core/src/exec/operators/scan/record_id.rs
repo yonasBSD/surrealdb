@@ -331,7 +331,6 @@ pub(crate) async fn execute_record_lookup(
 			} else {
 				None
 			};
-			let prefetch = effective_storage_limit.is_none();
 			let limit_hint = limit.map(|l| (l + start).try_into().unwrap_or(u32::MAX));
 
 			let pre_decode_filter =
@@ -345,7 +344,6 @@ pub(crate) async fn execute_record_lookup(
 				effective_storage_limit,
 				crate::idx::planner::ScanDirection::Forward,
 				pre_skip,
-				prefetch,
 				limit_hint,
 				pre_decode_filter,
 			);

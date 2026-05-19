@@ -43,7 +43,7 @@ scripting = ["dep:js"]
 http = ["dep:reqwest"]
 ml = ["dep:surrealml-core"]
 jwks = ["dep:reqwest"]
-surrealism = ["dep:surrealism-runtime"]
+surrealism = ["dep:surrealism-runtime", "dep:async-trait"]
 allocator = ["dep:jemallocator", "dep:mimalloc"]
 arbitrary = [
     "dep:arbitrary",
@@ -75,6 +75,7 @@ surrealkv = { workspace = true, optional = true }
 surrealml-core = { workspace = true, optional = true }
 
 affinitypool = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
 dmp.workspace = true
 indxdb = { workspace = true, optional = true }
 js = { workspace = true, features = [
@@ -111,7 +112,6 @@ async-stream.workspace = true
 async-graphql = { workspace = true, default-features = false, features = [
     "dynamic-schema",
 ], optional = true }
-async-trait.workspace = true
 base64.workspace = true
 bcrypt.workspace = true
 blake3.workspace = true
@@ -271,8 +271,9 @@ name = "functions"
 harness = false
 
 [[bench]]
-name = "scanner"
+name = "rocksdb_cursor"
 harness = false
+required-features = ["kv-rocksdb"]
 
 [[bench]]
 name = "import_load"

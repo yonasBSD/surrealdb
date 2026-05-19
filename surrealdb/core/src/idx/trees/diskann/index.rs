@@ -21,7 +21,6 @@ use diskann::graph::search_output_buffer::IdDistance;
 use diskann::provider::{Delete, Guard, SetElement};
 use diskann_vector::Half;
 use diskann_vector::distance::Metric;
-use futures::StreamExt;
 use reblessive::tree::Stk;
 use roaring::RoaringTreemap;
 use tokio::sync::RwLock;
@@ -603,18 +602,16 @@ impl DiskAnnIndex {
 		ikb: &IndexKeyBase,
 	) -> Result<bool> {
 		let rng = ikb.new_dr_range()?;
-		let mut stream =
-			tx.stream_keys_vals(rng, None, None, 0, ScanDirection::Forward, false, None);
-		let mut count = 0;
-		while let Some(res) = stream.next().await {
-			let batch = res?;
-			if !batch.is_empty() {
-				return Ok(false);
-			}
-			if ctx.is_done(Some(count)).await? {
-				bail!(Error::QueryCancelled)
-			}
-			count += 1;
+		let mut cursor = tx.open_vals_cursor(rng, ScanDirection::Forward, 0, None).await?;
+		// The first non-empty batch is conclusive; we just need to know
+		// whether *any* entry exists in the range.
+		let batch = cursor.next_batch(crate::kvs::ScanLimit::Count(1)).await?;
+		if !batch.is_empty() {
+			return Ok(false);
+		}
+		drop(cursor);
+		if ctx.is_done(None).await? {
+			bail!(Error::QueryCancelled)
 		}
 		Ok(true)
 	}
@@ -693,12 +690,18 @@ impl DiskAnnIndex {
 		let pending_state = Self::read_pending_state(&tx, ikb).await?;
 		let mut builder = PendingPlanBuilder::new(generation, pending_state);
 		let rng = ikb.new_dr_range()?;
-		let mut stream =
-			tx.stream_keys_vals(rng, None, None, 0, ScanDirection::Forward, false, None);
+		let mut cursor = tx.open_vals_cursor(rng, ScanDirection::Forward, 0, None).await?;
 		let mut count = 0;
-		while let Some(res) = stream.next().await {
-			let batch = res?;
-			for (key, value) in batch {
+		loop {
+			let batch = cursor
+				.next_batch(crate::kvs::ScanLimit::Count(crate::kvs::NORMAL_BATCH_SIZE))
+				.await?;
+			if batch.is_empty() {
+				break;
+			}
+			let owned: Vec<(Vec<u8>, Vec<u8>)> =
+				batch.iter().map(|(k, v)| (k.to_vec(), v.to_vec())).collect();
+			for (key, value) in owned {
 				if ctx.is_done(Some(count)).await? {
 					bail!(Error::QueryCancelled)
 				}
@@ -1008,17 +1011,21 @@ impl DiskAnnIndex {
 		F: FnMut(PendingOperation),
 	{
 		let rng = self.ikb.new_dr_range()?;
-		let mut stream =
-			tx.stream_keys_vals(rng, None, None, 0, ScanDirection::Forward, false, None);
+		let mut cursor = tx.open_vals_cursor(rng, ScanDirection::Forward, 0, None).await?;
 		let mut count = 0;
-		while let Some(res) = stream.next().await {
-			let batch = res?;
-			for (key, value) in batch {
+		loop {
+			let batch = cursor
+				.next_batch(crate::kvs::ScanLimit::Count(crate::kvs::NORMAL_BATCH_SIZE))
+				.await?;
+			if batch.is_empty() {
+				break;
+			}
+			for (key, value) in &batch {
 				if ctx.is_done(Some(count)).await? {
 					bail!(Error::QueryCancelled)
 				}
-				let dr = DiskAnnRecordPending::decode_key(&key)?;
-				let pending = DiskAnnRecordPendingUpdate::kv_decode_value(&value, ())?;
+				let dr = DiskAnnRecordPending::decode_key(key)?;
+				let pending = DiskAnnRecordPendingUpdate::kv_decode_value(value, ())?;
 				collector(Self::record_pending_to_operation(dr.id.into_owned(), pending));
 				count += 1;
 			}

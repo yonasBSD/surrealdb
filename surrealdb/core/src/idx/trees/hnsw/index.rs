@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use ahash::HashMap;
 use anyhow::{Result, bail};
-use futures::StreamExt;
 use reblessive::tree::Stk;
 use roaring::RoaringTreemap;
 use tokio::sync::RwLock;
@@ -360,11 +359,17 @@ impl HnswIndex {
 		count: &mut usize,
 	) -> Result<()> {
 		let rng = ikb.new_hp_range()?;
-		let mut stream =
-			tx.stream_keys_vals(rng, None, None, 0, ScanDirection::Forward, false, None);
-		while let Some(res) = stream.next().await {
-			let batch = res?;
-			for (key, value) in batch {
+		let mut cursor = tx.open_vals_cursor(rng, ScanDirection::Forward, 0, None).await?;
+		loop {
+			let batch = cursor
+				.next_batch(crate::kvs::ScanLimit::Count(crate::kvs::NORMAL_BATCH_SIZE))
+				.await?;
+			if batch.is_empty() {
+				break;
+			}
+			let owned: Vec<(Vec<u8>, Vec<u8>)> =
+				batch.iter().map(|(k, v)| (k.to_vec(), v.to_vec())).collect();
+			for (key, value) in owned {
 				if ctx.is_done(Some(*count)).await? {
 					bail!(Error::QueryCancelled)
 				}
@@ -394,11 +399,17 @@ impl HnswIndex {
 		count: &mut usize,
 	) -> Result<()> {
 		let rng = ikb.new_hr_range()?;
-		let mut stream =
-			tx.stream_keys_vals(rng, None, None, 0, ScanDirection::Forward, false, None);
-		while let Some(res) = stream.next().await {
-			let batch = res?;
-			for (key, value) in batch {
+		let mut cursor = tx.open_vals_cursor(rng, ScanDirection::Forward, 0, None).await?;
+		loop {
+			let batch = cursor
+				.next_batch(crate::kvs::ScanLimit::Count(crate::kvs::NORMAL_BATCH_SIZE))
+				.await?;
+			if batch.is_empty() {
+				break;
+			}
+			let owned: Vec<(Vec<u8>, Vec<u8>)> =
+				batch.iter().map(|(k, v)| (k.to_vec(), v.to_vec())).collect();
+			for (key, value) in owned {
 				if ctx.is_done(Some(*count)).await? {
 					bail!(Error::QueryCancelled)
 				}
@@ -729,32 +740,41 @@ impl HnswIndex {
 		F: FnMut(PendingOperation),
 	{
 		let rng = self.ikb.new_hp_range()?;
-		let mut stream =
-			tx.stream_keys_vals(rng, None, None, 0, ScanDirection::Forward, false, None);
+		let mut cursor = tx.open_vals_cursor(rng, ScanDirection::Forward, 0, None).await?;
 		let mut count = 0;
-		while let Some(res) = stream.next().await {
-			let batch = res?;
-			for (_, v) in batch {
+		loop {
+			let batch = cursor
+				.next_batch(crate::kvs::ScanLimit::Count(crate::kvs::NORMAL_BATCH_SIZE))
+				.await?;
+			if batch.is_empty() {
+				break;
+			}
+			for (_, v) in &batch {
 				if ctx.is_done(Some(count)).await? {
 					bail!(Error::QueryCancelled)
 				}
-				let pending = VectorPendingUpdate::kv_decode_value(&v, ())?;
+				let pending = VectorPendingUpdate::kv_decode_value(v, ())?;
 				collector(Self::append_pending_to_operation(pending));
 				count += 1;
 			}
 		}
+		drop(cursor);
 
 		let rng = self.ikb.new_hr_range()?;
-		let mut stream =
-			tx.stream_keys_vals(rng, None, None, 0, ScanDirection::Forward, false, None);
-		while let Some(res) = stream.next().await {
-			let batch = res?;
-			for (key, value) in batch {
+		let mut cursor = tx.open_vals_cursor(rng, ScanDirection::Forward, 0, None).await?;
+		loop {
+			let batch = cursor
+				.next_batch(crate::kvs::ScanLimit::Count(crate::kvs::NORMAL_BATCH_SIZE))
+				.await?;
+			if batch.is_empty() {
+				break;
+			}
+			for (key, value) in &batch {
 				if ctx.is_done(Some(count)).await? {
 					bail!(Error::QueryCancelled)
 				}
-				let hr = HnswRecordPending::decode_key(&key)?;
-				let pending = HnswRecordPendingUpdate::kv_decode_value(&value, ())?;
+				let hr = HnswRecordPending::decode_key(key)?;
+				let pending = HnswRecordPendingUpdate::kv_decode_value(value, ())?;
 				collector(Self::record_pending_to_operation(hr.id.into_owned(), pending));
 				count += 1;
 			}

@@ -213,29 +213,39 @@ impl ExecOperator for ReferenceScan {
 						&ctx,
 					).await?;
 
-					let kv_stream = txn.stream_keys(beg..end, version, None, 0, ScanDirection::Forward);
-					futures::pin_mut!(kv_stream);
-
-					while let Some(result) = kv_stream.next().await {
-						let keys = result.context("Failed to scan reference")?;
-
-						for key in keys {
-							let decoded = crate::key::r#ref::Ref::decode_key(&key)
+					let mut cursor = txn
+						.open_keys_cursor(beg..end, ScanDirection::Forward, 0, version)
+						.await
+						.context("Failed to open reference cursor")?;
+					loop {
+						let batch = cursor
+							.next_batch(crate::kvs::ScanLimit::Count(
+								crate::kvs::NORMAL_BATCH_SIZE,
+							))
+							.await
+							.context("Failed to scan reference")?;
+						if batch.is_empty() {
+							break;
+						}
+						for key in &batch {
+							let decoded = crate::key::r#ref::Ref::decode_key(key)
 								.context("Failed to decode ref key")?;
 
 							rid_batch.push(RecordId {
 								table: decoded.ft.into_owned(),
 								key: decoded.fk.into_owned(),
 							});
-
-							if rid_batch.len() >= scan_batch_size {
-								let values = resolve_record_batch(
-									&ctx, &txn, ns_id, db_id, &rid_batch, fetch_full, check_perms,
-									version, CachePolicy::ReadWrite, &mut perm_cache,
-								).await?;
-								yield ValueBatch { values };
-								rid_batch.clear();
-							}
+						}
+						// Resolve full batches before fetching the next batch
+						// from the cursor — keeps the cursor's reusable
+						// buffer free for the next call and bounds memory.
+						if rid_batch.len() >= scan_batch_size {
+							let values = resolve_record_batch(
+								&ctx, &txn, ns_id, db_id, &rid_batch, fetch_full, check_perms,
+								version, CachePolicy::ReadWrite, &mut perm_cache,
+							).await?;
+							yield ValueBatch { values };
+							rid_batch.clear();
 						}
 					}
 				}

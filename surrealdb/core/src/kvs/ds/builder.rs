@@ -315,6 +315,7 @@ mod tests {
 		BucketStoreProvider, BucketStoreProviderRequirements, Config as BucketConfig,
 	};
 	use crate::cnf::ConfigMap;
+	use crate::kvs::api::BoxFut;
 	use crate::kvs::{
 		Metrics, Transactable, TransactionBuilder, TransactionBuilderFactory,
 		TransactionBuilderFactoryRequirements, TransactionBuilderParts,
@@ -371,19 +372,17 @@ mod tests {
 
 	impl TransactionBuilderRequirements for TestTransactionBuilder {}
 
-	#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
-	#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 	impl TransactionBuilder for TestTransactionBuilder {
-		async fn new_transaction(
+		fn new_transaction(
 			&self,
 			_write: bool,
 			_lock: bool,
-		) -> Result<(Box<dyn Transactable>, bool)> {
-			unreachable!("test does not open transactions")
+		) -> BoxFut<'_, Result<(Box<dyn Transactable>, bool)>> {
+			Box::pin(async move { unreachable!("test does not open transactions") })
 		}
 
-		async fn shutdown(&self) -> Result<()> {
-			Ok(())
+		fn shutdown(&self) -> BoxFut<'_, Result<()>> {
+			Box::pin(async move { Ok(()) })
 		}
 
 		fn register_metrics(&self) -> Option<Metrics> {

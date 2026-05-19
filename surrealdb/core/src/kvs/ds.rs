@@ -30,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument, trace, warn};
 use uuid::Uuid;
 
-use super::api::Transactable;
+use super::api::{BoxFut, Transactable};
 use super::tr::Transactor;
 use super::tx::Transaction;
 use super::version::MajorVersion;
@@ -369,8 +369,6 @@ impl TransactionFactory {
 	}
 }
 
-#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 /// Abstraction over storage backends for creating and managing transactions.
 ///
 /// This trait allows decoupling `Datastore` from concrete KV engines (memory,
@@ -391,14 +389,14 @@ pub trait TransactionBuilder: TransactionBuilderRequirements {
 	/// Returns the backend transaction object and a flag indicating if the
 	/// transaction is local to the process (true) or requires external resources
 	/// (false).
-	async fn new_transaction(
+	fn new_transaction(
 		&self,
 		write: bool,
 		lock: bool,
-	) -> Result<(Box<dyn Transactable>, bool)>;
+	) -> BoxFut<'_, Result<(Box<dyn Transactable>, bool)>>;
 
 	/// Perform any backend-specific shutdown/cleanup.
-	async fn shutdown(&self) -> Result<()>;
+	fn shutdown(&self) -> BoxFut<'_, Result<()>>;
 
 	/// Registers metrics for the current datastore flavor if supported.
 	///
@@ -711,8 +709,6 @@ impl TransactionBuilderFactory for CommunityComposer {
 
 impl TransactionBuilderRequirements for DatastoreFlavor {}
 
-#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl TransactionBuilder for DatastoreFlavor {
 	#[allow(
 		unreachable_code,
@@ -720,40 +716,40 @@ impl TransactionBuilder for DatastoreFlavor {
 		unused_variables,
 		reason = "Some variables are unused when no backends are enabled."
 	)]
-	async fn new_transaction(
+	fn new_transaction(
 		&self,
 		write: bool,
 		lock: bool,
-	) -> Result<(Box<dyn Transactable>, bool)> {
-		//-> Pin<Box<dyn Future<Output = Result<(Box<dyn api::Transaction>, bool)>> + Send + 'a>> {
-		//Box::pin(async move {
-		Ok(match self {
-			#[cfg(feature = "kv-mem")]
-			Self::Mem(v) => {
-				let tx = v.transaction(write, lock).await?;
-				(tx, true)
-			}
-			#[cfg(feature = "kv-rocksdb")]
-			Self::RocksDB(v) => {
-				let tx = v.transaction(write, lock).await?;
-				(tx, true)
-			}
-			#[cfg(feature = "kv-indxdb")]
-			Self::IndxDB(v) => {
-				let tx = v.transaction(write, lock).await?;
-				(tx, true)
-			}
-			#[cfg(feature = "kv-tikv")]
-			Self::TiKV(v) => {
-				let tx = v.transaction(write, lock).await?;
-				(tx, false)
-			}
-			#[cfg(feature = "kv-surrealkv")]
-			Self::SurrealKV(v) => {
-				let tx = v.transaction(write, lock).await?;
-				(tx, true)
-			}
-			_ => unreachable!(),
+	) -> BoxFut<'_, Result<(Box<dyn Transactable>, bool)>> {
+		Box::pin(async move {
+			Ok(match self {
+				#[cfg(feature = "kv-mem")]
+				Self::Mem(v) => {
+					let tx = v.transaction(write, lock).await?;
+					(tx, true)
+				}
+				#[cfg(feature = "kv-rocksdb")]
+				Self::RocksDB(v) => {
+					let tx = v.transaction(write, lock).await?;
+					(tx, true)
+				}
+				#[cfg(feature = "kv-indxdb")]
+				Self::IndxDB(v) => {
+					let tx = v.transaction(write, lock).await?;
+					(tx, true)
+				}
+				#[cfg(feature = "kv-tikv")]
+				Self::TiKV(v) => {
+					let tx = v.transaction(write, lock).await?;
+					(tx, false)
+				}
+				#[cfg(feature = "kv-surrealkv")]
+				Self::SurrealKV(v) => {
+					let tx = v.transaction(write, lock).await?;
+					(tx, true)
+				}
+				_ => unreachable!(),
+			})
 		})
 	}
 
@@ -779,21 +775,23 @@ impl TransactionBuilder for DatastoreFlavor {
 		}
 	}
 
-	async fn shutdown(&self) -> Result<()> {
-		match self {
-			#[cfg(feature = "kv-mem")]
-			Self::Mem(v) => Ok(v.shutdown().await?),
-			#[cfg(feature = "kv-rocksdb")]
-			Self::RocksDB(v) => Ok(v.shutdown().await?),
-			#[cfg(feature = "kv-indxdb")]
-			Self::IndxDB(v) => Ok(v.shutdown().await?),
-			#[cfg(feature = "kv-tikv")]
-			Self::TiKV(v) => Ok(v.shutdown().await?),
-			#[cfg(feature = "kv-surrealkv")]
-			Self::SurrealKV(v) => Ok(v.shutdown().await?),
-			#[allow(unreachable_patterns)]
-			_ => unreachable!(),
-		}
+	fn shutdown(&self) -> BoxFut<'_, Result<()>> {
+		Box::pin(async move {
+			match self {
+				#[cfg(feature = "kv-mem")]
+				Self::Mem(v) => Ok(v.shutdown().await?),
+				#[cfg(feature = "kv-rocksdb")]
+				Self::RocksDB(v) => Ok(v.shutdown().await?),
+				#[cfg(feature = "kv-indxdb")]
+				Self::IndxDB(v) => Ok(v.shutdown().await?),
+				#[cfg(feature = "kv-tikv")]
+				Self::TiKV(v) => Ok(v.shutdown().await?),
+				#[cfg(feature = "kv-surrealkv")]
+				Self::SurrealKV(v) => Ok(v.shutdown().await?),
+				#[allow(unreachable_patterns)]
+				_ => unreachable!(),
+			}
+		})
 	}
 }
 

@@ -247,34 +247,65 @@ impl ExecOperator for GraphEdgeScan {
 						).await?;
 
 						for (beg, end) in ranges {
-							let remaining = edge_limit.map(|l| l.saturating_sub(edges_yielded));
-							let kv_stream = txn.stream_keys(
-								beg..end, version, remaining, 0, ScanDirection::Forward,
-							);
-							futures::pin_mut!(kv_stream);
-
-							while let Some(result) = kv_stream.next().await {
-								let keys = result.context("Failed to scan graph edge")?;
-
-								for key in keys {
-									let target_rid = decode_graph_edge(&key)?;
+							let mut cursor = txn
+								.open_keys_cursor(beg..end, ScanDirection::Forward, 0, version)
+								.await
+								.context("Failed to open graph cursor")?;
+							let mut limit_hit = false;
+							'cursor_loop: loop {
+								// Cap each batch to the remaining edge budget
+								// (when `edge_limit` is set) so we don't
+								// over-fetch past the user's LIMIT.
+								let remaining = edge_limit.map(|l| {
+									l.saturating_sub(edges_yielded).min(
+										crate::kvs::NORMAL_BATCH_SIZE as usize,
+									)
+								});
+								let batch_size = remaining
+									.map(|r| r as u32)
+									.unwrap_or(crate::kvs::NORMAL_BATCH_SIZE);
+								if batch_size == 0 {
+									limit_hit = true;
+									break;
+								}
+								let batch = cursor
+									.next_batch(crate::kvs::ScanLimit::Count(batch_size))
+									.await
+									.context("Failed to scan graph edge")?;
+								if batch.is_empty() {
+									break;
+								}
+								for key in &batch {
+									let target_rid = decode_graph_edge(key)?;
 									rid_batch.push(target_rid);
 									edges_yielded += 1;
-
-									if rid_batch.len() >= scan_batch_size {
-										let values = resolve_record_batch(
-											&ctx, &txn, ns_id, db_id, &rid_batch, fetch_full,
-											check_perms, version, CachePolicy::ReadWrite,
-											&mut perm_cache,
-										).await?;
-										yield ValueBatch { values };
-										rid_batch.clear();
-									}
-
 									if edge_limit.is_some_and(|l| edges_yielded >= l) {
-										break 'dir_loop;
+										limit_hit = true;
+										break;
 									}
 								}
+								// `batch`'s borrow of the cursor ends with the
+								// for-loop above (NLL), so it's safe to await
+								// `resolve_record_batch` here. Flushing inside
+								// the cursor loop bounds `rid_batch` to
+								// ~`scan_batch_size + NORMAL_BATCH_SIZE` even
+								// for high-fanout edge ranges.
+								if rid_batch.len() >= scan_batch_size {
+									let values = resolve_record_batch(
+										&ctx, &txn, ns_id, db_id, &rid_batch, fetch_full,
+										check_perms, version, CachePolicy::ReadWrite,
+										&mut perm_cache,
+									).await?;
+									yield ValueBatch { values };
+									rid_batch.clear();
+								}
+								if limit_hit {
+									break 'cursor_loop;
+								}
+							}
+							drop(cursor);
+							if limit_hit {
+								break 'dir_loop;
 							}
 						}
 					}

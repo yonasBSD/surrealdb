@@ -2,13 +2,12 @@ use std::fmt;
 use std::fmt::Debug;
 use std::ops::Range;
 
-use futures::stream::Stream;
-
-use super::api::{GetMultiResult, KeysResult, ScanLimit, ScanResult, Transactable};
+use super::api::{
+	GetMultiResult, KeysResult, ScanCursorKeys, ScanCursorVals, ScanLimit, ScanResult, Transactable,
+};
 use super::batch::Batch;
-use super::scanner::{Direction, Scanner};
+use super::direction::Direction;
 use super::{IntoBytes, Key, Result, Val};
-use crate::kvs::NORMAL_BATCH_SIZE;
 use crate::kvs::timestamp::{BoxTimeStamp, BoxTimeStampImpl};
 
 /// Specifies whether the transaction is read-only or writeable.
@@ -430,6 +429,52 @@ impl Transactor {
 	}
 
 	// --------------------------------------------------
+	// Cursor functions
+	// --------------------------------------------------
+
+	/// Open a stateful keys-only scan cursor over a range.
+	///
+	/// The cursor lives for the duration of one logical scan (e.g. an
+	/// outer table walk or one prefix of a graph-edge traversal). Each
+	/// `next_batch` call advances the same underlying iterator instead of
+	/// re-seeking from scratch, which is the primary cost on RocksDB
+	/// paged scans. `skip` is applied once on the first batch. See
+	/// [`ScanCursorKeys`].
+	#[instrument(level = "trace", target = "surrealdb::core::kvs::tr", skip_all)]
+	pub async fn open_keys_cursor<'a, K>(
+		&'a self,
+		rng: Range<K>,
+		dir: Direction,
+		skip: u32,
+		version: Option<u64>,
+	) -> Result<Box<dyn ScanCursorKeys + 'a>>
+	where
+		K: IntoBytes + Debug,
+	{
+		let beg = rng.start.into_vec();
+		let end = rng.end.into_vec();
+		self.inner.open_keys_cursor(beg..end, dir, skip, version).await
+	}
+
+	/// Open a stateful key+value scan cursor over a range. See
+	/// [`Self::open_keys_cursor`] for the rationale.
+	#[instrument(level = "trace", target = "surrealdb::core::kvs::tr", skip_all)]
+	pub async fn open_vals_cursor<'a, K>(
+		&'a self,
+		rng: Range<K>,
+		dir: Direction,
+		skip: u32,
+		version: Option<u64>,
+	) -> Result<Box<dyn ScanCursorVals + 'a>>
+	where
+		K: IntoBytes + Debug,
+	{
+		let beg = rng.start.into_vec();
+		let end = rng.end.into_vec();
+		self.inner.open_vals_cursor(beg..end, dir, skip, version).await
+	}
+
+	// --------------------------------------------------
 	// Batch functions
 	// --------------------------------------------------
 
@@ -469,96 +514,6 @@ impl Transactor {
 		let beg = rng.start.into_vec();
 		let end = rng.end.into_vec();
 		self.inner.batch_keys_vals(beg..end, batch, version).await
-	}
-
-	// --------------------------------------------------
-	// Stream functions
-	// --------------------------------------------------
-
-	/// Retrieve a stream of key batches over a specific range in the datastore.
-	///
-	/// This function returns a stream that yields batches of keys. The scanner:
-	/// - Fetches an initial batch of up to 500 items
-	/// - Fetches subsequent batches of up to 16 MiB (local) or 4 MiB (remote)
-	/// - Prefetches the next batch while the current batch is being processed
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tr", skip_all)]
-	pub fn stream_keys<K>(
-		&self,
-		rng: Range<K>,
-		version: Option<u64>,
-		limit: Option<usize>,
-		skip: u32,
-		dir: Direction,
-	) -> impl Stream<Item = Result<Vec<Key>>> + '_
-	where
-		K: IntoBytes + Debug,
-	{
-		let beg = rng.start.into_vec();
-		let end = rng.end.into_vec();
-		let mut scanner = Scanner::<Key>::new(self, beg..end, limit, dir);
-		// Set the version
-		if let Some(v) = version {
-			scanner = scanner.version(v);
-		}
-		// Set the skip
-		if skip > 0 {
-			scanner = scanner.skip(skip);
-		}
-		// Return the stream
-		scanner
-	}
-
-	/// Retrieve a stream of key-value batches over a specific range in the datastore.
-	///
-	/// This function returns a stream that yields batches of key-value pairs. The scanner:
-	/// - Fetches an initial batch of up to 500 items (or 1000 when `prefetch` is enabled)
-	/// - Fetches subsequent batches of up to 16 MiB (local) or 4 MiB (remote)
-	/// - When `prefetch` is true, prefetches the next batch while the current batch is being
-	///   processed, and uses a larger initial batch size (500 items)
-	/// - When `limit_hint` is provided, caps the initial batch size to avoid over-fetching for
-	///   small-limit queries (e.g. `LIMIT 10` fetches 10 instead of 500). Subsequent batches are
-	///   unaffected.
-	#[allow(clippy::too_many_arguments)]
-	#[instrument(level = "trace", target = "surrealdb::core::kvs::tr", skip_all)]
-	pub fn stream_keys_vals<K>(
-		&self,
-		rng: Range<K>,
-		version: Option<u64>,
-		limit: Option<usize>,
-		skip: u32,
-		dir: Direction,
-		prefetch: bool,
-		limit_hint: Option<u32>,
-	) -> impl Stream<Item = Result<Vec<(Key, Val)>>> + '_
-	where
-		K: IntoBytes + Debug,
-	{
-		let beg = rng.start.into_vec();
-		let end = rng.end.into_vec();
-		let mut scanner = Scanner::<(Key, Val)>::new(self, beg..end, limit, dir);
-		// Set the version
-		if let Some(v) = version {
-			scanner = scanner.version(v);
-		}
-		// Set the skip
-		if skip > 0 {
-			scanner = scanner.skip(skip);
-		}
-		// Enable prefetching and larger initial batch for full scans.
-		// The scanner default is already NORMAL_FETCH_SIZE (500); when
-		// prefetching is active we double it to amortise the overlap cost.
-		// When a limit_hint is present, cap the initial batch size so that
-		// small-limit queries (e.g. LIMIT 10) don't fetch 500+ records from
-		// storage only to discard most of them.
-		// TODO: Set to right value
-		if prefetch {
-			let size = limit_hint.unwrap_or(NORMAL_BATCH_SIZE * 2).min(NORMAL_BATCH_SIZE * 2);
-			scanner = scanner.prefetch(true).initial_batch_size(ScanLimit::Count(size));
-		} else if let Some(hint) = limit_hint {
-			scanner = scanner.initial_batch_size(ScanLimit::Count(hint.min(NORMAL_BATCH_SIZE)));
-		}
-		// Return the stream
-		scanner
 	}
 
 	// --------------------------------------------------
