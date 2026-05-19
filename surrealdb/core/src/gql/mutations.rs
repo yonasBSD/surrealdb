@@ -17,13 +17,12 @@ use async_graphql::dynamic::{
 };
 use async_graphql::{Name, Value as GqlValue};
 use surrealdb_strand::Strand;
-use surrealdb_types::ToSql;
 
 use super::error::{GqlError, resolver_error};
 use super::schema::{
 	SchemaContext, gql_to_sql_kind_with_scope, kind_to_type_with_enum_prefix, unwrap_type,
 };
-use super::tables::{CachedRecord, cond_from_filter};
+use super::tables::{CachedRecord, cond_from_filter, idiom_to_gql_name};
 use super::utils::{GqlValueUtils, execute_plan};
 use crate::catalog::providers::TableProvider;
 use crate::catalog::{FieldDefinition, TableDefinition, TableType};
@@ -191,7 +190,10 @@ fn generate_input_types(
 		if fd.name.0.len() > 1 {
 			continue;
 		}
-		let fd_name = fd.name.to_sql();
+		// GraphQL-safe name (no SurrealQL backtick quoting); the mutation
+		// resolver maps each input key back to the original idiom when
+		// building the SET clause.
+		let fd_name = idiom_to_gql_name(&fd.name);
 		// Skip `in` and `out` for relation tables (already added above)
 		if is_relation && (fd_name == "in" || fd_name == "out") {
 			continue;

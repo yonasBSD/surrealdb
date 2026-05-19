@@ -59,7 +59,8 @@ use super::schema::{
 use crate::catalog::providers::TableProvider;
 use crate::catalog::{FieldDefinition, TableDefinition};
 use crate::dbs::Session;
-use crate::expr::field::Selector;
+use crate::expr::field::{Field as SelectField, Selector};
+use crate::expr::group::{Group, Groups};
 use crate::expr::order::{OrderList, Ordering};
 use crate::expr::part::Part;
 use crate::expr::statements::SelectStatement;
@@ -68,10 +69,57 @@ use crate::expr::{
 	LogicalPlan, Start, TopLevelExpr,
 };
 use crate::gql::error::internal_error;
-use crate::gql::schema::{geometry_gql_type_name, kind_to_type_with_enum_prefix, unwrap_type};
+use crate::gql::schema::{
+	geometry_gql_type_name, kind_to_type, kind_to_type_with_enum_prefix, unwrap_type,
+};
 use crate::gql::utils::{GqlValueUtils, execute_plan};
 use crate::kvs::Datastore;
 use crate::val::{Array as SurArray, Datetime, Object as SurObject, RecordId, TableName, Value};
+
+/// Convert a [`FieldDefinition::name`] (an `Idiom`) into a string usable as a
+/// GraphQL Name.
+///
+/// SurrealQL's [`Idiom::to_sql`] backtick-quotes reserved-word identifiers
+/// (`` `value` ``, `` `type` ``, …) and may produce dotted multi-part forms
+/// for nested fields. Neither shape is a valid GraphQL Name per the spec
+/// (`/[_A-Za-z][_0-9A-Za-z]*/`), and strict introspection clients such as
+/// Postman reject the entire schema when even one field name violates this.
+/// They also break the [`CachedRecord`] lookup (which keys on the raw field
+/// name) at runtime.
+///
+/// This helper extracts the raw `Part::Field` segment when the idiom is
+/// single-part, and falls back to a sanitised form for the (rare) multi-part
+/// case. The result is suitable both as the GraphQL field name and as the
+/// `CachedRecord` lookup key — they must match.
+pub(crate) fn idiom_to_gql_name(idiom: &Idiom) -> String {
+	if idiom.0.len() == 1
+		&& let Part::Field(name) = &idiom.0[0]
+	{
+		return name.as_str().to_owned();
+	}
+	// Multi-part fallback: stringify and sanitise. Replace any character that
+	// isn't `_`/letter/digit with `_`, and prefix with `_` if the result
+	// would start with a digit. This is best-effort — top-level fields
+	// reaching this branch are unusual but we don't want to panic.
+	let raw = idiom.to_sql();
+	let mut out = String::with_capacity(raw.len());
+	for (i, c) in raw.chars().enumerate() {
+		let ok = if i == 0 {
+			c.is_ascii_alphabetic() || c == '_'
+		} else {
+			c.is_ascii_alphanumeric() || c == '_'
+		};
+		out.push(if ok {
+			c
+		} else {
+			'_'
+		});
+	}
+	if out.is_empty() {
+		out.push('_');
+	}
+	out
+}
 
 /// Create an ascending `ORDER BY` clause for the given field.
 fn order_asc(field_name: String) -> expr::Order {
@@ -948,7 +996,10 @@ fn build_table_type(
 			continue;
 		}
 
-		let fd_name = Name::new(fd.name.to_sql());
+		// Use the GraphQL-safe form of the field name. `Idiom::to_sql` quotes
+		// reserved-word identifiers (e.g. `` `value` ``), which produce invalid
+		// GraphQL Names and break strict introspection clients.
+		let fd_name = Name::new(idiom_to_gql_name(&fd.name));
 		existing_field_names.insert(fd_name.to_string());
 
 		// Handle nested object fields (TYPE object with children)
@@ -1006,9 +1057,9 @@ fn build_table_type(
 			types.push(type_filter);
 		}
 
-		filter = filter.field(InputValue::new(fd.name.to_sql(), TypeRef::named(type_filter_name)));
+		filter = filter.field(InputValue::new(fd_name.as_str(), TypeRef::named(type_filter_name)));
 		let mut field = Field::new(
-			fd.name.to_sql(),
+			fd_name.as_str(),
 			fd_type,
 			make_table_field_resolver(fd_name.as_str(), fd.field_kind.clone(), Some(enum_scope)),
 		);
@@ -1137,6 +1188,18 @@ pub async fn process_tbs(
 		types.push(tt.order.into());
 		types.push(Type::Enum(tt.orderable));
 		types.push(Type::InputObject(tt.filter));
+
+		// Aggregation query field — `{table}_aggregate` returns
+		// `[{Table}AggregateRow!]!` with count + per-numeric-field stats and
+		// optional groupBy.  See `register_filter_helper_types` / Stage E.
+		let (agg_obj, agg_enum) = build_aggregate_type(tb.name.as_str(), &fds, types);
+		types.push(Type::Object(agg_obj));
+		types.push(Type::Enum(agg_enum));
+		query = query.field(make_table_aggregate_field(
+			tb,
+			Arc::clone(&fds),
+			Arc::clone(ctx.datastore),
+		));
 	}
 
 	// Add generic _get query field for fetching any record by full ID
@@ -1484,8 +1547,22 @@ fn filter_from_type(
 	filter_impl!(filter, ty, "eq");
 	filter_impl!(filter, ty, "ne");
 
+	// Every field gets a generic `call` predicate (function-based filter).
+	let call_ty = TypeRef::named(CALL_INPUT);
+	filter_impl!(filter, call_ty, "call");
+
+	// Numeric-array fields get `nearest` (KNN) and `similarity` predicates,
+	// regardless of the outer field kind being plain `array<T>` or
+	// `option<array<T>>`.
+	if numeric_array_inner(&effective_kind).is_some() {
+		let knn_ty = TypeRef::named(KNN_INPUT);
+		filter_impl!(filter, knn_ty, "nearest");
+		let sim_ty = TypeRef::named(SIMILARITY_INPUT);
+		filter_impl!(filter, sim_ty, "similarity");
+	}
+
 	match effective_kind {
-		// String: contains, startsWith, endsWith, regex, in
+		// String: contains, startsWith, endsWith, regex, in, matches
 		Kind::String => {
 			let str_ty = TypeRef::named(TypeRef::STRING);
 			filter_impl!(filter, str_ty, "contains");
@@ -1494,6 +1571,8 @@ fn filter_from_type(
 			filter_impl!(filter, str_ty, "regex");
 			let list_ty = TypeRef::named_nn_list(TypeRef::STRING);
 			filter_impl!(filter, list_ty, "in");
+			let matches_ty = TypeRef::named(MATCHES_INPUT);
+			filter_impl!(filter, matches_ty, "matches");
 		}
 		// Numeric types: gt, gte, lt, lte, in
 		Kind::Int => {
@@ -1728,7 +1807,7 @@ fn binop(
 ) -> Result<Expr, GqlError> {
 	let obj = val.as_object().ok_or(resolver_error("Field filter should be object"))?;
 
-	let Some(fd) = fds.iter().find(|fd| fd.name.to_sql() == field_name) else {
+	let Some(fd) = fds.iter().find(|fd| idiom_to_gql_name(&fd.name) == field_name) else {
 		if field_name == "id" {
 			return binop_for_id(obj);
 		}
@@ -1767,7 +1846,15 @@ fn binop(
 				arguments: vec![lhs, rhs.into_literal()],
 			})));
 		} else {
-			return Err(resolver_error(format!("Unsupported filter operator: {op_name}")));
+			match op_name {
+				"nearest" => exprs.push(translate_nearest(lhs, v)?),
+				"similarity" => exprs.push(translate_similarity(lhs, v)?),
+				"matches" => exprs.push(translate_matches(lhs, v)?),
+				"call" => exprs.push(translate_call(lhs, v)?),
+				_ => {
+					return Err(resolver_error(format!("Unsupported filter operator: {op_name}")));
+				}
+			}
 		}
 	}
 
@@ -1825,4 +1912,629 @@ fn binop_for_id(obj: &IndexMap<Name, GqlValue>) -> Result<Expr, GqlError> {
 	}
 
 	Ok(combined)
+}
+
+// ---------------------------------------------------------------------------
+// Advanced filter operators (vector similarity / KNN, full-text matches,
+// function-call predicates) — see GitHub issue #7312.
+//
+// The shared input types registered here are independent of any particular
+// table, so they live in the global `types` vector and are reused across every
+// `_filter_*` InputObject that opts in.
+// ---------------------------------------------------------------------------
+
+const VECTOR_DISTANCE_ENUM: &str = "_VectorDistance";
+const NUM_OP_ENUM: &str = "_NumOp";
+const KNN_INPUT: &str = "_KnnInput";
+const SIMILARITY_INPUT: &str = "_SimilarityInput";
+const MATCHES_INPUT: &str = "_MatchesInput";
+const CALL_INPUT: &str = "_CallInput";
+
+/// Register the shared InputObject / Enum types used by the advanced filter
+/// operators (`nearest`, `similarity`, `matches`, `call`).
+///
+/// Registered unconditionally — async-graphql tolerates unused types, and the
+/// schema is built once per `DEFINE CONFIG GRAPHQL`. Keeping registration
+/// unconditional avoids drift between the filter generator and the type
+/// registration step.
+pub(crate) fn register_filter_helper_types(types: &mut Vec<Type>) {
+	// `Minkowski(Number)` is intentionally omitted — it takes an extra param
+	// that doesn't fit a flat enum; use the `call` operator with
+	// `vector::distance::minkowski` if it's needed.
+	types.push(Type::Enum(
+		Enum::new(VECTOR_DISTANCE_ENUM)
+			.description(
+				"Vector distance / similarity metric for the `nearest` and `similarity` filter \
+				 operators.",
+			)
+			.item("COSINE")
+			.item("EUCLIDEAN")
+			.item("MANHATTAN")
+			.item("HAMMING")
+			.item("JACCARD")
+			.item("CHEBYSHEV")
+			.item("PEARSON"),
+	));
+
+	types.push(Type::Enum(
+		Enum::new(NUM_OP_ENUM)
+			.description("Comparison operator for the `similarity` and `call` filter operators.")
+			.item("eq")
+			.item("ne")
+			.item("gt")
+			.item("gte")
+			.item("lt")
+			.item("lte"),
+	));
+
+	// `nearest` — SurrealQL `<|K, distance|>` operator.
+	types.push(Type::InputObject(
+		InputObject::new(KNN_INPUT)
+			.description(
+				"K-nearest-neighbour predicate.  Translates to SurrealQL `field <|k,distance|> to`.",
+			)
+			.field(InputValue::new("to", TypeRef::named_nn_list_nn(TypeRef::FLOAT)))
+			.field(InputValue::new("k", TypeRef::named_nn(TypeRef::INT)))
+			.field(InputValue::new("distance", TypeRef::named_nn(VECTOR_DISTANCE_ENUM))),
+	));
+
+	// `similarity` — calls `vector::similarity::*` or `vector::distance::*` on
+	// the field and target, then compares the result against `value`.
+	types.push(Type::InputObject(
+		InputObject::new(SIMILARITY_INPUT)
+			.description(
+				"Vector similarity / distance predicate.  Calls the matching `vector::*` function \
+				 on the field and `to`, then compares the result against `value` using `op`.",
+			)
+			.field(InputValue::new("to", TypeRef::named_nn_list_nn(TypeRef::FLOAT)))
+			.field(InputValue::new("distance", TypeRef::named_nn(VECTOR_DISTANCE_ENUM)))
+			.field(InputValue::new("op", TypeRef::named_nn(NUM_OP_ENUM)))
+			.field(InputValue::new("value", TypeRef::named_nn(TypeRef::FLOAT))),
+	));
+
+	// `matches` — SurrealQL `@@` full-text-search operator.
+	types.push(Type::InputObject(
+		InputObject::new(MATCHES_INPUT)
+			.description(
+				"Full-text-search predicate.  Translates to SurrealQL `field @@ query`.  Requires \
+				 a `DEFINE INDEX … SEARCH ANALYZER …` on the field.",
+			)
+			.field(InputValue::new("query", TypeRef::named_nn(TypeRef::STRING))),
+	));
+
+	// `call` — generic function-call predicate.
+	types.push(Type::InputObject(
+		InputObject::new(CALL_INPUT)
+			.description(
+				"Generic function-call predicate.  Translates to SurrealQL `fn(field, ...args) op \
+				 value`.  Function permissions are enforced at execution time.",
+			)
+			.field(InputValue::new("fn", TypeRef::named_nn(TypeRef::STRING)))
+			.field(InputValue::new("args", TypeRef::named_list("JSON")))
+			.field(InputValue::new("op", TypeRef::named_nn(NUM_OP_ENUM)))
+			.field(InputValue::new("value", TypeRef::named_nn("JSON"))),
+	));
+}
+
+/// If `kind` is an `array<T>` (recursing through `Either`/`Option`) whose
+/// element kind is numeric, return the inner numeric kind.
+fn numeric_array_inner(kind: &Kind) -> Option<Kind> {
+	match kind {
+		Kind::Array(inner, _) => match inner.as_ref() {
+			Kind::Float | Kind::Int | Kind::Number | Kind::Decimal => Some(*inner.clone()),
+			Kind::Either(ks) => {
+				let non_none: Vec<&Kind> =
+					ks.iter().filter(|k| !matches!(k, Kind::None | Kind::Null)).collect();
+				if non_none.len() == 1
+					&& matches!(non_none[0], Kind::Float | Kind::Int | Kind::Number | Kind::Decimal)
+				{
+					Some(non_none[0].clone())
+				} else {
+					None
+				}
+			}
+			_ => None,
+		},
+		Kind::Either(ks) => {
+			let non_none: Vec<&Kind> =
+				ks.iter().filter(|k| !matches!(k, Kind::None | Kind::Null)).collect();
+			if non_none.len() == 1 {
+				numeric_array_inner(non_none[0])
+			} else {
+				None
+			}
+		}
+		_ => None,
+	}
+}
+
+fn distance_variant(name: &str) -> Option<crate::catalog::Distance> {
+	use crate::catalog::Distance;
+	match name {
+		"COSINE" => Some(Distance::Cosine),
+		"EUCLIDEAN" => Some(Distance::Euclidean),
+		"MANHATTAN" => Some(Distance::Manhattan),
+		"HAMMING" => Some(Distance::Hamming),
+		"JACCARD" => Some(Distance::Jaccard),
+		"CHEBYSHEV" => Some(Distance::Chebyshev),
+		"PEARSON" => Some(Distance::Pearson),
+		_ => None,
+	}
+}
+
+/// Cosine/Jaccard/Pearson have dedicated *similarity* functions
+/// (higher = closer); the others fall back to the corresponding *distance*
+/// function (lower = closer).
+fn distance_function_name(name: &str) -> Option<&'static str> {
+	match name {
+		"COSINE" => Some("vector::similarity::cosine"),
+		"JACCARD" => Some("vector::similarity::jaccard"),
+		"PEARSON" => Some("vector::similarity::pearson"),
+		"EUCLIDEAN" => Some("vector::distance::euclidean"),
+		"MANHATTAN" => Some("vector::distance::manhattan"),
+		"HAMMING" => Some("vector::distance::hamming"),
+		"CHEBYSHEV" => Some("vector::distance::chebyshev"),
+		_ => None,
+	}
+}
+
+fn num_op_to_binop(name: &str) -> Option<BinaryOperator> {
+	match name {
+		"eq" => Some(BinaryOperator::Equal),
+		"ne" => Some(BinaryOperator::NotEqual),
+		"gt" => Some(BinaryOperator::MoreThan),
+		"gte" => Some(BinaryOperator::MoreThanEqual),
+		"lt" => Some(BinaryOperator::LessThan),
+		"lte" => Some(BinaryOperator::LessThanEqual),
+		_ => None,
+	}
+}
+
+/// Extract an enum token (`GqlValue::Enum` or `GqlValue::String`) by name from
+/// an InputObject, returning a resolver error if missing or wrong-typed.
+fn take_enum<'a>(obj: &'a IndexMap<Name, GqlValue>, key: &str) -> Result<&'a str, GqlError> {
+	let Some(v) = obj.get(key) else {
+		return Err(resolver_error(format!("missing `{key}` in filter operator input")));
+	};
+	match v {
+		GqlValue::Enum(n) => Ok(n.as_str()),
+		GqlValue::String(s) => Ok(s.as_str()),
+		_ => Err(resolver_error(format!("`{key}` must be an enum or string"))),
+	}
+}
+
+/// Translate a `_KnnInput` GqlValue object into
+/// `Expr::Binary { left: field, op: NearestNeighbor::K(k, dist), right: to }`.
+fn translate_nearest(field: Expr, val: &GqlValue) -> Result<Expr, GqlError> {
+	use crate::expr::operator::NearestNeighbor;
+	let obj = val.as_object().ok_or(resolver_error("`nearest` value must be an object"))?;
+
+	let k = obj
+		.get("k")
+		.and_then(|v| v.as_i64())
+		.ok_or(resolver_error("`nearest.k` must be an integer"))?;
+	let k: u32 =
+		u32::try_from(k.max(0)).map_err(|_| resolver_error("`nearest.k` does not fit in a u32"))?;
+
+	let dist_name = take_enum(obj, "distance")?;
+	let dist = distance_variant(dist_name)
+		.ok_or_else(|| resolver_error(format!("Unknown distance metric: {dist_name}")))?;
+
+	let to_val = obj.get("to").ok_or(resolver_error("`nearest.to` is required"))?;
+	let to = gql_to_sql_kind(to_val, Kind::Array(Box::new(Kind::Float), None))?;
+
+	Ok(Expr::Binary {
+		left: Box::new(field),
+		op: BinaryOperator::NearestNeighbor(Box::new(NearestNeighbor::K(k, dist))),
+		right: Box::new(to.into_literal()),
+	})
+}
+
+/// Translate a `_SimilarityInput` GqlValue into `vector::*(field, to) <op> value`.
+fn translate_similarity(field: Expr, val: &GqlValue) -> Result<Expr, GqlError> {
+	let obj = val.as_object().ok_or(resolver_error("`similarity` value must be an object"))?;
+
+	let dist_name = take_enum(obj, "distance")?;
+	let fn_name = distance_function_name(dist_name)
+		.ok_or_else(|| resolver_error(format!("Unknown distance metric: {dist_name}")))?;
+
+	let op_name = take_enum(obj, "op")?;
+	let op = num_op_to_binop(op_name)
+		.ok_or_else(|| resolver_error(format!("Unknown comparison op: {op_name}")))?;
+
+	let value = obj.get("value").ok_or(resolver_error("`similarity.value` is required"))?;
+	let value = gql_to_sql_kind(value, Kind::Float)?;
+
+	let to_val = obj.get("to").ok_or(resolver_error("`similarity.to` is required"))?;
+	let to = gql_to_sql_kind(to_val, Kind::Array(Box::new(Kind::Float), None))?;
+
+	let call = Expr::FunctionCall(Box::new(FunctionCall {
+		receiver: Function::Normal(fn_name.to_string()),
+		arguments: vec![field, to.into_literal()],
+	}));
+
+	Ok(Expr::Binary {
+		left: Box::new(call),
+		op,
+		right: Box::new(value.into_literal()),
+	})
+}
+
+/// Translate a `_MatchesInput` GqlValue into `field @@ query`.
+fn translate_matches(field: Expr, val: &GqlValue) -> Result<Expr, GqlError> {
+	use crate::expr::operator::{BooleanOperator, MatchesOperator};
+	let obj = val.as_object().ok_or(resolver_error("`matches` value must be an object"))?;
+	let q = obj
+		.get("query")
+		.and_then(|v| match v {
+			GqlValue::String(s) => Some(s.as_str()),
+			_ => None,
+		})
+		.ok_or(resolver_error("`matches.query` must be a string"))?;
+	let query = gql_to_sql_kind(&GqlValue::String(q.to_string()), Kind::String)?;
+	Ok(Expr::Binary {
+		left: Box::new(field),
+		op: BinaryOperator::Matches(MatchesOperator {
+			rf: None,
+			operator: BooleanOperator::And,
+		}),
+		right: Box::new(query.into_literal()),
+	})
+}
+
+/// Translate a `_CallInput` GqlValue into `fn(field, ...args) <op> value`.
+fn translate_call(field: Expr, val: &GqlValue) -> Result<Expr, GqlError> {
+	let obj = val.as_object().ok_or(resolver_error("`call` value must be an object"))?;
+
+	let fn_name = obj
+		.get("fn")
+		.and_then(|v| match v {
+			GqlValue::String(s) => Some(s.as_str()),
+			_ => None,
+		})
+		.ok_or(resolver_error("`call.fn` must be a string"))?;
+
+	let mut args: Vec<Expr> = vec![field];
+	if let Some(args_val) = obj.get("args")
+		&& !matches!(args_val, GqlValue::Null)
+	{
+		let list = args_val.as_list().ok_or(resolver_error("`call.args` must be a list"))?;
+		for a in list {
+			let v = gql_to_sql_kind(a, Kind::Any)?;
+			args.push(v.into_literal());
+		}
+	}
+
+	let op_name = take_enum(obj, "op")?;
+	let op = num_op_to_binop(op_name)
+		.ok_or_else(|| resolver_error(format!("Unknown comparison op: {op_name}")))?;
+
+	let value = obj.get("value").ok_or(resolver_error("`call.value` is required"))?;
+	let value = gql_to_sql_kind(value, Kind::Any)?;
+
+	// User-defined functions (`fn::name`) dispatch via `Function::Custom`; the
+	// engine prepends the `fn::` prefix itself. Built-in functions
+	// (`string::len`, `vector::*`, …) dispatch via `Function::Normal`.
+	let receiver = if let Some(custom) = fn_name.strip_prefix("fn::") {
+		Function::Custom(custom.to_string())
+	} else {
+		Function::Normal(fn_name.to_string())
+	};
+
+	let call = Expr::FunctionCall(Box::new(FunctionCall {
+		receiver,
+		arguments: args,
+	}));
+
+	Ok(Expr::Binary {
+		left: Box::new(call),
+		op,
+		right: Box::new(value.into_literal()),
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Aggregations — `{table}_aggregate(filter, groupBy): [{Table}Aggregate!]!`
+// See GitHub issue #7312.
+// ---------------------------------------------------------------------------
+
+/// Wrapper for a single row of the aggregate result.  Field resolvers on the
+/// generated `{Table}Aggregate` Object downcast `parent_value` to this type
+/// and pull the corresponding key (count, `<field>_min`, …, or a group key).
+#[derive(Clone)]
+struct AggregateRow(SurObject);
+
+/// Return `true` if `kind` is numeric (Float/Int/Number/Decimal), recursing
+/// through `Either`/`Option` once.
+fn is_numeric_kind(kind: &Kind) -> bool {
+	match kind {
+		Kind::Float | Kind::Int | Kind::Number | Kind::Decimal => true,
+		Kind::Either(ks) => {
+			let non_none: Vec<&Kind> =
+				ks.iter().filter(|k| !matches!(k, Kind::None | Kind::Null)).collect();
+			non_none.len() == 1
+				&& matches!(non_none[0], Kind::Float | Kind::Int | Kind::Number | Kind::Decimal)
+		}
+		_ => false,
+	}
+}
+
+/// Return the field's effective numeric kind (stripping `option<…>`), or
+/// `Kind::Number` as a fallback.
+fn numeric_kind(kind: &Kind) -> Kind {
+	match kind {
+		Kind::Float | Kind::Int | Kind::Number | Kind::Decimal => kind.clone(),
+		Kind::Either(ks) => {
+			let non_none: Vec<Kind> =
+				ks.iter().filter(|k| !matches!(k, Kind::None | Kind::Null)).cloned().collect();
+			if non_none.len() == 1 {
+				non_none.into_iter().next().expect("len == 1")
+			} else {
+				Kind::Number
+			}
+		}
+		_ => Kind::Number,
+	}
+}
+
+fn aggregate_object_type_name(tb: &str) -> String {
+	format!("{tb}_aggregate_row")
+}
+
+fn aggregate_field_name(tb: &str) -> String {
+	format!("{tb}_aggregate")
+}
+
+fn aggregate_groupable_enum_name(tb: &str) -> String {
+	format!("_groupable_{tb}")
+}
+
+/// Build the `{T}_aggregate_row` Object type along with the
+/// `_groupable_{T}` enum.  Returns `None` if the table has no numeric fields
+/// AND no groupable fields (in which case `count` alone is exposed via a
+/// degenerate type — still useful, so always Some).
+fn build_aggregate_type(
+	tb_name: &str,
+	fds: &[FieldDefinition],
+	types: &mut Vec<Type>,
+) -> (Object, Enum) {
+	let obj_name = aggregate_object_type_name(tb_name);
+	let mut obj = Object::new(&obj_name)
+		.description(format!("Aggregation row for `{tb_name}`. `count` is always set; numeric `{{field}}_min/max/sum/avg` are filled per numeric field; group-key columns hold the value of each requested `groupBy` field for the row."));
+
+	// count: Int!
+	obj = obj.field(Field::new("count", TypeRef::named_nn(TypeRef::INT), |ctx| {
+		FieldFuture::new(async move {
+			let row = ctx.parent_value.try_downcast_ref::<AggregateRow>()?;
+			let v = row.0.get("count").cloned().unwrap_or(Value::None);
+			Ok(Some(FieldValue::value(sql_value_to_gql_value(v)?)))
+		})
+	}));
+
+	let mut groupable_items: Vec<String> = Vec::new();
+
+	for fd in fds {
+		// Use the GraphQL-safe form of the field name as both the alias prefix
+		// and the resolver lookup key. The underlying SurrealQL `Idiom` still
+		// quotes reserved-word identifiers when serialised, so the SELECT
+		// statement that the resolver builds remains valid.
+		let fname = idiom_to_gql_name(&fd.name);
+		let kind = fd.field_kind.clone().unwrap_or_default();
+		if is_numeric_kind(&kind) {
+			let inner = numeric_kind(&kind);
+			let ty_min_max = match kind_to_type(inner.clone(), types, false) {
+				Ok(t) => unwrap_type(t),
+				Err(_) => TypeRef::named("number"),
+			};
+			// sum/avg use the same numeric kind for min/max, but `math::mean`
+			// always returns a Number, and `math::sum` widens — keep the field
+			// type tolerant (`Number`) so Decimal sums don't get truncated.
+			let ty_sum = TypeRef::named("number");
+			let ty_avg = TypeRef::named("number");
+
+			for (suffix, ty) in
+				[("min", ty_min_max.clone()), ("max", ty_min_max), ("sum", ty_sum), ("avg", ty_avg)]
+			{
+				let key = format!("{fname}_{suffix}");
+				let key_for_resolver = key.clone();
+				obj = obj.field(Field::new(key, ty, move |ctx| {
+					let k = key_for_resolver.clone();
+					FieldFuture::new(async move {
+						let row = ctx.parent_value.try_downcast_ref::<AggregateRow>()?;
+						let v = row.0.get(k.as_str()).cloned().unwrap_or(Value::None);
+						if matches!(v, Value::None | Value::Null) {
+							Ok(None)
+						} else {
+							Ok(Some(FieldValue::value(sql_value_to_gql_value(v)?)))
+						}
+					})
+				}));
+			}
+		} else {
+			// Non-numeric: expose as a group-key column on the row, and add to
+			// the groupable enum (so the caller can ask for it via `groupBy`).
+			let ty = match kind_to_type_with_enum_prefix(
+				kind.clone(),
+				types,
+				false,
+				Some(&format!("{tb_name}_{fname}")),
+			) {
+				Ok(t) => unwrap_type(t),
+				Err(_) => TypeRef::named("any"),
+			};
+			let key_for_resolver = fname.clone();
+			obj = obj.field(Field::new(fname.clone(), ty, move |ctx| {
+				let k = key_for_resolver.clone();
+				FieldFuture::new(async move {
+					let row = ctx.parent_value.try_downcast_ref::<AggregateRow>()?;
+					let v = row.0.get(k.as_str()).cloned().unwrap_or(Value::None);
+					if matches!(v, Value::None | Value::Null) {
+						Ok(None)
+					} else {
+						Ok(Some(FieldValue::value(sql_value_to_gql_value(v)?)))
+					}
+				})
+			}));
+			groupable_items.push(fname);
+		}
+	}
+
+	let enum_name = aggregate_groupable_enum_name(tb_name);
+	let mut groupable = Enum::new(&enum_name).description(format!(
+		"Fields of `{tb_name}` that can be used as `groupBy` keys in the aggregate query."
+	));
+	if groupable_items.is_empty() {
+		// async-graphql disallows empty enums — emit a single placeholder so
+		// the type stays valid even for tables with only numeric fields.
+		groupable = groupable.item("_NONE");
+	} else {
+		for item in &groupable_items {
+			groupable = groupable.item(item);
+		}
+	}
+
+	(obj, groupable)
+}
+
+/// Build the `{table}_aggregate(filter, groupBy): [{Table}AggregateRow!]!`
+/// Query field.
+fn make_table_aggregate_field(
+	tb: &TableDefinition,
+	fds: Arc<[FieldDefinition]>,
+	kvs: Arc<Datastore>,
+) -> Field {
+	let tb_name = tb.name.clone();
+	let tb_name_str = tb_name.as_str().to_string();
+	let table_filter_name = filter_name_from_table(&tb_name);
+	let aggregate_row_name = aggregate_object_type_name(&tb_name_str);
+	let groupable_enum_name = aggregate_groupable_enum_name(&tb_name_str);
+	let field_name = aggregate_field_name(&tb_name_str);
+
+	let numeric_fields: Vec<String> = fds
+		.iter()
+		.filter(|fd| fd.field_kind.as_ref().is_some_and(is_numeric_kind))
+		.map(|fd| idiom_to_gql_name(&fd.name))
+		.collect();
+
+	Field::new(field_name, TypeRef::named_nn_list_nn(&aggregate_row_name), move |ctx| {
+		let tb_name = tb_name.clone();
+		let fds = Arc::clone(&fds);
+		let kvs = Arc::clone(&kvs);
+		let numeric_fields = numeric_fields.clone();
+		FieldFuture::new(async move {
+			let sess = ctx.data::<Arc<Session>>()?;
+			let args = ctx.args.as_index_map();
+
+			let tb_name_str_ref = tb_name.as_str();
+			let cond = parse_filter_arg(args, &fds, tb_name_str_ref)?;
+
+			// Parse groupBy: list of enum tokens identifying groupable fields.
+			let mut group_keys: Vec<String> = Vec::new();
+			if let Some(gb) = args.get("groupBy")
+				&& !matches!(gb, GqlValue::Null)
+			{
+				let list = gb
+					.as_list()
+					.ok_or(resolver_error("`groupBy` must be a list"))?;
+				for v in list {
+					let name = match v {
+						GqlValue::Enum(n) => n.as_str(),
+						GqlValue::String(s) => s.as_str(),
+						_ => {
+							return Err(resolver_error(
+								"`groupBy` items must be enum values",
+							)
+							.into());
+						}
+					};
+					if name != "_NONE" {
+						group_keys.push(name.to_string());
+					}
+				}
+			}
+
+			// Build SELECT fields:
+			//   count() AS count, math::*(F) AS F_min/max/sum/avg, plus each groupBy field.
+			let mut select_fields: Vec<SelectField> = Vec::new();
+			select_fields.push(SelectField::Single(Selector {
+				expr: Expr::FunctionCall(Box::new(FunctionCall {
+					receiver: Function::Normal("count".to_string()),
+					arguments: vec![],
+				})),
+				alias: Some(Idiom::field("count".to_string())),
+			}));
+			for fname in &numeric_fields {
+				for (suffix, fn_name) in [
+					("min", "math::min"),
+					("max", "math::max"),
+					("sum", "math::sum"),
+					("avg", "math::mean"),
+				] {
+					select_fields.push(SelectField::Single(Selector {
+						expr: Expr::FunctionCall(Box::new(FunctionCall {
+							receiver: Function::Normal(fn_name.to_string()),
+							arguments: vec![Expr::Idiom(Idiom::field(fname.clone()))],
+						})),
+						alias: Some(Idiom::field(format!("{fname}_{suffix}"))),
+					}));
+				}
+			}
+			for gk in &group_keys {
+				select_fields.push(SelectField::Single(Selector {
+					expr: Expr::Idiom(Idiom::field(gk.clone())),
+					alias: None,
+				}));
+			}
+
+			// Always set a `GROUP` clause so aggregate functions like
+			// `math::mean(price)` collect values across rows.  An empty
+			// `Groups(vec![])` is SurrealQL's `GROUP ALL`, which collapses
+			// every row into a single aggregate result.
+			let group = Some(Groups(
+				group_keys.iter().map(|gk| Group(Idiom::field(gk.clone()))).collect(),
+			));
+
+			let stmt = SelectStatement {
+				what: vec![Expr::Table(tb_name)],
+				fields: Fields::Select(select_fields),
+				cond,
+				group,
+				order: None,
+				limit: None,
+				start: None,
+				version: version_to_expr(&None),
+				timeout: Expr::Literal(Literal::None),
+				omit: vec![],
+				only: false,
+				with: None,
+				split: None,
+				fetch: None,
+				explain: None,
+				tempfiles: false,
+			};
+			let res = execute_select(&kvs, sess, stmt).await?;
+
+			let arr = match res {
+				Value::Array(a) => a,
+				v => SurArray::from(vec![v]),
+			};
+
+			let items: Vec<FieldValue> = arr
+				.iter()
+				.map(|v| {
+					let obj = match v {
+						Value::Object(o) => o.clone(),
+						_ => SurObject::default(),
+					};
+					FieldValue::owned_any(AggregateRow(obj))
+				})
+				.collect();
+			Ok(Some(FieldValue::list(items)))
+		})
+	})
+	.description(format!(
+		"Aggregation query over `{tb_name_str}`. Returns `count` plus per-numeric-field `min/max/sum/avg`. Group rows by one or more non-numeric fields via the `groupBy` argument."
+	))
+	.argument(InputValue::new("filter", TypeRef::named(&table_filter_name)))
+	.argument(InputValue::new("groupBy", TypeRef::named_list(&groupable_enum_name)))
 }

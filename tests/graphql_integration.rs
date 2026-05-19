@@ -46,7 +46,17 @@ mod graphql_integration {
 			let res = client.post(gql_url).body("").send().await?;
 			assert_eq!(res.status(), 400);
 			let body = res.text().await?;
-			assert!(body.contains("NotConfigured"), "body: {body}")
+			// Body is now a spec-compliant GraphQL error envelope:
+			// `{"data": null, "errors": [{"message": "GraphQL has not been configured ..."}]}`.
+			// Plain-text bodies broke clients like Postman ("Received an invalid GraphQL
+			// response").
+			let parsed: serde_json::Value = serde_json::from_str(&body)
+				.unwrap_or_else(|e| panic!("non-JSON body: {body} ({e})"));
+			let msg = parsed["errors"][0]["message"].as_str().unwrap_or("");
+			assert!(
+				msg.to_lowercase().contains("configured"),
+				"unexpected error message in body: {body}"
+			);
 		}
 
 		// add schema and data
@@ -328,7 +338,13 @@ mod graphql_integration {
 			let res = client.post(gql_url).body("").send().await?;
 			assert_eq!(res.status(), 400);
 			let body = res.text().await?;
-			assert!(body.contains("NotConfigured"), "{body}");
+			let parsed: serde_json::Value = serde_json::from_str(&body)
+				.unwrap_or_else(|e| panic!("non-JSON body: {body} ({e})"));
+			let msg = parsed["errors"][0]["message"].as_str().unwrap_or("");
+			assert!(
+				msg.to_lowercase().contains("configured"),
+				"unexpected error message in body: {body}"
+			);
 		}
 
 		// add schema and data
@@ -361,21 +377,13 @@ mod graphql_integration {
 			let fields = &res_obj["data"]["__schema"]["queryType"]["fields"];
 			let expected_fields = json!(
 				[
-					{
-						"name": "foo"
-					},
-					{
-						"name": "bar"
-					},
-					{
-						"name": "_get_foo"
-					},
-					{
-						"name": "_get_bar"
-					},
-					{
-						"name": "_get"
-					}
+					{ "name": "foo" },
+					{ "name": "bar" },
+					{ "name": "_get_foo" },
+					{ "name": "_get_bar" },
+					{ "name": "_get" },
+					{ "name": "foo_aggregate" },
+					{ "name": "bar_aggregate" }
 				]
 			);
 			assert_equal_arrs!(fields, &expected_fields);
@@ -405,15 +413,10 @@ mod graphql_integration {
 			let fields = &res_obj["data"]["__schema"]["queryType"]["fields"];
 			let expected_fields = json!(
 				[
-					{
-						"name": "foo"
-					},
-					{
-						"name": "_get_foo"
-					},
-					{
-						"name": "_get"
-					}
+					{ "name": "foo" },
+					{ "name": "_get_foo" },
+					{ "name": "_get" },
+					{ "name": "foo_aggregate" }
 				]
 			);
 			assert_equal_arrs!(fields, &expected_fields);
@@ -678,6 +681,986 @@ mod graphql_integration {
 			assert!(names.contains(&"MultiPolygon"));
 			assert!(names.contains(&"GeometryCollection"));
 		}
+
+		// Test 6: Every Geometry* output Object exposes `coordinates` as the
+		// `JSON` scalar. This guards against a regression that re-introduces
+		// the deeply nested `[[[[Float!]!]!]!]!` chain, which exceeds the
+		// 7-level `ofType` chain followed by the standard GraphQL
+		// introspection query and breaks strict clients such as Postman.
+		{
+			let geo_types = [
+				"GeometryPoint",
+				"GeometryLineString",
+				"GeometryPolygon",
+				"GeometryMultiPoint",
+				"GeometryMultiLineString",
+				"GeometryMultiPolygon",
+			];
+			for tname in geo_types {
+				let q = format!(
+					r#"{{ __type(name: "{tname}") {{ fields {{ name type {{ kind name ofType {{ kind name }} }} }} }} }}"#
+				);
+				let res =
+					client.post(gql_url).body(json!({ "query": q }).to_string()).send().await?;
+				assert_eq!(res.status(), 200);
+				let body = res.json::<serde_json::Value>().await?;
+				let fields = body["data"]["__type"]["fields"].as_array().unwrap();
+				let coords = fields
+					.iter()
+					.find(|f| f["name"] == "coordinates")
+					.unwrap_or_else(|| panic!("{tname}.coordinates missing"));
+				// coordinates: JSON! → NON_NULL(JSON)
+				assert_eq!(coords["type"]["kind"], "NON_NULL", "{tname} coords not NON_NULL");
+				assert_eq!(coords["type"]["ofType"]["kind"], "SCALAR", "{tname} coords not SCALAR");
+				assert_eq!(
+					coords["type"]["ofType"]["name"], "JSON",
+					"{tname} coords scalar not JSON"
+				);
+			}
+		}
+
+		Ok(())
+	}
+
+	// Regression test: every output type generated for a field typed `geometry<…>`
+	// or bare `geometry` must resolve to a leaf within the 7-level `ofType` chain
+	// limit imposed by the standard GraphQL introspection query.  Prior to the
+	// fix, `GeometryMultiPolygon.coordinates` was emitted as `[[[[Float!]!]!]!]!`
+	// (9 `ofType` hops) which caused Postman / strict clients to reject the
+	// schema as soon as any table had a `geometry` field.
+	#[test(tokio::test)]
+	async fn introspection_depth_geometry() -> Result<(), Box<dyn std::error::Error>> {
+		let (addr, _server) = common::start_server_without_auth().await.unwrap();
+		let gql_url = &format!("http://{addr}/graphql");
+		let sql_url = &format!("http://{addr}/sql");
+
+		let mut headers = reqwest::header::HeaderMap::new();
+		let ns = Ulid::new().to_string();
+		let db = Ulid::new().to_string();
+		headers.insert("surreal-ns", ns.parse()?);
+		headers.insert("surreal-db", db.parse()?);
+		headers.insert(header::ACCEPT, "application/json".parse()?);
+		let client = Client::builder()
+			.connect_timeout(Duration::from_secs(10))
+			.default_headers(headers)
+			.build()?;
+
+		// Define every geometry variant on a single table so all `Geometry*`
+		// Object types end up registered in the schema.
+		{
+			let res = client
+				.post(sql_url)
+				.body(
+					r#"
+					DEFINE CONFIG GRAPHQL AUTO;
+
+					DEFINE TABLE shape SCHEMAFUL;
+					DEFINE FIELD pt   ON shape TYPE geometry<point>;
+					DEFINE FIELD ln   ON shape TYPE geometry<line>;
+					DEFINE FIELD pg   ON shape TYPE geometry<polygon>;
+					DEFINE FIELD mpt  ON shape TYPE geometry<multipoint>;
+					DEFINE FIELD mln  ON shape TYPE geometry<multiline>;
+					DEFINE FIELD mpg  ON shape TYPE geometry<multipolygon>;
+					DEFINE FIELD col  ON shape TYPE geometry<collection>;
+					DEFINE FIELD any  ON shape TYPE geometry;
+				"#,
+				)
+				.send()
+				.await?;
+			assert_eq!(res.status(), 200);
+		}
+
+		// Standard introspection-style query: follow `ofType` 7 levels.  If any
+		// chain still has structure at the 7th hop, the schema would fail strict
+		// validation.
+		let q = r#"{
+			__schema {
+				types {
+					name
+					kind
+					fields {
+						name
+						type {
+							kind name
+							ofType { kind name
+							ofType { kind name
+							ofType { kind name
+							ofType { kind name
+							ofType { kind name
+							ofType { kind name
+							ofType { kind name }
+							}}}}}}
+						}
+					}
+				}
+			}
+		}"#;
+
+		let res = client.post(gql_url).body(json!({ "query": q }).to_string()).send().await?;
+		assert_eq!(res.status(), 200);
+		let body = res.json::<serde_json::Value>().await?;
+		assert!(body["errors"].is_null(), "Introspection failed: {:?}", body["errors"]);
+
+		// Walk every Geometry* type's `coordinates` field and assert the leaf is
+		// reached strictly inside 7 hops (i.e. the deepest `ofType.kind` is null).
+		let types = body["data"]["__schema"]["types"].as_array().unwrap();
+		let geo_names = [
+			"GeometryPoint",
+			"GeometryLineString",
+			"GeometryPolygon",
+			"GeometryMultiPoint",
+			"GeometryMultiLineString",
+			"GeometryMultiPolygon",
+		];
+		for tname in geo_names {
+			let t = types
+				.iter()
+				.find(|t| t["name"] == tname)
+				.unwrap_or_else(|| panic!("missing type {tname}"));
+			let coords = t["fields"]
+				.as_array()
+				.unwrap()
+				.iter()
+				.find(|f| f["name"] == "coordinates")
+				.unwrap_or_else(|| panic!("{tname}.coordinates missing"));
+
+			// Walk down the `ofType` chain and assert we resolve a named SCALAR
+			// (JSON) within the 7-hop window.
+			let mut cur = &coords["type"];
+			let mut depth = 0usize;
+			let mut leaf_name: Option<&str> = None;
+			while !cur.is_null() && depth <= 7 {
+				let kind = cur["kind"].as_str().unwrap_or("");
+				let name = cur["name"].as_str();
+				if kind == "SCALAR" {
+					leaf_name = name;
+					break;
+				}
+				cur = &cur["ofType"];
+				depth += 1;
+			}
+			assert_eq!(
+				leaf_name,
+				Some("JSON"),
+				"{tname}.coordinates did not resolve to JSON within 7 ofType hops"
+			);
+		}
+
+		Ok(())
+	}
+
+	// Regression test: deeply nested `array<...>` types are capped at depth 3
+	// (yielding a 7-hop `ofType` chain at worst) by substituting `JSON` past
+	// that depth, so user schemas with very deep arrays remain introspectable.
+	#[test(tokio::test)]
+	async fn introspection_depth_nested_array() -> Result<(), Box<dyn std::error::Error>> {
+		let (addr, _server) = common::start_server_without_auth().await.unwrap();
+		let gql_url = &format!("http://{addr}/graphql");
+		let sql_url = &format!("http://{addr}/sql");
+
+		let mut headers = reqwest::header::HeaderMap::new();
+		let ns = Ulid::new().to_string();
+		let db = Ulid::new().to_string();
+		headers.insert("surreal-ns", ns.parse()?);
+		headers.insert("surreal-db", db.parse()?);
+		headers.insert(header::ACCEPT, "application/json".parse()?);
+		let client = Client::builder()
+			.connect_timeout(Duration::from_secs(10))
+			.default_headers(headers)
+			.build()?;
+
+		{
+			let res = client
+				.post(sql_url)
+				.body(
+					r#"
+					DEFINE CONFIG GRAPHQL AUTO;
+
+					DEFINE TABLE vec SCHEMAFUL;
+					DEFINE FIELD v1 ON vec TYPE array<float>;
+					DEFINE FIELD v2 ON vec TYPE array<array<float>>;
+					DEFINE FIELD v3 ON vec TYPE array<array<array<float>>>;
+					DEFINE FIELD v4 ON vec TYPE array<array<array<array<float>>>>;
+				"#,
+				)
+				.send()
+				.await?;
+			assert_eq!(res.status(), 200);
+		}
+
+		// Read field-level type chain for each field and assert the leaf is
+		// reached within 7 hops.  v4 (depth 4) must collapse to `JSON` at the
+		// 4th nesting level rather than continuing as Float.
+		let q = r#"{
+			__type(name: "vec") {
+				fields {
+					name
+					type {
+						kind name
+						ofType { kind name
+						ofType { kind name
+						ofType { kind name
+						ofType { kind name
+						ofType { kind name
+						ofType { kind name
+						ofType { kind name }
+						}}}}}}
+					}
+				}
+			}
+		}"#;
+		let res = client.post(gql_url).body(json!({ "query": q }).to_string()).send().await?;
+		assert_eq!(res.status(), 200);
+		let body = res.json::<serde_json::Value>().await?;
+		assert!(body["errors"].is_null(), "Introspection failed: {:?}", body["errors"]);
+
+		let fields = body["data"]["__type"]["fields"].as_array().unwrap();
+		let leaf_of = |fname: &str| -> (String, usize) {
+			let f = fields.iter().find(|f| f["name"] == fname).unwrap();
+			let mut cur = &f["type"];
+			let mut hops = 0usize;
+			while !cur.is_null() && hops <= 7 {
+				let kind = cur["kind"].as_str().unwrap_or("");
+				if kind == "SCALAR" {
+					return (cur["name"].as_str().unwrap_or("").to_string(), hops);
+				}
+				cur = &cur["ofType"];
+				hops += 1;
+			}
+			panic!("{fname} did not resolve a scalar within 7 hops");
+		};
+
+		let (v1_leaf, _) = leaf_of("v1");
+		assert_eq!(v1_leaf, "Float", "v1 should still bottom out at Float");
+		let (v2_leaf, _) = leaf_of("v2");
+		assert_eq!(v2_leaf, "Float");
+		let (v3_leaf, _) = leaf_of("v3");
+		assert_eq!(v3_leaf, "Float");
+		let (v4_leaf, _) = leaf_of("v4");
+		assert_eq!(v4_leaf, "JSON", "v4 (depth 4) must collapse to JSON scalar");
+
+		Ok(())
+	}
+
+	// Vector-similarity filter: cosine similarity threshold on an embedding-style
+	// `array<float>` field.  Regresses GitHub issue #7312.
+	#[test(tokio::test)]
+	async fn vector_similarity_filter() -> Result<(), Box<dyn std::error::Error>> {
+		let (addr, _server) = common::start_server_without_auth().await.unwrap();
+		let gql_url = &format!("http://{addr}/graphql");
+		let sql_url = &format!("http://{addr}/sql");
+
+		let mut headers = reqwest::header::HeaderMap::new();
+		let ns = Ulid::new().to_string();
+		let db = Ulid::new().to_string();
+		headers.insert("surreal-ns", ns.parse()?);
+		headers.insert("surreal-db", db.parse()?);
+		headers.insert(header::ACCEPT, "application/json".parse()?);
+		let client = Client::builder()
+			.connect_timeout(Duration::from_secs(10))
+			.default_headers(headers)
+			.build()?;
+
+		{
+			let res = client
+				.post(sql_url)
+				.body(
+					r#"
+					DEFINE CONFIG GRAPHQL AUTO;
+					DEFINE TABLE doc SCHEMAFUL;
+					DEFINE FIELD label ON doc TYPE string;
+					DEFINE FIELD embedding ON doc TYPE array<float>;
+
+					CREATE doc:a SET label = "near",   embedding = [1.0, 0.0, 0.0];
+					CREATE doc:b SET label = "near2",  embedding = [0.99, 0.01, 0.0];
+					CREATE doc:c SET label = "far",    embedding = [0.0, 1.0, 0.0];
+				"#,
+				)
+				.send()
+				.await?;
+			assert_eq!(res.status(), 200);
+		}
+
+		// cosine similarity >= 0.99 against [1, 0, 0] -> only doc:a and doc:b.
+		let res = client
+			.post(gql_url)
+			.body(
+				json!({"query": r#"query {
+					doc(filter: { embedding: { similarity: {
+						to: [1.0, 0.0, 0.0],
+						distance: COSINE,
+						op: gte,
+						value: 0.99
+					} } }, order: { asc: label }) {
+						id
+					}
+				}"#})
+				.to_string(),
+			)
+			.send()
+			.await?;
+		assert_eq!(res.status(), 200);
+		let body = res.json::<serde_json::Value>().await?;
+		assert!(body["errors"].is_null(), "Unexpected errors: {:?}", body["errors"]);
+		let rows = body["data"]["doc"].as_array().unwrap();
+		let ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+		assert_eq!(ids, vec!["doc:a", "doc:b"], "unexpected hits: {ids:?}");
+
+		// Introspection: the field-level filter for `array<float>` (named
+		// `_filter_[Float!]`) exposes the new `similarity`, `nearest`, and
+		// `call` operators.
+		let res = client
+			.post(gql_url)
+			.body(
+				json!({"query": r#"{
+					__type(name: "_filter_[Float!]") {
+						inputFields { name type { kind name ofType { kind name } } }
+					}
+				}"#})
+				.to_string(),
+			)
+			.send()
+			.await?;
+		assert_eq!(res.status(), 200);
+		let body = res.json::<serde_json::Value>().await?;
+		let fields = body["data"]["__type"]["inputFields"].as_array().unwrap();
+		let names: Vec<&str> = fields.iter().map(|f| f["name"].as_str().unwrap()).collect();
+		for required in ["similarity", "nearest", "call", "eq", "ne"] {
+			assert!(names.contains(&required), "missing operator `{required}` on _filter_[Float!]");
+		}
+
+		// Confirm `_SimilarityInput` is registered and shaped correctly.
+		let res = client
+			.post(gql_url)
+			.body(
+				json!({"query": r#"{
+					__type(name: "_SimilarityInput") {
+						inputFields { name type { kind name ofType { kind name } } }
+					}
+				}"#})
+				.to_string(),
+			)
+			.send()
+			.await?;
+		assert_eq!(res.status(), 200);
+		let body = res.json::<serde_json::Value>().await?;
+		let fields = body["data"]["__type"]["inputFields"].as_array().unwrap();
+		let names: Vec<&str> = fields.iter().map(|f| f["name"].as_str().unwrap()).collect();
+		for required in ["to", "distance", "op", "value"] {
+			assert!(names.contains(&required), "missing {required} on _SimilarityInput");
+		}
+
+		Ok(())
+	}
+
+	// KNN (nearest-neighbour) filter: top-K closest vectors via the
+	// SurrealQL `<|K, DIST|>` operator.  Regresses GitHub issue #7312.
+	#[test(tokio::test)]
+	async fn vector_knn_filter() -> Result<(), Box<dyn std::error::Error>> {
+		let (addr, _server) = common::start_server_without_auth().await.unwrap();
+		let gql_url = &format!("http://{addr}/graphql");
+		let sql_url = &format!("http://{addr}/sql");
+
+		let mut headers = reqwest::header::HeaderMap::new();
+		let ns = Ulid::new().to_string();
+		let db = Ulid::new().to_string();
+		headers.insert("surreal-ns", ns.parse()?);
+		headers.insert("surreal-db", db.parse()?);
+		headers.insert(header::ACCEPT, "application/json".parse()?);
+		let client = Client::builder()
+			.connect_timeout(Duration::from_secs(10))
+			.default_headers(headers)
+			.build()?;
+
+		{
+			let res = client
+				.post(sql_url)
+				.body(
+					r#"
+					DEFINE CONFIG GRAPHQL AUTO;
+					DEFINE TABLE pt SCHEMAFUL;
+					DEFINE FIELD label ON pt TYPE string;
+					DEFINE FIELD v ON pt TYPE array<float>;
+
+					CREATE pt:a SET label = "0,0",  v = [0.0, 0.0];
+					CREATE pt:b SET label = "1,0",  v = [1.0, 0.0];
+					CREATE pt:c SET label = "2,0",  v = [2.0, 0.0];
+					CREATE pt:d SET label = "10,0", v = [10.0, 0.0];
+				"#,
+				)
+				.send()
+				.await?;
+			assert_eq!(res.status(), 200);
+		}
+
+		// 2 nearest neighbours of [0.5, 0.0] by Euclidean distance -> {pt:a, pt:b}.
+		let res = client
+			.post(gql_url)
+			.body(
+				json!({"query": r#"query {
+					pt(filter: { v: { nearest: { to: [0.5, 0.0], k: 2, distance: EUCLIDEAN } } }) {
+						id
+					}
+				}"#})
+				.to_string(),
+			)
+			.send()
+			.await?;
+		assert_eq!(res.status(), 200);
+		let body = res.json::<serde_json::Value>().await?;
+		assert!(body["errors"].is_null(), "Unexpected errors: {:?}", body["errors"]);
+		let rows = body["data"]["pt"].as_array().unwrap();
+		let mut ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+		ids.sort();
+		assert_eq!(ids, vec!["pt:a", "pt:b"], "KNN returned wrong rows: {ids:?}");
+
+		Ok(())
+	}
+
+	// Full-text-search filter via the `@@` operator.  Requires a `FULLTEXT`
+	// index on the field.  Regresses GitHub issue #7312.
+	#[test(tokio::test)]
+	async fn fulltext_matches_filter() -> Result<(), Box<dyn std::error::Error>> {
+		let (addr, _server) = common::start_server_without_auth().await.unwrap();
+		let gql_url = &format!("http://{addr}/graphql");
+		let sql_url = &format!("http://{addr}/sql");
+
+		let mut headers = reqwest::header::HeaderMap::new();
+		let ns = Ulid::new().to_string();
+		let db = Ulid::new().to_string();
+		headers.insert("surreal-ns", ns.parse()?);
+		headers.insert("surreal-db", db.parse()?);
+		headers.insert(header::ACCEPT, "application/json".parse()?);
+		let client = Client::builder()
+			.connect_timeout(Duration::from_secs(10))
+			.default_headers(headers)
+			.build()?;
+
+		{
+			let res = client
+				.post(sql_url)
+				.body(
+					r#"
+					DEFINE CONFIG GRAPHQL AUTO;
+					DEFINE ANALYZER simple TOKENIZERS class, punct FILTERS lowercase;
+					DEFINE TABLE article SCHEMAFUL;
+					DEFINE FIELD title ON article TYPE string;
+					DEFINE INDEX title_idx ON article FIELDS title FULLTEXT ANALYZER simple BM25;
+
+					CREATE article:a SET title = "The quick brown fox";
+					CREATE article:b SET title = "Lazy dog";
+					CREATE article:c SET title = "Foxes are not dogs";
+				"#,
+				)
+				.send()
+				.await?;
+			assert_eq!(res.status(), 200);
+		}
+
+		// `fox` matches "The quick brown fox" only — "Foxes" is a different
+		// token under the default analyzer.
+		let res = client
+			.post(gql_url)
+			.body(
+				json!({"query": r#"query {
+					article(filter: { title: { matches: { query: "fox" } } }) {
+						id title
+					}
+				}"#})
+				.to_string(),
+			)
+			.send()
+			.await?;
+		assert_eq!(res.status(), 200);
+		let body = res.json::<serde_json::Value>().await?;
+		assert!(body["errors"].is_null(), "Unexpected errors: {:?}", body["errors"]);
+		let rows = body["data"]["article"].as_array().unwrap();
+		assert_eq!(rows.len(), 1);
+		assert_eq!(rows[0]["id"], "article:a");
+
+		Ok(())
+	}
+
+	// Regression test: a SurrealDB field whose name is a SurrealQL reserved
+	// word (e.g. `value`, `type`, `in`) is exposed as a valid GraphQL Name —
+	// without the backtick quoting that `Idiom::to_sql` adds.  Strict
+	// introspection clients (Postman) reject the entire schema otherwise
+	// because backticks are not allowed in GraphQL identifiers, and the
+	// CachedRecord field-resolution lookup also breaks at runtime.
+	#[test(tokio::test)]
+	async fn reserved_word_field_names() -> Result<(), Box<dyn std::error::Error>> {
+		let (addr, _server) = common::start_server_without_auth().await.unwrap();
+		let gql_url = &format!("http://{addr}/graphql");
+		let sql_url = &format!("http://{addr}/sql");
+
+		let mut headers = reqwest::header::HeaderMap::new();
+		let ns = Ulid::new().to_string();
+		let db = Ulid::new().to_string();
+		headers.insert("surreal-ns", ns.parse()?);
+		headers.insert("surreal-db", db.parse()?);
+		headers.insert(header::ACCEPT, "application/json".parse()?);
+		let client = Client::builder()
+			.connect_timeout(Duration::from_secs(10))
+			.default_headers(headers)
+			.build()?;
+
+		{
+			let res = client
+				.post(sql_url)
+				.body(
+					r#"
+					DEFINE CONFIG GRAPHQL AUTO;
+					DEFINE TABLE setting SCHEMAFUL;
+					DEFINE FIELD label ON setting TYPE string;
+					DEFINE FIELD value ON setting TYPE int;
+
+					CREATE setting:a SET label = "answer", value = 42;
+					CREATE setting:b SET label = "other",  value = 7;
+				"#,
+				)
+				.send()
+				.await?;
+			assert_eq!(res.status(), 200);
+		}
+
+		// `value` field is exposed as a valid GraphQL Name (no backticks).
+		let res = client
+			.post(gql_url)
+			.body(
+				json!({"query": r#"{ __type(name: "setting") { fields { name } } }"#}).to_string(),
+			)
+			.send()
+			.await?;
+		assert_eq!(res.status(), 200);
+		let body = res.json::<serde_json::Value>().await?;
+		let names: Vec<String> = body["data"]["__type"]["fields"]
+			.as_array()
+			.unwrap()
+			.iter()
+			.map(|f| f["name"].as_str().unwrap().to_string())
+			.collect();
+		assert!(names.contains(&"value".to_string()), "fields: {names:?}");
+		for n in &names {
+			assert!(!n.contains('`'), "field name `{n}` still contains backticks");
+		}
+
+		// Schema-wide name-validity invariant: every type / field / inputField
+		// / enum value matches /^[_A-Za-z][_0-9A-Za-z]*$/.
+		let valid = |s: &str| -> bool {
+			let mut it = s.chars();
+			match it.next() {
+				Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+				_ => return false,
+			}
+			it.all(|c| c.is_ascii_alphanumeric() || c == '_')
+		};
+		let res = client
+			.post(gql_url)
+			.body(
+				json!({"query": r#"{
+					__schema { types {
+						name kind
+						fields { name }
+						inputFields { name }
+						enumValues { name }
+					} }
+				}"#})
+				.to_string(),
+			)
+			.send()
+			.await?;
+		assert_eq!(res.status(), 200);
+		let body = res.json::<serde_json::Value>().await?;
+		let mut violations: Vec<String> = Vec::new();
+		for ty in body["data"]["__schema"]["types"].as_array().unwrap() {
+			let tname = ty["name"].as_str().unwrap_or("");
+			if !tname.is_empty() && !valid(tname) {
+				violations.push(format!("type `{tname}`"));
+			}
+			for arr_key in ["fields", "inputFields", "enumValues"] {
+				if let Some(arr) = ty[arr_key].as_array() {
+					for f in arr {
+						let fname = f["name"].as_str().unwrap_or("");
+						if !valid(fname) {
+							violations.push(format!("{arr_key} `{tname}`.`{fname}`"));
+						}
+					}
+				}
+			}
+		}
+		assert!(violations.is_empty(), "spec violations: {violations:?}");
+
+		// Reading the reserved-word field via `_get_<table>` works (the
+		// CachedRecord lookup uses the raw field name, which would fail if
+		// the resolver were keyed on the backtick-quoted form).
+		let res = client
+			.post(gql_url)
+			.body(
+				json!({"query": r#"query { _get_setting(id: "a") { id label value } }"#})
+					.to_string(),
+			)
+			.send()
+			.await?;
+		assert_eq!(res.status(), 200);
+		let body = res.json::<serde_json::Value>().await?;
+		assert!(body["errors"].is_null(), "Unexpected errors: {:?}", body["errors"]);
+		assert_eq!(body["data"]["_get_setting"]["value"], 42);
+
+		// Filtering by the reserved-word field.
+		let res = client
+			.post(gql_url)
+			.body(
+				json!({"query": r#"query {
+					setting(filter: { value: { gt: 10 } }) { id value }
+				}"#})
+				.to_string(),
+			)
+			.send()
+			.await?;
+		assert_eq!(res.status(), 200);
+		let body = res.json::<serde_json::Value>().await?;
+		assert!(body["errors"].is_null(), "Unexpected errors: {:?}", body["errors"]);
+		let rows = body["data"]["setting"].as_array().unwrap();
+		assert_eq!(rows.len(), 1);
+		assert_eq!(rows[0]["id"], "setting:a");
+
+		// Aggregate over the reserved-word field — `value_sum` etc. must be
+		// valid GraphQL names too.
+		let res = client
+			.post(gql_url)
+			.body(
+				json!({"query": r#"query {
+					setting_aggregate { count value_sum value_min value_max value_avg }
+				}"#})
+				.to_string(),
+			)
+			.send()
+			.await?;
+		assert_eq!(res.status(), 200);
+		let body = res.json::<serde_json::Value>().await?;
+		assert!(body["errors"].is_null(), "Unexpected errors: {:?}", body["errors"]);
+		let row = &body["data"]["setting_aggregate"][0];
+		assert_eq!(row["count"], 2);
+		assert_eq!(row["value_sum"], 49);
+		assert_eq!(row["value_min"], 7);
+		assert_eq!(row["value_max"], 42);
+
+		Ok(())
+	}
+
+	// Pre-execution errors (missing `surreal-ns` / `surreal-db`, GraphQL not
+	// configured for the database) must surface as a spec-compliant GraphQL
+	// error envelope `{"data": null, "errors": [...]}`, not a plain-text 400
+	// body.  Plain text breaks Postman ("Received an invalid GraphQL
+	// response") and other clients that JSON-decode every response.
+	#[test(tokio::test)]
+	async fn graphql_error_envelope_is_json() -> Result<(), Box<dyn std::error::Error>> {
+		let (addr, _server) = common::start_server_without_auth().await.unwrap();
+		let gql_url = &format!("http://{addr}/graphql");
+		let client = Client::builder().connect_timeout(Duration::from_secs(10)).build()?;
+
+		// Case 1: no `surreal-ns` / `surreal-db` headers at all.
+		{
+			let res = client
+				.post(gql_url)
+				.header(header::CONTENT_TYPE, "application/json")
+				.body(r#"{"query":"{__typename}"}"#)
+				.send()
+				.await?;
+			assert_eq!(res.status(), 400);
+			assert_eq!(
+				res.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+				Some("application/json")
+			);
+			let body: serde_json::Value = res.json().await?;
+			assert!(body["data"].is_null());
+			let msg = body["errors"][0]["message"].as_str().unwrap_or("");
+			assert!(msg.contains("namespace"), "expected ns error, got: {body}");
+		}
+
+		// Case 2: `surreal-ns` set but no `surreal-db`.
+		{
+			let res = client
+				.post(gql_url)
+				.header("surreal-ns", "t")
+				.header(header::CONTENT_TYPE, "application/json")
+				.body(r#"{"query":"{__typename}"}"#)
+				.send()
+				.await?;
+			assert_eq!(res.status(), 400);
+			assert_eq!(
+				res.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+				Some("application/json")
+			);
+			let body: serde_json::Value = res.json().await?;
+			assert!(body["data"].is_null());
+			let msg = body["errors"][0]["message"].as_str().unwrap_or("");
+			assert!(msg.contains("database"), "expected db error, got: {body}");
+		}
+
+		// Case 3: ns + db set but GraphQL not configured for that database.
+		{
+			let res = client
+				.post(gql_url)
+				.header("surreal-ns", Ulid::new().to_string())
+				.header("surreal-db", Ulid::new().to_string())
+				.header(header::CONTENT_TYPE, "application/json")
+				.body(r#"{"query":"{__typename}"}"#)
+				.send()
+				.await?;
+			assert_eq!(res.status(), 400);
+			let body: serde_json::Value = res.json().await?;
+			assert!(body["data"].is_null());
+			let msg = body["errors"][0]["message"].as_str().unwrap_or("");
+			assert!(
+				msg.to_lowercase().contains("configured"),
+				"expected config error, got: {body}"
+			);
+		}
+
+		Ok(())
+	}
+
+	// Aggregations: `{table}_aggregate` exposes count + per-numeric-field
+	// min/max/sum/avg with optional groupBy.  Regresses GitHub issue #7312.
+	#[test(tokio::test)]
+	async fn aggregate_basic_and_groupby() -> Result<(), Box<dyn std::error::Error>> {
+		let (addr, _server) = common::start_server_without_auth().await.unwrap();
+		let gql_url = &format!("http://{addr}/graphql");
+		let sql_url = &format!("http://{addr}/sql");
+
+		let mut headers = reqwest::header::HeaderMap::new();
+		let ns = Ulid::new().to_string();
+		let db = Ulid::new().to_string();
+		headers.insert("surreal-ns", ns.parse()?);
+		headers.insert("surreal-db", db.parse()?);
+		headers.insert(header::ACCEPT, "application/json".parse()?);
+		let client = Client::builder()
+			.connect_timeout(Duration::from_secs(10))
+			.default_headers(headers)
+			.build()?;
+
+		{
+			let res = client
+				.post(sql_url)
+				.body(
+					r#"
+					DEFINE CONFIG GRAPHQL AUTO;
+					DEFINE TABLE product SCHEMAFUL;
+					DEFINE FIELD name     ON product TYPE string;
+					DEFINE FIELD category ON product TYPE string;
+					DEFINE FIELD price    ON product TYPE float;
+					DEFINE FIELD qty      ON product TYPE int;
+
+					CREATE product:a SET name = "Apple",  category = "fruit",   price = 1.0, qty = 10;
+					CREATE product:b SET name = "Banana", category = "fruit",   price = 0.5, qty = 20;
+					CREATE product:c SET name = "Carrot", category = "veggie",  price = 0.8, qty = 30;
+					CREATE product:d SET name = "Daikon", category = "veggie",  price = 1.2, qty = 5;
+				"#,
+				)
+				.send()
+				.await?;
+			assert_eq!(res.status(), 200);
+		}
+
+		// 1. No groupBy → single aggregate row with overall stats.
+		let res = client
+			.post(gql_url)
+			.body(
+				json!({"query": r#"query {
+					product_aggregate {
+						count
+						price_min price_max price_sum price_avg
+						qty_min qty_max qty_sum qty_avg
+					}
+				}"#})
+				.to_string(),
+			)
+			.send()
+			.await?;
+		assert_eq!(res.status(), 200);
+		let body = res.json::<serde_json::Value>().await?;
+		assert!(body["errors"].is_null(), "Unexpected errors: {:?}", body["errors"]);
+		let rows = body["data"]["product_aggregate"].as_array().unwrap();
+		assert_eq!(rows.len(), 1);
+		let row = &rows[0];
+		assert_eq!(row["count"], 4);
+		assert_eq!(row["price_min"], 0.5);
+		assert_eq!(row["price_max"], 1.2);
+		assert_eq!(row["qty_sum"], 65);
+		// avg may come back as Number/Decimal — coerce via as_f64 with tolerance
+		let qty_avg = row["qty_avg"].as_f64().unwrap();
+		assert!((qty_avg - 16.25).abs() < 1e-6, "qty_avg {qty_avg}");
+
+		// 2. groupBy = [category] → one row per category.
+		let res = client
+			.post(gql_url)
+			.body(
+				json!({"query": r#"query {
+					product_aggregate(groupBy: [category]) {
+						category count price_avg
+					}
+				}"#})
+				.to_string(),
+			)
+			.send()
+			.await?;
+		assert_eq!(res.status(), 200);
+		let body = res.json::<serde_json::Value>().await?;
+		assert!(body["errors"].is_null(), "Unexpected errors: {:?}", body["errors"]);
+		let rows = body["data"]["product_aggregate"].as_array().unwrap();
+		assert_eq!(rows.len(), 2);
+		let mut by_cat: std::collections::HashMap<String, &serde_json::Value> =
+			std::collections::HashMap::new();
+		for r in rows {
+			by_cat.insert(r["category"].as_str().unwrap().to_string(), r);
+		}
+		let fruit = by_cat.get("fruit").unwrap();
+		assert_eq!(fruit["count"], 2);
+		assert!((fruit["price_avg"].as_f64().unwrap() - 0.75).abs() < 1e-6);
+		let veggie = by_cat.get("veggie").unwrap();
+		assert_eq!(veggie["count"], 2);
+		assert!((veggie["price_avg"].as_f64().unwrap() - 1.0).abs() < 1e-6);
+
+		// 3. groupBy + filter → only matching rows are aggregated.
+		let res = client
+			.post(gql_url)
+			.body(
+				json!({"query": r#"query {
+					product_aggregate(
+						filter: { price: { gt: 0.6 } },
+						groupBy: [category]
+					) {
+						category count
+					}
+				}"#})
+				.to_string(),
+			)
+			.send()
+			.await?;
+		assert_eq!(res.status(), 200);
+		let body = res.json::<serde_json::Value>().await?;
+		assert!(body["errors"].is_null(), "Unexpected errors: {:?}", body["errors"]);
+		let rows = body["data"]["product_aggregate"].as_array().unwrap();
+		// expected: fruit=1 (Apple), veggie=2 (Carrot + Daikon)
+		let total_count: i64 = rows.iter().map(|r| r["count"].as_i64().unwrap()).sum();
+		assert_eq!(total_count, 3);
+
+		// 4. Introspection: `product_aggregate` field exists and `product_aggregate_row`
+		// type has the expected scalar fields.
+		let res = client
+			.post(gql_url)
+			.body(
+				json!({"query": r#"{
+					__type(name: "product_aggregate_row") {
+						fields { name type { kind name ofType { kind name } } }
+					}
+				}"#})
+				.to_string(),
+			)
+			.send()
+			.await?;
+		assert_eq!(res.status(), 200);
+		let body = res.json::<serde_json::Value>().await?;
+		let fields = body["data"]["__type"]["fields"].as_array().unwrap();
+		let names: Vec<&str> = fields.iter().map(|f| f["name"].as_str().unwrap()).collect();
+		for required in
+			["count", "price_min", "price_max", "price_sum", "price_avg", "qty_avg", "category"]
+		{
+			assert!(names.contains(&required), "missing aggregate field `{required}`");
+		}
+
+		Ok(())
+	}
+
+	// Function-call predicate: filter rows by an arbitrary built-in or
+	// user-defined function.  Regresses GitHub issue #7312.
+	#[test(tokio::test)]
+	async fn fn_call_filter() -> Result<(), Box<dyn std::error::Error>> {
+		let (addr, _server) = common::start_server_without_auth().await.unwrap();
+		let gql_url = &format!("http://{addr}/graphql");
+		let sql_url = &format!("http://{addr}/sql");
+
+		let mut headers = reqwest::header::HeaderMap::new();
+		let ns = Ulid::new().to_string();
+		let db = Ulid::new().to_string();
+		headers.insert("surreal-ns", ns.parse()?);
+		headers.insert("surreal-db", db.parse()?);
+		headers.insert(header::ACCEPT, "application/json".parse()?);
+		let client = Client::builder()
+			.connect_timeout(Duration::from_secs(10))
+			.default_headers(headers)
+			.build()?;
+
+		{
+			let res = client
+				.post(sql_url)
+				.body(
+					r#"
+					DEFINE CONFIG GRAPHQL AUTO;
+					DEFINE TABLE post SCHEMAFUL;
+					DEFINE FIELD title ON post TYPE string;
+					DEFINE FIELD score ON post TYPE int;
+
+					DEFINE FUNCTION fn::high($n: int) -> bool { RETURN $n >= 10; };
+
+					CREATE post:a SET title = "Hi",        score = 5;
+					CREATE post:b SET title = "Hello",     score = 12;
+					CREATE post:c SET title = "Greetings", score = 20;
+				"#,
+				)
+				.send()
+				.await?;
+			assert_eq!(res.status(), 200);
+		}
+
+		// Builtin function: filter posts whose title length is at least 5.
+		let res = client
+			.post(gql_url)
+			.body(
+				json!({"query": r#"query {
+					post(filter: { title: { call: { fn: "string::len", op: gte, value: 5 } } }, order: { asc: title }) {
+						id
+					}
+				}"#})
+				.to_string(),
+			)
+			.send()
+			.await?;
+		assert_eq!(res.status(), 200);
+		let body = res.json::<serde_json::Value>().await?;
+		assert!(body["errors"].is_null(), "Unexpected errors: {:?}", body["errors"]);
+		let ids: Vec<&str> = body["data"]["post"]
+			.as_array()
+			.unwrap()
+			.iter()
+			.map(|r| r["id"].as_str().unwrap())
+			.collect();
+		assert_eq!(ids, vec!["post:c", "post:b"], "string::len filter wrong: {ids:?}");
+
+		// User-defined function: fn::high($score)
+		let res = client
+			.post(gql_url)
+			.body(
+				json!({"query": r#"query {
+					post(filter: { score: { call: { fn: "fn::high", op: eq, value: true } } }, order: { asc: title }) {
+						id
+					}
+				}"#})
+				.to_string(),
+			)
+			.send()
+			.await?;
+		assert_eq!(res.status(), 200);
+		let body = res.json::<serde_json::Value>().await?;
+		assert!(body["errors"].is_null(), "Unexpected errors: {:?}", body["errors"]);
+		let ids: Vec<&str> = body["data"]["post"]
+			.as_array()
+			.unwrap()
+			.iter()
+			.map(|r| r["id"].as_str().unwrap())
+			.collect();
+		assert_eq!(ids, vec!["post:c", "post:b"], "fn::high filter wrong: {ids:?}");
 
 		Ok(())
 	}

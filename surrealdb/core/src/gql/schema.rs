@@ -49,7 +49,7 @@ use crate::gql::functions::process_fns;
 use crate::gql::mutations::process_mutations;
 use crate::gql::relations::collect_relations;
 use crate::gql::subscriptions::process_subscriptions;
-use crate::gql::tables::process_tbs;
+use crate::gql::tables::{process_tbs, register_filter_helper_types};
 use crate::kvs::{Datastore, LockType, Transaction, TransactionType};
 use crate::val::{
 	Array as SurArray, Geometry as SurGeometry, Number as SurNumber, Object as SurObject,
@@ -208,6 +208,10 @@ pub async fn generate_schema(
 
 	// Register all geometry-related types (enum, object types, union, input types)
 	register_geometry_types(&mut types);
+
+	// Register shared helper types for the advanced filter operators
+	// (`nearest`, `similarity`, `matches`, `call`) — see #7312.
+	register_filter_helper_types(&mut types);
 
 	trace!("current Query object for schema: {:?}", query);
 
@@ -515,6 +519,16 @@ pub fn kind_to_type(
 	kind_to_type_with_enum_prefix(kind, types, is_input, None)
 }
 
+/// Maximum allowed depth of nested `array<...>` types in the generated GraphQL
+/// schema. Beyond this depth the inner type is replaced with the `JSON` scalar
+/// so that the resulting `ofType` chain stays within the 7-level limit enforced
+/// by the standard GraphQL introspection query.
+///
+/// Worst case for a single array layer is `NonNull(List(NonNull(T)))` which adds
+/// 2 `ofType` hops; depth 3 produces a 7-hop chain (`[[[T!]!]!]!`), which is the
+/// hard ceiling. Anything past depth 3 collapses to a single `JSON!` instead.
+const MAX_ARRAY_DEPTH: usize = 3;
+
 /// Map a SurrealDB [`Kind`] to a GraphQL [`TypeRef`], with optional enum naming scope.
 ///
 /// When `enum_scope` is provided, string-literal unions (`Kind::Either` with
@@ -524,6 +538,16 @@ pub fn kind_to_type_with_enum_prefix(
 	types: &mut Vec<Type>,
 	is_input: bool,
 	enum_scope: Option<&str>,
+) -> Result<TypeRef, GqlError> {
+	kind_to_type_inner(kind, types, is_input, enum_scope, 0)
+}
+
+fn kind_to_type_inner(
+	kind: Kind,
+	types: &mut Vec<Type>,
+	is_input: bool,
+	enum_scope: Option<&str>,
+	array_depth: usize,
 ) -> Result<TypeRef, GqlError> {
 	let optional = kind.can_be_none();
 	let out_ty = match kind {
@@ -612,7 +636,7 @@ pub fn kind_to_type_with_enum_prefix(
 			// to avoid creating a single-member union.
 			if ks.len() == 1 {
 				let inner = ks.into_iter().next().expect("checked len == 1");
-				let inner_ty = kind_to_type_with_enum_prefix(inner, types, is_input, enum_scope)?;
+				let inner_ty = kind_to_type_inner(inner, types, is_input, enum_scope, array_depth)?;
 				// Unwrap any NonNull wrapper — the outer optional flag will re-apply
 				// nullability as needed.
 				return Ok(match optional {
@@ -657,7 +681,7 @@ pub fn kind_to_type_with_enum_prefix(
 
 			let pos_names: Result<Vec<TypeRef>, GqlError> = others
 				.into_iter()
-				.map(|k| kind_to_type_with_enum_prefix(k, types, is_input, enum_scope))
+				.map(|k| kind_to_type_inner(k, types, is_input, enum_scope, array_depth))
 				.collect();
 			let pos_names: Vec<String> = pos_names?.into_iter().map(|tr| tr.to_string()).collect();
 			let ty_name = pos_names.join("_or_");
@@ -676,16 +700,36 @@ pub fn kind_to_type_with_enum_prefix(
 		}
 		Kind::Set(_, _) => return Err(schema_error("Kind::Set is not yet supported")),
 		Kind::Array(k, _) => {
-			TypeRef::List(Box::new(kind_to_type_with_enum_prefix(*k, types, is_input, enum_scope)?))
+			// Cap nested-array depth so the resulting chain stays within the
+			// 7-level `ofType` limit of the standard GraphQL introspection
+			// query. Each `array<…>` layer adds two `ofType` hops
+			// (`NonNull(List(…))`), so `MAX_ARRAY_DEPTH = 3` permits up to
+			// `[[[T!]!]!]!` (7 hops to a named leaf). When the *current* layer
+			// would push us past that, the entire remaining sub-tree collapses
+			// to the `JSON` scalar — a single named type, contributing no
+			// extra hops. The wire format is unchanged: nested numeric arrays
+			// continue to be encoded as JSON arrays.
+			if array_depth >= MAX_ARRAY_DEPTH {
+				TypeRef::named("JSON")
+			} else {
+				TypeRef::List(Box::new(kind_to_type_inner(
+					*k,
+					types,
+					is_input,
+					enum_scope,
+					array_depth + 1,
+				)?))
+			}
 		}
 		Kind::Function(_, _) => return Err(schema_error("Kind::Function is not yet supported")),
 		Kind::Range => return Err(schema_error("Kind::Range is not yet supported")),
 		Kind::Literal(literal) => {
-			return kind_to_type_with_enum_prefix(
+			return kind_to_type_inner(
 				literal_to_base_kind(&literal),
 				types,
 				is_input,
 				enum_scope,
+				array_depth,
 			);
 		}
 		Kind::File(_) => return Err(schema_error("Kind::File is not yet supported")),
@@ -1247,31 +1291,18 @@ pub(crate) fn geometry_gql_type_name(g: &SurGeometry) -> &'static str {
 	}
 }
 
-/// Build a `TypeRef` for nested Float arrays at a given depth.
-///
-/// - depth 1 → `[Float!]!`       (Point coordinates)
-/// - depth 2 → `[[Float!]!]!`    (LineString / MultiPoint coordinates)
-/// - depth 3 → `[[[Float!]!]!]!` (Polygon / MultiLineString coordinates)
-/// - depth 4 → `[[[[Float!]!]!]!]!` (MultiPolygon coordinates)
-fn nested_float_list(depth: usize) -> TypeRef {
-	let mut ty = TypeRef::named_nn(TypeRef::FLOAT); // Float!
-	for _ in 0..depth {
-		ty = TypeRef::NonNull(Box::new(TypeRef::List(Box::new(ty)))); // [...]!
-	}
-	ty
-}
-
 /// Build a geometry Object type for variants that have `coordinates`.
 ///
 /// Creates an Object type with:
 /// - `type: GeometryType!` (fixed enum value)
-/// - `coordinates: <nested_float_list>!`
-fn make_geometry_object_type(
-	obj_name: &str,
-	geojson_type: &'static str,
-	coord_depth: usize,
-) -> Object {
-	let coords_ty = nested_float_list(coord_depth);
+/// - `coordinates: JSON!` — exposed as the `JSON` scalar rather than a deeply nested
+///   `[[[[Float!]!]!]!]!` chain. The latter exceeds the standard 7-level introspection `ofType`
+///   chain (the spec's canonical introspection query stops at 7), which causes strict clients such
+///   as Postman to fail schema validation as soon as any field is typed `geometry`. Returning
+///   `JSON` keeps the value shape (nested arrays of numbers) intact at runtime while keeping the
+///   introspection chain at a single hop.
+fn make_geometry_object_type(obj_name: &str, geojson_type: &'static str) -> Object {
+	let coords_ty = TypeRef::named_nn("JSON");
 	Object::new(obj_name)
 		.field(Field::new("type", TypeRef::named_nn("GeometryType"), {
 			move |_ctx| {
@@ -1344,17 +1375,18 @@ pub(crate) fn register_geometry_types(types: &mut Vec<Type>) {
 			.item("GeometryCollection"),
 	));
 
-	// Per-variant output Object types
-	types.push(Type::Object(make_geometry_object_type("GeometryPoint", "Point", 1)));
-	types.push(Type::Object(make_geometry_object_type("GeometryLineString", "LineString", 2)));
-	types.push(Type::Object(make_geometry_object_type("GeometryPolygon", "Polygon", 3)));
-	types.push(Type::Object(make_geometry_object_type("GeometryMultiPoint", "MultiPoint", 2)));
+	// Per-variant output Object types. `coordinates` is exposed as a `JSON` scalar
+	// regardless of variant — see `make_geometry_object_type` for the rationale
+	// (avoiding the 7-level introspection `ofType` chain limit).
+	types.push(Type::Object(make_geometry_object_type("GeometryPoint", "Point")));
+	types.push(Type::Object(make_geometry_object_type("GeometryLineString", "LineString")));
+	types.push(Type::Object(make_geometry_object_type("GeometryPolygon", "Polygon")));
+	types.push(Type::Object(make_geometry_object_type("GeometryMultiPoint", "MultiPoint")));
 	types.push(Type::Object(make_geometry_object_type(
 		"GeometryMultiLineString",
 		"MultiLineString",
-		3,
 	)));
-	types.push(Type::Object(make_geometry_object_type("GeometryMultiPolygon", "MultiPolygon", 4)));
+	types.push(Type::Object(make_geometry_object_type("GeometryMultiPolygon", "MultiPolygon")));
 	types.push(Type::Object(make_geometry_collection_type()));
 
 	// Geometry union (covers all variants)
@@ -1370,36 +1402,40 @@ pub(crate) fn register_geometry_types(types: &mut Vec<Type>) {
 			.possible_type("GeometryCollection"),
 	));
 
-	// Per-variant InputObject types
+	// Per-variant InputObject types. `coordinates` is `JSON!` rather than a deeply
+	// nested float array to keep introspection within the standard 7-level chain
+	// limit. The runtime parser (`gql_coords_to_sur_value`) still walks nested
+	// arrays of numbers from the JSON value, so the wire format is unchanged.
+	let json_nn = || TypeRef::named_nn("JSON");
 	types.push(Type::InputObject(
 		InputObject::new("GeometryPointInput")
 			.description("GeoJSON Point input – coordinates is [lng, lat]")
-			.field(InputValue::new("coordinates", nested_float_list(1))),
+			.field(InputValue::new("coordinates", json_nn())),
 	));
 	types.push(Type::InputObject(
 		InputObject::new("GeometryLineStringInput")
 			.description("GeoJSON LineString input")
-			.field(InputValue::new("coordinates", nested_float_list(2))),
+			.field(InputValue::new("coordinates", json_nn())),
 	));
 	types.push(Type::InputObject(
 		InputObject::new("GeometryPolygonInput")
 			.description("GeoJSON Polygon input")
-			.field(InputValue::new("coordinates", nested_float_list(3))),
+			.field(InputValue::new("coordinates", json_nn())),
 	));
 	types.push(Type::InputObject(
 		InputObject::new("GeometryMultiPointInput")
 			.description("GeoJSON MultiPoint input")
-			.field(InputValue::new("coordinates", nested_float_list(2))),
+			.field(InputValue::new("coordinates", json_nn())),
 	));
 	types.push(Type::InputObject(
 		InputObject::new("GeometryMultiLineStringInput")
 			.description("GeoJSON MultiLineString input")
-			.field(InputValue::new("coordinates", nested_float_list(3))),
+			.field(InputValue::new("coordinates", json_nn())),
 	));
 	types.push(Type::InputObject(
 		InputObject::new("GeometryMultiPolygonInput")
 			.description("GeoJSON MultiPolygon input")
-			.field(InputValue::new("coordinates", nested_float_list(4))),
+			.field(InputValue::new("coordinates", json_nn())),
 	));
 	types.push(Type::InputObject(
 		InputObject::new("GeometryCollectionInput")
@@ -1415,7 +1451,7 @@ pub(crate) fn register_geometry_types(types: &mut Vec<Type>) {
 				 `coordinates` for coordinate-based types, `geometries` for GeometryCollection.",
 			)
 			.field(InputValue::new("type", TypeRef::named_nn("GeometryType")))
-			.field(InputValue::new("coordinates", TypeRef::named("any")))
+			.field(InputValue::new("coordinates", TypeRef::named("JSON")))
 			.field(InputValue::new("geometries", TypeRef::named_list("GeometryInput"))),
 	));
 }

@@ -17,15 +17,13 @@ use std::task::{Context, Poll};
 
 use async_graphql::http::is_accept_multipart_mixed;
 use async_graphql::parser::types::OperationType;
-use async_graphql::{
-	BatchRequest, Executor, ParseRequestError, Request as GraphQLInnerRequest, ServerError,
-};
+use async_graphql::{BatchRequest, Executor, Request as GraphQLInnerRequest, ServerError};
 use async_graphql_axum::rejection::GraphQLRejection;
 use async_graphql_axum::{GraphQLBatchRequest, GraphQLRequest, GraphQLResponse};
 use axum::BoxError;
 use axum::body::{Body, HttpBody};
 use axum::extract::FromRequest;
-use axum::http::{Request as HttpRequest, Response as HttpResponse};
+use axum::http::{Request as HttpRequest, Response as HttpResponse, StatusCode};
 use axum::response::IntoResponse;
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
@@ -33,7 +31,6 @@ use http::header::{CONTENT_TYPE, HeaderValue};
 use surrealdb_core::dbs::Session;
 use surrealdb_core::dbs::capabilities::RouteTarget;
 use surrealdb_core::gql::cache::GraphQLSchemaCache;
-use surrealdb_core::gql::error::resolver_error;
 use surrealdb_core::observe::Outcome;
 use tower_service::Service;
 use web_time::Instant;
@@ -135,17 +132,21 @@ where
 				req.extensions().get::<Session>().expect("session extractor should always succeed");
 
 			let Some(_ns) = session.ns.as_ref() else {
-				return Ok(to_rejection(resolver_error("No namespace specified")).into_response());
+				return Ok(graphql_error_response(
+					"No namespace specified. Set the `surreal-ns` header on the request.",
+				));
 			};
 			let Some(_db) = session.db.as_ref() else {
-				return Ok(to_rejection(resolver_error("No database specified")).into_response());
+				return Ok(graphql_error_response(
+					"No database specified. Set the `surreal-db` header on the request.",
+				));
 			};
 
 			let schema = match cache.get_schema(datastore, session).await {
 				Ok(e) => e,
 				Err(e) => {
 					info!(?e, "error generating schema");
-					return Ok(to_rejection(e).into_response());
+					return Ok(graphql_error_response(&format!("{e}")));
 				}
 			};
 
@@ -303,7 +304,22 @@ fn as_application_json(mut response: HttpResponse<Body>) -> HttpResponse<Body> {
 	response
 }
 
-/// Wrap an error as a GraphQL rejection (HTTP 400-level response).
-fn to_rejection(err: impl std::error::Error + Send + Sync + 'static) -> GraphQLRejection {
-	GraphQLRejection(ParseRequestError::InvalidRequest(Box::new(err)))
+/// Build a spec-compliant GraphQL error response (HTTP 400, `application/json`,
+/// body `{"data": null, "errors": [{"message": "..."}]}`).
+///
+/// Used for pre-execution failures such as missing `surreal-ns` / `surreal-db`
+/// headers or a schema-generation error.  Plain-text 400s break GraphQL
+/// clients (Postman, GraphiQL, urql) which expect the `errors` shape when
+/// they fail to parse the body, often surfacing the user-facing message
+/// "Received an invalid GraphQL response".
+fn graphql_error_response(message: &str) -> HttpResponse<Body> {
+	let body = serde_json::json!({
+		"data": null,
+		"errors": [{ "message": message }],
+	})
+	.to_string();
+	let mut response = HttpResponse::new(Body::from(body));
+	*response.status_mut() = StatusCode::BAD_REQUEST;
+	response.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+	response
 }
