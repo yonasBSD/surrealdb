@@ -66,7 +66,9 @@ use crate::key::table::bg::Bg;
 use crate::key::table::bp::Bp;
 use crate::key::table::br::Br;
 use crate::key::table::bs::Bs;
-use crate::kvs::index::{AppendingId, BatchId, BuildGeneration, BuildTicket};
+use crate::kvs::index::{
+	AppendingId, BatchId, BuildGeneration, BuildTicket, BuildTicketMutationSeq,
+};
 use crate::kvs::{Error as KvsError, KVKey, Key, Transaction};
 use crate::val::{RecordIdKey, TableName};
 
@@ -329,13 +331,29 @@ impl IndexKeyBase {
 	}
 
 	/// Key storing one durable queued mutation for a build generation.
-	pub(crate) fn new_bg_key(&self, generation: BuildGeneration, ticket: BuildTicket) -> Bg<'_> {
-		Bg::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix, generation, ticket)
+	pub(crate) fn new_bg_key(
+		&self,
+		generation: BuildGeneration,
+		ticket: BuildTicket,
+		mutation_seq: BuildTicketMutationSeq,
+	) -> Bg<'_> {
+		Bg::new(self.0.ns, self.0.db, &self.0.tb, self.0.ix, generation, ticket, mutation_seq)
 	}
 
 	/// Range covering durable queued mutations for one build generation.
 	pub(crate) fn new_bg_range(&self, generation: BuildGeneration) -> Result<Range<Key>> {
 		Bg::range(self.0.ns, self.0.db, &self.0.tb, self.0.ix, generation)
+	}
+
+	/// Range covering every durable queued mutation that shares one reservation
+	/// ticket within a build generation — used by `wait_for_durable_reservations`
+	/// to decide whether a writer has committed any of its batched mutations.
+	pub(crate) fn new_bg_ticket_range(
+		&self,
+		generation: BuildGeneration,
+		ticket: BuildTicket,
+	) -> Result<Range<Key>> {
+		Bg::ticket_range(self.0.ns, self.0.db, &self.0.tb, self.0.ix, generation, ticket)
 	}
 
 	/// Range covering durable queued mutations across all generations of this index.

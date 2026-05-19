@@ -1,8 +1,13 @@
 //! Stores durable appended index operations for an index build generation.
 //!
-//! `!bg{ix}{generation}{ticket}` entries are written by user transactions that
-//! were admitted while an index was building. The builder replays them in ticket
-//! order and deletes the entry in the same transaction that updates index data.
+//! `!bg{ix}{generation}{ticket}{mutation_seq}` entries are written by user
+//! transactions that were admitted while an index was building. A single
+//! admitted user transaction may write multiple `!bg` entries that all share
+//! the same `(generation, ticket)` — one reservation is allocated per user
+//! transaction per index, and each indexed mutation in that transaction
+//! receives a distinct `mutation_seq`. The builder replays them in storage
+//! order and deletes each entry in the same transaction that updates index
+//! data.
 use std::borrow::Cow;
 use std::ops::Range;
 
@@ -10,7 +15,7 @@ use storekey::{BorrowDecode, Encode};
 
 use crate::catalog::{DatabaseId, IndexId, NamespaceId};
 use crate::key::category::{Categorise, Category};
-use crate::kvs::index::{Appending, BuildGeneration, BuildTicket};
+use crate::kvs::index::{Appending, BuildGeneration, BuildTicket, BuildTicketMutationSeq};
 use crate::kvs::{KVKey, Key, impl_kv_key_storekey};
 use crate::val::TableName;
 
@@ -30,6 +35,7 @@ pub(crate) struct Bg<'a> {
 	pub ix: IndexId,
 	pub generation: BuildGeneration,
 	pub ticket: BuildTicket,
+	pub mutation_seq: BuildTicketMutationSeq,
 }
 
 impl_kv_key_storekey!(Bg<'_> => Appending);
@@ -67,6 +73,7 @@ impl<'a> Bg<'a> {
 		ix: IndexId,
 		generation: BuildGeneration,
 		ticket: BuildTicket,
+		mutation_seq: BuildTicketMutationSeq,
 	) -> Self {
 		Self {
 			__: b'/',
@@ -82,6 +89,7 @@ impl<'a> Bg<'a> {
 			ix,
 			generation,
 			ticket,
+			mutation_seq,
 		}
 	}
 
@@ -93,8 +101,29 @@ impl<'a> Bg<'a> {
 		ix: IndexId,
 		generation: BuildGeneration,
 	) -> anyhow::Result<Range<Vec<u8>>> {
-		let beg = Self::new(ns, db, tb, ix, generation, BuildTicket::MIN).encode_key()?;
-		let end = Self::new(ns, db, tb, ix, generation, BuildTicket::MAX).encode_key()?;
+		let beg =
+			Self::new(ns, db, tb, ix, generation, BuildTicket::MIN, BuildTicketMutationSeq::MIN)
+				.encode_key()?;
+		let end =
+			Self::new(ns, db, tb, ix, generation, BuildTicket::MAX, BuildTicketMutationSeq::MAX)
+				.encode_key()?;
+		Ok(beg..end)
+	}
+
+	/// Return the range covering all queued mutations for a single
+	/// `(generation, ticket)` reservation — i.e. all `mutation_seq` values.
+	pub(crate) fn ticket_range(
+		ns: NamespaceId,
+		db: DatabaseId,
+		tb: &'a TableName,
+		ix: IndexId,
+		generation: BuildGeneration,
+		ticket: BuildTicket,
+	) -> anyhow::Result<Range<Vec<u8>>> {
+		let beg = Self::new(ns, db, tb, ix, generation, ticket, BuildTicketMutationSeq::MIN)
+			.encode_key()?;
+		let end = Self::new(ns, db, tb, ix, generation, ticket, BuildTicketMutationSeq::MAX)
+			.encode_key()?;
 		Ok(beg..end)
 	}
 

@@ -369,6 +369,30 @@ impl Building {
 					}
 				}
 			}
+			// New-generation takeover: drain any prior-generation `!br` from
+			// in-flight writers (possibly on other cluster nodes) before
+			// wiping durable build state. Otherwise the wipe destroys the
+			// `!br` anchor of a writer mid-transaction and the new build's
+			// initial scan can start before that writer's commit lands —
+			// leaving its main-table writes invisible to the scan and its
+			// `!bg(prior_gen, *)` orphaned by the wipe.
+			tx.cancel().await?;
+			self.wait_for_prior_generation_reservations().await?;
+
+			// Re-read state in a fresh transaction; another node in the
+			// cluster may have completed its own takeover while we were
+			// draining. If state is now `Building`/`Closing`, restart so the
+			// takeover-same-gen branch above handles it.
+			let ctx = self.new_write_tx_ctx().await?;
+			let tx = ctx.tx();
+			let existing = tx.get(&state_key, None).await?;
+			if let Some(current) = existing.as_ref()
+				&& matches!(current.phase, IndexBuildPhase::Building | IndexBuildPhase::Closing)
+			{
+				tx.cancel().await?;
+				continue;
+			}
+
 			let generation = existing.as_ref().map(|s| s.generation.saturating_add(1)).unwrap_or(1);
 			let now = Utc::now();
 			let state = IndexBuildState {

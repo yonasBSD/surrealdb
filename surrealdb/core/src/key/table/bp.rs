@@ -10,7 +10,7 @@ use storekey::{BorrowDecode, Encode};
 
 use crate::catalog::{DatabaseId, IndexId, NamespaceId};
 use crate::key::category::{Categorise, Category};
-use crate::kvs::index::{BuildGeneration, BuildTicket};
+use crate::kvs::index::{BuildGeneration, PrimaryAppendingTicket};
 use crate::kvs::{KVKey, Key, impl_kv_key_storekey};
 use crate::val::{IndexFormat, RecordIdKey, TableName};
 
@@ -42,7 +42,7 @@ pub(crate) struct Bp<'a> {
 }
 
 impl KVKey for Bp<'_> {
-	type ValueType = BuildTicket;
+	type ValueType = PrimaryAppendingTicket;
 
 	fn encode_key(&self) -> anyhow::Result<Vec<u8>> {
 		Ok(storekey::encode_vec_format::<IndexFormat, _>(self)

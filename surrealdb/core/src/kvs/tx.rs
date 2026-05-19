@@ -10,6 +10,7 @@
 #![allow(private_bounds, private_interfaces)]
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::ops::{Deref, Range};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,7 +53,10 @@ use crate::key::table::br::Br;
 use crate::key::table::bs::Bs;
 use crate::key::table::ix as table_ix;
 use crate::kvs::cache::tx::TransactionCache;
-use crate::kvs::index::{IndexBuildPhase, IndexBuildReportStatus, IndexBuildState, IndexBuilder};
+use crate::kvs::index::{
+	BuildGeneration, BuildTicket, BuildTicketMutationSeq, IndexBuildPhase, IndexBuildReportStatus,
+	IndexBuildState, IndexBuilder,
+};
 use crate::kvs::scanner::Direction;
 use crate::kvs::sequences::Sequences;
 #[cfg(test)]
@@ -131,6 +135,16 @@ pub struct Transaction {
 	/// snapshot, which can conflict on snapshot-isolated local engines such as
 	/// `kv-mem`.
 	pending_index_build_reservations: Mutex<Vec<IndexBuildReservationRelease>>,
+	/// Per-user-transaction admission reservations, keyed by `(generation, index)`.
+	///
+	/// One durable `!br` reservation is allocated per user transaction per index;
+	/// every indexed mutation in that transaction reuses the cached ticket and
+	/// allocates a fresh `mutation_seq`. Avoids paying a reservation commit for
+	/// every individual mutation in a multi-row update or insert. Cleared on
+	/// commit/cancel — the per-reservation release is queued separately in
+	/// [`Self::pending_index_build_reservations`].
+	cached_index_build_reservations:
+		Mutex<HashMap<CachedIndexBuildReservationKey, CachedIndexBuildReservation>>,
 	/// Process-local index builders to abort only after a successful schema commit.
 	///
 	/// Durable index retirement and catalog deletion are staged in the schema
@@ -150,6 +164,64 @@ pub struct Transaction {
 }
 
 const INDEX_BUILD_RESERVATION_RELEASE_RETRY_SLEEP: Duration = Duration::from_millis(100);
+
+/// Lookup key for a per-user-transaction admission reservation.
+///
+/// One cache entry exists per index per user transaction; every indexed
+/// mutation that hits the same index in the same transaction shares this
+/// entry and uses `next_mutation_seq` to allocate its `!bg` slot. The cache
+/// key omits the build generation because reuse is revalidated on every hit
+/// against the current `!bs` state: a generation rotation, an `Online` or
+/// `Error` transition, or a vanished build aborts the user transaction with
+/// `IndexingBuildingCancelled`. Skipping that recheck would let later
+/// mutations in the same transaction write `!bg` against a generation no
+/// builder will replay — silent index data loss.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct CachedIndexBuildReservationKey {
+	pub(crate) ns: NamespaceId,
+	pub(crate) db: DatabaseId,
+	pub(crate) tb: TableName,
+	pub(crate) ix: IndexId,
+}
+
+/// Cached admission reservation reused across an entire user transaction.
+///
+/// First admission for an index runs the short reservation transaction
+/// (CAS-incrementing `!bs.next_ticket` and committing `!br`), then stores
+/// the resulting `generation`, `ticket`, `initial_complete`, and prepared
+/// release here. Subsequent admissions read the cache, take a fresh
+/// `mutation_seq`, and write a `!bg` keyed by `(generation, ticket, seq)`.
+pub(crate) struct CachedIndexBuildReservation {
+	pub(crate) generation: BuildGeneration,
+	pub(crate) ticket: BuildTicket,
+	pub(crate) initial_complete: bool,
+	pub(crate) next_mutation_seq: BuildTicketMutationSeq,
+}
+
+/// Outcome of a per-transaction reservation lookup.
+///
+/// `FirstUse` is returned the first time admission runs for an index in this
+/// transaction; the caller has already registered the prepared release and
+/// must still run the durable-admission fence. Subsequent calls return
+/// `Reused`, which only carries the ticket and the freshly allocated
+/// `mutation_seq`. The shapes are intentionally identical for the fields the
+/// caller consumes — the variant tag exists so admission can decide whether
+/// to run the fence and emit fault-injection probes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CachedIndexBuildReservationLookup {
+	FirstUse {
+		generation: BuildGeneration,
+		ticket: BuildTicket,
+		mutation_seq: BuildTicketMutationSeq,
+		initial_complete: bool,
+	},
+	Reused {
+		generation: BuildGeneration,
+		ticket: BuildTicket,
+		mutation_seq: BuildTicketMutationSeq,
+		initial_complete: bool,
+	},
+}
 
 struct PendingIndexBuilderAbort {
 	builder: IndexBuilder,
@@ -319,8 +391,33 @@ impl IndexBuildReservationRelease {
 
 	async fn mark_build_error_if_uncommitted(&self, release_err: &anyhow::Error) -> Result<()> {
 		let br = Br::decode_key(&self.key)?;
-		let bg =
-			Bg::new(br.ns, br.db, br.tb.as_ref(), br.ix, br.generation, br.ticket).encode_key()?;
+		// One reservation now covers an entire user transaction's mutation
+		// batch on this index. Any committed `!bg(generation, ticket, *)`
+		// entry signals that at least one mutation in that batch became
+		// durable, so the build does not need to be marked errored. Use the
+		// inclusive scan range, not a point exists check on `mutation_seq = 0`,
+		// because the first mutation may not be at index zero on retry paths
+		// that allocate a fresh ticket.
+		let bg_range_start = Bg::new(
+			br.ns,
+			br.db,
+			br.tb.as_ref(),
+			br.ix,
+			br.generation,
+			br.ticket,
+			BuildTicketMutationSeq::MIN,
+		)
+		.encode_key()?;
+		let bg_range_end = Bg::new(
+			br.ns,
+			br.db,
+			br.tb.as_ref(),
+			br.ix,
+			br.generation,
+			br.ticket,
+			BuildTicketMutationSeq::MAX,
+		)
+		.encode_key()?;
 		let bs = Bs::new(br.ns, br.db, br.tb.as_ref(), br.ix).encode_key()?;
 		let reason = format!(
 			"Failed to release durable index-build reservation for generation {} ticket {} after transaction close: {release_err}",
@@ -345,12 +442,21 @@ impl IndexBuildReservationRelease {
 				return Ok(());
 			}
 
-			match tx.tr.exists(bg.clone(), None).await {
-				Ok(true) => {
+			match tx
+				.tr
+				.keys(
+					bg_range_start.clone()..bg_range_end.clone(),
+					crate::kvs::ScanLimit::Count(1),
+					0,
+					None,
+				)
+				.await
+			{
+				Ok(res) if !res.keys.is_empty() => {
 					let _ = tx.tr.cancel().await;
 					return Ok(());
 				}
-				Ok(false) => {}
+				Ok(_) => {}
 				Err(err) => {
 					let _ = tx.tr.cancel().await;
 					return Err(err.into());
@@ -442,6 +548,57 @@ impl IndexBuildReservationRelease {
 			}
 		}
 	}
+
+	/// Delete every queued `!br` reservation in a single short transaction.
+	///
+	/// A typical user transaction touches a handful of indexes and produces one
+	/// reservation per index. Folding the deletes into one commit removes the
+	/// `O(reservations)` extra fsync that the per-reservation path would charge
+	/// — the per-mutation cost is already amortized by the per-user-txn
+	/// reservation cache, and this drops the close-time cost from one commit
+	/// per reservation to exactly one commit per user transaction.
+	///
+	/// Returns `Ok(())` on success. On any failure the original reservations
+	/// are returned via the `Err` arm so the caller can run the slow path
+	/// (`release()`), which retries retryable conflicts and marks the build
+	/// errored if a non-retryable failure leaves an undeleted `!br` behind.
+	async fn release_batch(reservations: Vec<Self>) -> Result<(), Vec<Self>> {
+		// One reservation: batching has nothing to amortize, and the per-call
+		// path already does everything we need including retry+mark-error.
+		if reservations.len() <= 1 {
+			return Err(reservations);
+		}
+		let Some(first) = reservations.first() else {
+			return Ok(());
+		};
+		let tf = first.tf.clone();
+		let sequences = first.sequences.clone();
+		let tx = match tf.transaction(TransactionType::Write, LockType::Optimistic, sequences).await
+		{
+			Ok(tx) => tx,
+			Err(_) => return Err(reservations),
+		};
+		for reservation in &reservations {
+			match tx.tr.delc(reservation.key.clone(), Some(reservation.val.clone())).await {
+				Ok(()) => {}
+				Err(KvsError::TransactionConditionNotMet) => {
+					// The builder already cleaned this reservation up; that
+					// is part of the normal release contract, not a failure.
+				}
+				Err(_) => {
+					let _ = tx.tr.cancel().await;
+					return Err(reservations);
+				}
+			}
+		}
+		match tx.tr.commit().await {
+			Ok(()) => Ok(()),
+			Err(_) => {
+				let _ = tx.tr.cancel().await;
+				Err(reservations)
+			}
+		}
+	}
 }
 
 impl Deref for Transaction {
@@ -480,6 +637,7 @@ impl Transaction {
 			async_event_trigger,
 			trigger_async_event: AtomicBool::new(false),
 			pending_index_build_reservations: Mutex::new(Vec::new()),
+			cached_index_build_reservations: Mutex::new(HashMap::new()),
 			pending_index_builder_aborts: Mutex::new(Vec::new()),
 			pending_uncommitted_index_builds: Mutex::new(Vec::new()),
 		}
@@ -559,6 +717,118 @@ impl Transaction {
 		release: IndexBuildReservationRelease,
 	) {
 		self.pending_index_build_reservations.lock().await.push(release);
+	}
+
+	/// Look up an admission reservation cached for this user transaction.
+	///
+	/// Returns `Ok(Some(_))` when this transaction has already reserved a ticket
+	/// for the same index earlier in its lifetime. On a hit the caller receives
+	/// the cached generation and ticket plus a fresh `mutation_seq`, and `!bg`
+	/// can be written without committing a new reservation transaction.
+	///
+	/// Returns `Ok(None)` on a miss; the caller is expected to run the short
+	/// reservation transaction (`reserve_durable_admission`) and then publish
+	/// the result via [`Self::insert_cached_index_build_reservation`].
+	///
+	/// Returns `Err(IndexingBuildingCancelled)` if `next_mutation_seq` would
+	/// overflow `u32::MAX`. This caps a single user transaction at
+	/// `u32::MAX` mutations on one index — any more would silently collide on
+	/// the same `!bg(generation, ticket, MAX)` key, which is data loss.
+	///
+	/// Calls on a single `Transaction` are sequential in this codebase, so the
+	/// lookup-then-allocate sequence has no observable race window.
+	pub(crate) async fn lookup_cached_index_build_reservation(
+		&self,
+		key: &CachedIndexBuildReservationKey,
+	) -> Result<Option<CachedIndexBuildReservationLookup>> {
+		let mut cache = self.cached_index_build_reservations.lock().await;
+		let Some(entry) = cache.get_mut(key) else {
+			return Ok(None);
+		};
+		let mutation_seq = entry.next_mutation_seq;
+		let next_seq =
+			mutation_seq.checked_add(1).ok_or_else(|| Error::IndexingBuildingCancelled {
+				reason: "Per-user-transaction index build mutation sequence overflowed u32::MAX"
+					.to_string(),
+			})?;
+		entry.next_mutation_seq = next_seq;
+		Ok(Some(CachedIndexBuildReservationLookup::Reused {
+			generation: entry.generation,
+			ticket: entry.ticket,
+			mutation_seq,
+			initial_complete: entry.initial_complete,
+		}))
+	}
+
+	/// Test-only helper: seed the per-user-transaction reservation cache with
+	/// a specific `next_mutation_seq`. Used by overflow regression tests so
+	/// the failure mode can be exercised without running `u32::MAX` lookups.
+	#[cfg(test)]
+	pub(crate) async fn seed_cached_index_build_reservation_for_test(
+		&self,
+		key: CachedIndexBuildReservationKey,
+		generation: BuildGeneration,
+		ticket: BuildTicket,
+		initial_complete: bool,
+		next_mutation_seq: BuildTicketMutationSeq,
+	) {
+		self.cached_index_build_reservations.lock().await.insert(
+			key,
+			CachedIndexBuildReservation {
+				generation,
+				ticket,
+				initial_complete,
+				next_mutation_seq,
+			},
+		);
+	}
+
+	/// Remove a per-user-transaction admission reservation from the cache.
+	///
+	/// Called by `consume()` when the first-use fence returns `IndexNormally`:
+	/// the cached ticket has already been released by that fence, so subsequent
+	/// mutations must re-enter the reservation path and rediscover the online
+	/// build phase. Without this, the next mutation would hit a stale cache
+	/// entry and write `!bg(old_gen, *)` that no builder will replay.
+	pub(crate) async fn remove_cached_index_build_reservation(
+		&self,
+		key: &CachedIndexBuildReservationKey,
+	) {
+		self.cached_index_build_reservations.lock().await.remove(key);
+	}
+
+	/// Publish a freshly allocated admission reservation into the per-user-txn
+	/// cache and return the first-use slot.
+	///
+	/// The returned `mutation_seq` is always `0` (the first slot for the new
+	/// ticket); the cache is advanced so the next call to
+	/// [`Self::lookup_cached_index_build_reservation`] returns `mutation_seq = 1`.
+	/// The caller still owns registering the release with
+	/// [`Self::register_index_build_reservation_release`] and running the
+	/// durable-admission fence — only first-use callers should do so.
+	pub(crate) async fn insert_cached_index_build_reservation(
+		&self,
+		key: CachedIndexBuildReservationKey,
+		generation: BuildGeneration,
+		ticket: BuildTicket,
+		initial_complete: bool,
+	) -> CachedIndexBuildReservationLookup {
+		let mut cache = self.cached_index_build_reservations.lock().await;
+		cache.insert(
+			key,
+			CachedIndexBuildReservation {
+				generation,
+				ticket,
+				initial_complete,
+				next_mutation_seq: 1,
+			},
+		);
+		CachedIndexBuildReservationLookup::FirstUse {
+			generation,
+			ticket,
+			mutation_seq: 0,
+			initial_complete,
+		}
 	}
 
 	/// Abort a process-local index builder after this transaction commits.
@@ -1393,19 +1663,39 @@ impl Transaction {
 	///
 	/// Called from both the commit and cancel paths so that each admitted
 	/// ticket is released exactly once after the user transaction terminates.
-	/// Every release runs in its own short transaction, isolating it from the
-	/// outcome of the surrounding transaction and from snapshot conflicts on
-	/// snapshot-isolated local engines. All reservations are attempted even
-	/// when one fails; the first error is preserved and returned so the caller
-	/// can surface it while later releases still get a chance to run.
+	/// All reservations are attempted even when one fails; the first error is
+	/// preserved and returned so the caller can surface it while later
+	/// releases still get a chance to run.
+	///
+	/// As an optimization, when there are multiple queued reservations they
+	/// are deleted in a single short transaction instead of one transaction
+	/// per release. A user transaction that wrote to several indexes therefore
+	/// pays one commit at close time instead of one per index. If the batch
+	/// commit fails (retryable conflict, snapshot conflict on local engines,
+	/// or a non-retryable storage error), the function falls back to the
+	/// per-reservation release path so each failure can drive its own
+	/// `mark_build_error_if_uncommitted` reasoning.
 	async fn release_index_build_reservations(&self) -> Result<()> {
 		// Take the queued reservations under the lock so concurrent registrations
-		// see an empty queue while releases are in flight
+		// see an empty queue while releases are in flight.
 		let reservations = {
 			let mut pending = self.pending_index_build_reservations.lock().await;
 			std::mem::take(&mut *pending)
 		};
-		// Attempt every release, remembering the first failure
+		if reservations.is_empty() {
+			return Ok(());
+		}
+		// Try the batched delete first, then fall back to the per-reservation
+		// path on any error. The fallback preserves the per-reservation
+		// retry + build-error-marking behavior for any release that didn't
+		// already succeed in the batch.
+		let reservations = match IndexBuildReservationRelease::release_batch(reservations).await {
+			Ok(()) => return Ok(()),
+			Err(remaining) => remaining,
+		};
+		// Per-reservation slow path. Reused for the rare case where the batch
+		// failed; each release individually retries on retryable conflicts
+		// and marks the build errored if its appendings never landed.
 		let mut first_error = None;
 		for reservation in reservations {
 			if let Err(err) = reservation.release().await
@@ -1414,7 +1704,6 @@ impl Transaction {
 				first_error = Some(err);
 			}
 		}
-		// Surface the first failure once all releases have been attempted
 		if let Some(err) = first_error {
 			Err(err)
 		} else {

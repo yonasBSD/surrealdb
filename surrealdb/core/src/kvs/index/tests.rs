@@ -25,7 +25,9 @@ use crate::kvs::testing::{
 	inject_non_retryable_error, inject_retryable_conflict, inject_retryable_conflicts,
 	retryable_conflict_count,
 };
-use crate::kvs::tx::IndexBuildReservationRelease;
+use crate::kvs::tx::{
+	CachedIndexBuildReservationKey, CachedIndexBuildReservationLookup, IndexBuildReservationRelease,
+};
 use crate::kvs::{
 	Datastore, KVKey, KVValue, Key, TransactionType, is_retryable_transaction_conflict,
 };
@@ -536,8 +538,20 @@ async fn seed_durable_queue_generation(
 	let tx = ds.transaction(TransactionType::Write, Optimistic).await?;
 	let id = RecordIdKey::from(format!("stale-{generation}"));
 	let ticket = generation;
-	tx.set(&ikb.new_bg_key(generation, ticket), &Appending::new(None, None, id.clone())).await?;
-	tx.set(&ikb.new_bp_key(generation, id), &ticket).await?;
+	let mutation_seq = 0;
+	tx.set(
+		&ikb.new_bg_key(generation, ticket, mutation_seq),
+		&Appending::new(None, None, id.clone()),
+	)
+	.await?;
+	tx.set(
+		&ikb.new_bp_key(generation, id),
+		&PrimaryAppendingTicket {
+			ticket,
+			mutation_seq,
+		},
+	)
+	.await?;
 	tx.set(
 		&ikb.new_br_key(generation, ticket),
 		&IndexBuildReservation {
@@ -566,8 +580,17 @@ async fn seed_uncommitted_index_build_artifacts(
 	.await?;
 	let id = RecordIdKey::from("orphan".to_owned());
 	let ticket = 1;
-	tx.set(&ikb.new_bg_key(1, ticket), &Appending::new(None, None, id.clone())).await?;
-	tx.set(&ikb.new_bp_key(1, id), &ticket).await?;
+	let mutation_seq = 0;
+	tx.set(&ikb.new_bg_key(1, ticket, mutation_seq), &Appending::new(None, None, id.clone()))
+		.await?;
+	tx.set(
+		&ikb.new_bp_key(1, id),
+		&PrimaryAppendingTicket {
+			ticket,
+			mutation_seq,
+		},
+	)
+	.await?;
 	tx.set(
 		&ikb.new_br_key(1, ticket),
 		&IndexBuildReservation {
@@ -1996,6 +2019,534 @@ async fn distributed_writer_admission_does_not_extend_builder_lease() -> Result<
 	assert_eq!(taken_over.owner, Some(build.owner));
 	assert!(taken_over.owner_heartbeat_at.is_some());
 	assert!(!build_owner_expired(&taken_over, Utc::now()));
+	Ok(())
+}
+
+#[cfg(feature = "kv-mem")]
+#[tokio::test(flavor = "multi_thread")]
+async fn writer_admission_batches_reservations_per_user_transaction() -> Result<()> {
+	// A single user transaction that performs many indexed mutations against
+	// the same index must allocate exactly one durable `!br` reservation —
+	// one ticket per (user-txn, index) — and write a distinct `!bg` entry
+	// per mutation. The earlier protocol allocated one `!br` per mutation,
+	// which the per-user-txn reservation cache eliminates.
+	let (ds, session) = new_index_test_ds().await?;
+	execute_all(
+		&ds,
+		&session,
+		"
+			DEFINE TABLE user SCHEMALESS;
+			CREATE user:seed SET email = 'seed@example.com' RETURN NONE;
+			DEFINE INDEX test ON user FIELDS email;
+			",
+	)
+	.await?;
+
+	let (ns, db, table, ix) = get_table_index(&ds, "user", "test").await?;
+	let ikb = IndexKeyBase::new(ns, db, table.clone(), ix.index_id);
+	let generation = 2;
+	let building = IndexBuildState {
+		generation,
+		phase: IndexBuildPhase::Building,
+		owner: Some(ds.id()),
+		next_ticket: 0,
+		initial_complete: false,
+		updated_at: Utc::now(),
+		owner_heartbeat_at: Some(Utc::now()),
+		error: None,
+		report_status: Some(IndexBuildReportStatus::Indexing),
+		initial: None,
+		updated: None,
+		pending: None,
+	};
+	let tx = ds.transaction(TransactionType::Write, Optimistic).await?;
+	tx.set(&ikb.new_bs_key(), &building).await?;
+	tx.commit().await?;
+
+	// Single user transaction that inserts five records — all go through
+	// admission. The reservation cache should make the second through fifth
+	// inserts skip the !br write and reuse the cached ticket.
+	execute_all(
+		&ds,
+		&session,
+		"
+			BEGIN;
+			CREATE user:one SET email = 'one@example.com' RETURN NONE;
+			CREATE user:two SET email = 'two@example.com' RETURN NONE;
+			CREATE user:three SET email = 'three@example.com' RETURN NONE;
+			CREATE user:four SET email = 'four@example.com' RETURN NONE;
+			CREATE user:five SET email = 'five@example.com' RETURN NONE;
+			COMMIT;
+			",
+	)
+	.await?;
+
+	// Exactly one ticket should have been allocated by the whole user
+	// transaction's batch.
+	let tx = ds.transaction(TransactionType::Read, Optimistic).await?;
+	let after: IndexBuildState =
+		tx.get(&ikb.new_bs_key(), None).await?.expect("build state should exist");
+	tx.cancel().await?;
+	assert_eq!(
+		after.next_ticket, 1,
+		"a single user transaction must consume exactly one durable ticket regardless of mutation count"
+	);
+
+	// Five `!bg` entries, one per mutation, all sharing the same `(generation, ticket)`.
+	let tx = ds.transaction(TransactionType::Read, Optimistic).await?;
+	let bg_keys = tx.keys(ikb.new_bg_range(generation)?, u32::MAX, 0, None).await?;
+	let bp_keys = tx.keys(ikb.new_bp_range(generation)?, u32::MAX, 0, None).await?;
+	let br_keys = tx.keys(ikb.new_br_range(generation)?, u32::MAX, 0, None).await?;
+	tx.cancel().await?;
+	assert_eq!(
+		bg_keys.len(),
+		5,
+		"each indexed mutation should produce one `!bg` entry; got {} for 5 mutations",
+		bg_keys.len()
+	);
+	assert_eq!(
+		bp_keys.len(),
+		5,
+		"first-time-per-record admission during initial scan should produce one `!bp` per record; got {} for 5 records",
+		bp_keys.len()
+	);
+	assert!(
+		br_keys.is_empty(),
+		"the user transaction's close-time release should have removed the `!br`; found {} stranded reservation keys",
+		br_keys.len()
+	);
+	Ok(())
+}
+
+#[cfg(feature = "kv-mem")]
+#[tokio::test(flavor = "multi_thread")]
+async fn writer_admission_cancelled_batch_clears_durable_queue() -> Result<()> {
+	// If a user transaction's batched mutations roll back, no `!bg` may
+	// survive and the single `!br` allocated for the batch must be released
+	// from the close path.
+	let (ds, session) = new_index_test_ds().await?;
+	execute_all(
+		&ds,
+		&session,
+		"
+			DEFINE TABLE user SCHEMALESS;
+			DEFINE INDEX test ON user FIELDS email;
+			",
+	)
+	.await?;
+
+	let (ns, db, table, ix) = get_table_index(&ds, "user", "test").await?;
+	let ikb = IndexKeyBase::new(ns, db, table.clone(), ix.index_id);
+	let generation = 2;
+	let building = IndexBuildState {
+		generation,
+		phase: IndexBuildPhase::Building,
+		owner: Some(ds.id()),
+		next_ticket: 0,
+		initial_complete: false,
+		updated_at: Utc::now(),
+		owner_heartbeat_at: Some(Utc::now()),
+		error: None,
+		report_status: Some(IndexBuildReportStatus::Indexing),
+		initial: None,
+		updated: None,
+		pending: None,
+	};
+	let tx = ds.transaction(TransactionType::Write, Optimistic).await?;
+	tx.set(&ikb.new_bs_key(), &building).await?;
+	tx.commit().await?;
+
+	// Single user transaction that issues three indexed mutations then
+	// cancels. The reservation is still allocated (the !br commit is in its
+	// own short transaction), but the cancel path must release it.
+	execute_cancelled_transaction(
+		&ds,
+		&session,
+		"
+			BEGIN;
+			CREATE user:one SET email = 'one@example.com' RETURN NONE;
+			CREATE user:two SET email = 'two@example.com' RETURN NONE;
+			CREATE user:three SET email = 'three@example.com' RETURN NONE;
+			CANCEL;
+			",
+	)
+	.await?;
+
+	let tx = ds.transaction(TransactionType::Read, Optimistic).await?;
+	let after: IndexBuildState =
+		tx.get(&ikb.new_bs_key(), None).await?.expect("build state should exist");
+	let bg_keys = tx.keys(ikb.new_bg_range(generation)?, u32::MAX, 0, None).await?;
+	let bp_keys = tx.keys(ikb.new_bp_range(generation)?, u32::MAX, 0, None).await?;
+	let br_keys = tx.keys(ikb.new_br_range(generation)?, u32::MAX, 0, None).await?;
+	tx.cancel().await?;
+	assert_eq!(after.next_ticket, 1, "cancelled batch still consumes one durable ticket");
+	assert!(
+		bg_keys.is_empty(),
+		"cancelled user transaction must not leave any `!bg` entries; found {}",
+		bg_keys.len()
+	);
+	assert!(
+		bp_keys.is_empty(),
+		"cancelled user transaction must not leave any `!bp` entries; found {}",
+		bp_keys.len()
+	);
+	assert!(
+		br_keys.is_empty(),
+		"cancel path must release the durable reservation; found {} stranded `!br` keys",
+		br_keys.len()
+	);
+	Ok(())
+}
+
+#[cfg(feature = "kv-mem")]
+#[tokio::test(flavor = "multi_thread")]
+async fn cached_index_build_reservation_remove_clears_entry() -> Result<()> {
+	// `consume()` drops the cached reservation after the first-use fence
+	// returns `IndexNormally`, so subsequent mutations re-enter reservation
+	// and rediscover the online state instead of writing orphan `!bg` against
+	// a released ticket. Verify the underlying mechanic: insert, lookup hits
+	// with an incrementing `mutation_seq`, remove, lookup misses.
+	let (ds, _) = new_index_test_ds().await?;
+	let tx = ds.transaction(TransactionType::Write, Optimistic).await?;
+	let key = CachedIndexBuildReservationKey {
+		ns: NamespaceId(1),
+		db: DatabaseId(1),
+		tb: TableName::from("user"),
+		ix: IndexId(1),
+	};
+
+	assert!(
+		tx.lookup_cached_index_build_reservation(&key).await?.is_none(),
+		"empty cache should miss"
+	);
+
+	let first = tx.insert_cached_index_build_reservation(key.clone(), 1, 7, false).await;
+	match first {
+		CachedIndexBuildReservationLookup::FirstUse {
+			generation,
+			ticket,
+			mutation_seq,
+			initial_complete,
+		} => {
+			assert_eq!(generation, 1);
+			assert_eq!(ticket, 7);
+			assert_eq!(mutation_seq, 0);
+			assert!(!initial_complete);
+		}
+		CachedIndexBuildReservationLookup::Reused {
+			..
+		} => panic!("first admission must return FirstUse, not Reused"),
+	}
+
+	let reused = tx
+		.lookup_cached_index_build_reservation(&key)
+		.await?
+		.expect("cache should hit after insert");
+	match reused {
+		CachedIndexBuildReservationLookup::Reused {
+			generation,
+			ticket,
+			mutation_seq,
+			initial_complete,
+		} => {
+			assert_eq!(generation, 1);
+			assert_eq!(ticket, 7);
+			assert_eq!(mutation_seq, 1, "second mutation should consume seq 1");
+			assert!(!initial_complete);
+		}
+		CachedIndexBuildReservationLookup::FirstUse {
+			..
+		} => panic!("subsequent admission must return Reused, not FirstUse"),
+	}
+
+	tx.remove_cached_index_build_reservation(&key).await;
+	assert!(
+		tx.lookup_cached_index_build_reservation(&key).await?.is_none(),
+		"cache should miss after removal so subsequent mutations re-enter reservation"
+	);
+
+	tx.cancel().await?;
+	Ok(())
+}
+
+#[cfg(feature = "kv-mem")]
+#[tokio::test(flavor = "multi_thread")]
+async fn cached_index_build_reservation_lookup_errors_on_seq_overflow() -> Result<()> {
+	// Saturating-add would silently overwrite `!bg(gen, ticket, u32::MAX)`
+	// after `mutation_seq` clamps; the cache must instead surface an error
+	// so the user transaction is aborted before any data loss occurs.
+	let (ds, _) = new_index_test_ds().await?;
+	let tx = ds.transaction(TransactionType::Write, Optimistic).await?;
+	let key = CachedIndexBuildReservationKey {
+		ns: NamespaceId(1),
+		db: DatabaseId(1),
+		tb: TableName::from("user"),
+		ix: IndexId(1),
+	};
+
+	tx.seed_cached_index_build_reservation_for_test(key.clone(), 1, 0, false, u32::MAX).await;
+	let err = tx
+		.lookup_cached_index_build_reservation(&key)
+		.await
+		.expect_err("lookup at u32::MAX must surface an overflow error");
+	let downcast =
+		err.downcast_ref::<Error>().expect("error should be the typed IndexingBuildingCancelled");
+	assert!(
+		matches!(downcast, Error::IndexingBuildingCancelled { .. }),
+		"expected IndexingBuildingCancelled, got {downcast:?}"
+	);
+	assert!(
+		err.to_string().contains("mutation sequence overflowed"),
+		"unexpected error message: {err}"
+	);
+
+	tx.cancel().await?;
+	Ok(())
+}
+
+#[cfg(feature = "kv-mem")]
+#[tokio::test(flavor = "multi_thread")]
+async fn recheck_cached_admission_rejects_mid_transaction_state_changes() -> Result<()> {
+	// Cache reuse must revalidate the live `!bs` state every time. A
+	// generation rotation, an Online/Error transition, or vanished build
+	// state must abort the user transaction with `IndexingBuildingCancelled`
+	// — otherwise later mutations write `!bg` against a generation no
+	// builder will replay.
+	let (ds, session) = new_index_test_ds().await?;
+	execute_all(
+		&ds,
+		&session,
+		"
+				DEFINE TABLE user SCHEMALESS;
+				DEFINE INDEX test ON user FIELDS email;
+				",
+	)
+	.await?;
+	let (ns, db, table, ix) = get_table_index(&ds, "user", "test").await?;
+	let ikb = IndexKeyBase::new(ns, db, table.clone(), ix.index_id);
+
+	// Matching state — recheck succeeds.
+	seed_build_state(&ds, &ikb, IndexBuildPhase::Building, 1).await?;
+	run_recheck_cached_admission(&ds, &ikb, ix.as_ref(), 1)
+		.await?
+		.expect("recheck on matching Building state should succeed");
+
+	// Closing is still queueable.
+	seed_build_state(&ds, &ikb, IndexBuildPhase::Closing, 1).await?;
+	run_recheck_cached_admission(&ds, &ikb, ix.as_ref(), 1)
+		.await?
+		.expect("recheck on matching Closing state should succeed");
+
+	// Generation rotation — recheck aborts.
+	seed_build_state(&ds, &ikb, IndexBuildPhase::Building, 2).await?;
+	let err = run_recheck_cached_admission(&ds, &ikb, ix.as_ref(), 1)
+		.await?
+		.expect_err("generation mismatch must abort cached admission");
+	assert!(err.to_string().contains("generation"), "unexpected error: {err}");
+
+	// Online phase — cached writers cannot trust the cached ticket.
+	seed_build_state(&ds, &ikb, IndexBuildPhase::Online, 1).await?;
+	let err = run_recheck_cached_admission(&ds, &ikb, ix.as_ref(), 1)
+		.await?
+		.expect_err("online phase must abort cached admission");
+	assert!(err.to_string().contains("online"), "unexpected error: {err}");
+
+	// Error phase — same.
+	seed_build_state(&ds, &ikb, IndexBuildPhase::Error, 1).await?;
+	let err = run_recheck_cached_admission(&ds, &ikb, ix.as_ref(), 1)
+		.await?
+		.expect_err("error phase must abort cached admission");
+	assert!(
+		matches!(err.downcast_ref::<Error>(), Some(Error::IndexingBuildingCancelled { .. })),
+		"unexpected error: {err}"
+	);
+
+	// Missing state — recheck aborts.
+	let tx = ds.transaction(TransactionType::Write, Optimistic).await?;
+	tx.del(&ikb.new_bs_key()).await?;
+	tx.commit().await?;
+	let err = run_recheck_cached_admission(&ds, &ikb, ix.as_ref(), 1)
+		.await?
+		.expect_err("missing build state must abort cached admission");
+	assert!(err.to_string().contains("no longer exists"), "unexpected error: {err}");
+
+	Ok(())
+}
+
+#[cfg(feature = "kv-mem")]
+async fn seed_build_state(
+	ds: &Datastore,
+	ikb: &IndexKeyBase,
+	phase: IndexBuildPhase,
+	generation: u64,
+) -> Result<()> {
+	let mut state = IndexBuildState {
+		generation,
+		phase,
+		owner: Some(ds.id()),
+		next_ticket: 0,
+		initial_complete: false,
+		updated_at: Utc::now(),
+		owner_heartbeat_at: Some(Utc::now()),
+		error: None,
+		report_status: Some(report_status_from_phase(phase)),
+		initial: None,
+		updated: None,
+		pending: None,
+	};
+	if matches!(phase, IndexBuildPhase::Error) {
+		state.error = Some("seeded test failure".to_string());
+		state.report_status = Some(IndexBuildReportStatus::Error);
+	}
+	let tx = ds.transaction(TransactionType::Write, Optimistic).await?;
+	tx.set(&ikb.new_bs_key(), &state).await?;
+	tx.commit().await?;
+	Ok(())
+}
+
+#[cfg(feature = "kv-mem")]
+async fn run_recheck_cached_admission(
+	ds: &Datastore,
+	ikb: &IndexKeyBase,
+	ix: &IndexDefinition,
+	cached_generation: u64,
+) -> Result<Result<()>> {
+	let tx = ds.transaction(TransactionType::Read, Optimistic).await?;
+	let mut ctx = ds.setup_ctx()?;
+	let tx = Arc::new(tx);
+	ctx.set_transaction(Arc::clone(&tx));
+	let frozen = ctx.freeze();
+	let builder = frozen
+		.get_index_builder()
+		.expect("index builder should be available on the configured Datastore")
+		.clone();
+	let result = builder.recheck_cached_admission(&frozen, ikb, ix, cached_generation).await;
+	tx.cancel().await?;
+	Ok(result)
+}
+
+#[cfg(feature = "kv-mem")]
+#[tokio::test(flavor = "multi_thread")]
+async fn acquire_build_state_waits_for_prior_generation_reservations() -> Result<()> {
+	// A new-generation takeover on one node must drain in-flight `!br` from
+	// writers on *other* nodes before wiping durable build state. Without the
+	// drain, the wipe destroys the writer's anchor and the new build's
+	// initial scan can start before the writer's commit, missing main-table
+	// writes.
+	let (ds_a, ds_b, session) = new_distributed_index_test_ds().await?;
+	execute_all(
+		&ds_a,
+		&session,
+		"
+				DEFINE TABLE user SCHEMALESS;
+				DEFINE INDEX test ON user FIELDS email;
+				",
+	)
+	.await?;
+	let (ns, db, table, ix) = get_table_index(&ds_a, "user", "test").await?;
+	let ikb = IndexKeyBase::new(ns, db, table.clone(), ix.index_id);
+
+	// Seed `!bs` in `Error` so takeover takes the new-generation branch.
+	let errored = IndexBuildState {
+		generation: 1,
+		phase: IndexBuildPhase::Error,
+		owner: Some(ds_a.id()),
+		next_ticket: 1,
+		initial_complete: false,
+		updated_at: Utc::now(),
+		owner_heartbeat_at: Some(Utc::now()),
+		error: Some("seeded test failure".to_string()),
+		report_status: Some(IndexBuildReportStatus::Error),
+		initial: None,
+		updated: None,
+		pending: None,
+	};
+	let seed_tx = ds_a.transaction(TransactionType::Write, Optimistic).await?;
+	seed_tx.set(&ikb.new_bs_key(), &errored).await?;
+	let reservation = IndexBuildReservation {
+		node: ds_a.id(),
+		expires_at: Utc::now() + chrono::Duration::seconds(BUILD_RESERVATION_TTL_SECS),
+	};
+	let br_key = ikb.new_br_key(1, 0);
+	seed_tx.set(&br_key, &reservation).await?;
+	seed_tx.commit().await?;
+
+	// `ds_b` is the would-be takeover node. Its drain must block on ds_a's
+	// live `!br`.
+	let building = new_building_for_index(&ds_b, &session, ns, db, &table, Arc::clone(&ix)).await?;
+	let timeout_result =
+		timeout(Duration::from_millis(200), building.wait_for_prior_generation_reservations())
+			.await;
+	assert!(
+		timeout_result.is_err(),
+		"drain must block while another node's !br is alive in durable membership"
+	);
+
+	// Simulate ds_a's deferred release firing (e.g. user transaction committed
+	// or cancelled, removing its `!br`).
+	let release_tx = ds_a.transaction(TransactionType::Write, Optimistic).await?;
+	release_tx.del(&br_key).await?;
+	release_tx.commit().await?;
+
+	// Drain should now return promptly.
+	timeout(Duration::from_secs(5), building.wait_for_prior_generation_reservations())
+		.await
+		.expect("drain must complete after !br is removed")?;
+
+	// Takeover proceeds with generation 2 and leaves no stranded reservations.
+	let acquired =
+		building.acquire_build_state().await?.expect("takeover should succeed after drain");
+	assert_eq!(acquired.generation, 2);
+	assert!(matches!(acquired.phase, IndexBuildPhase::Building));
+	let tx = ds_a.transaction(TransactionType::Read, Optimistic).await?;
+	let br_keys = tx.keys(ikb.new_br_all_generations_range()?, u32::MAX, 0, None).await?;
+	tx.cancel().await?;
+	assert!(br_keys.is_empty(), "no `!br` should remain after a clean takeover");
+	Ok(())
+}
+
+#[cfg(feature = "kv-mem")]
+#[tokio::test(flavor = "multi_thread")]
+async fn drain_prior_generation_reservations_cleans_dead_writers() -> Result<()> {
+	// Stale `!br` from a writer whose node is no longer in durable membership
+	// must be cleaned up by the drain. Otherwise a single crashed writer
+	// would block every new-generation takeover until its TTL expired and
+	// some other mechanism removed the entry.
+	let (ds, session) = new_index_test_ds().await?;
+	execute_all(
+		&ds,
+		&session,
+		"
+				DEFINE TABLE user SCHEMALESS;
+				DEFINE INDEX test ON user FIELDS email;
+				",
+	)
+	.await?;
+	let (ns, db, table, ix) = get_table_index(&ds, "user", "test").await?;
+	let ikb = IndexKeyBase::new(ns, db, table.clone(), ix.index_id);
+
+	// Reservation owned by a node id that was never registered in durable
+	// membership (`reservation_node_is_live` returns false) and whose TTL is
+	// already past.
+	let stale_node = Uuid::new_v4();
+	let reservation = IndexBuildReservation {
+		node: stale_node,
+		expires_at: Utc::now() - chrono::Duration::seconds(1),
+	};
+	let br_key = ikb.new_br_key(1, 0);
+	let seed_tx = ds.transaction(TransactionType::Write, Optimistic).await?;
+	seed_tx.set(&br_key, &reservation).await?;
+	seed_tx.commit().await?;
+
+	let building = new_building_for_index(&ds, &session, ns, db, &table, Arc::clone(&ix)).await?;
+	timeout(Duration::from_secs(5), building.wait_for_prior_generation_reservations())
+		.await
+		.expect("drain must complete promptly for a dead writer's reservation")?;
+
+	let tx = ds.transaction(TransactionType::Read, Optimistic).await?;
+	let br_keys = tx.keys(ikb.new_br_all_generations_range()?, u32::MAX, 0, None).await?;
+	tx.cancel().await?;
+	assert!(br_keys.is_empty(), "stale `!br` from a dead writer should have been removed");
 	Ok(())
 }
 

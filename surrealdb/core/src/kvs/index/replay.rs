@@ -13,8 +13,9 @@ use web_time::Instant;
 
 use super::builder::Building;
 use super::{
-	AppendingId, BUILD_CLOSING_SLEEP, BatchId, BuildGeneration, ExistingPrimaryAppending,
-	IndexBuildPhase, IndexBuildReportStatus, LEGACY_BATCH_ID,
+	AppendingId, BUILD_CLOSING_SLEEP, BatchId, BuildGeneration, BuildTicket,
+	BuildTicketMutationSeq, ExistingPrimaryAppending, IndexBuildPhase, IndexBuildReportStatus,
+	LEGACY_BATCH_ID,
 };
 use crate::catalog::providers::NodeProvider;
 use crate::catalog::{Index, Record};
@@ -82,6 +83,21 @@ pub(crate) struct PrimaryAppending(
 );
 
 impl_kv_value_revisioned!(PrimaryAppending);
+
+/// Pointer from a per-record `!bp` marker to the specific `!bg` entry that
+/// holds the writer-observed old state for that record.
+///
+/// One reservation is allocated per user transaction per index, so the same
+/// `ticket` can cover many `!bg` entries. The `mutation_seq` selects the
+/// first admitted mutation for the marker's record.
+#[revisioned(revision = 1)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct PrimaryAppendingTicket {
+	pub(crate) ticket: BuildTicket,
+	pub(crate) mutation_seq: BuildTicketMutationSeq,
+}
+
+impl_kv_value_revisioned!(PrimaryAppendingTicket);
 
 impl PrimaryAppending {
 	#[cfg(test)]
@@ -350,8 +366,16 @@ impl Building {
 			for key in keys {
 				let br = Br::decode_key(&key)?;
 				if let Some(reservation) = tx.get(&br, None).await? {
-					let appending_committed =
-						tx.exists(&self.ikb.new_bg_key(br.generation, br.ticket), None).await?;
+					// One reservation now covers an entire user transaction's
+					// batch of mutations on this index, so existence of any
+					// `!bg(generation, ticket, *)` entry signals that the
+					// writer committed at least one mutation under this
+					// ticket. Either case (any !bg present, or writer dead)
+					// makes it safe to retire the reservation.
+					let appending_committed = !tx
+						.keys(self.ikb.new_bg_ticket_range(br.generation, br.ticket)?, 1, 0, None)
+						.await?
+						.is_empty();
 					let writer_dead = reservation.expires_at <= now
 						&& !self.reservation_node_is_live(&tx, reservation.node).await?;
 					if appending_committed || writer_dead {
@@ -367,6 +391,88 @@ impl Building {
 						&tx,
 						&err,
 						"transient conflict while cleaning build reservations, retrying",
+					)
+					.await
+				{
+					continue;
+				}
+				return Err(err);
+			}
+			if blocked {
+				sleep(BUILD_CLOSING_SLEEP).await;
+			}
+		}
+	}
+
+	/// Drain prior-generation `!br` reservations before a fresh-generation
+	/// takeover wipes durable build state.
+	///
+	/// New-generation takeover (see `acquire_build_state` in `builder.rs`) calls
+	/// `delete_durable_build_queues`, which removes `!br/!bg/!bp` for every
+	/// generation. If a writer on **any** node in the cluster is mid-transaction
+	/// with a cached `!br(prior_gen, ticket)`, that wipe destroys the anchor
+	/// the protocol relies on to keep the writer's commit visible to the new
+	/// build's initial scan.
+	///
+	/// This loop blocks the takeover until every prior-generation `!br` is
+	/// either gone (the writer's user transaction committed, the deferred
+	/// release ran, or another drainer in the cluster removed it) or the
+	/// writer's node is confirmed dead via durable membership. Once the scan
+	/// returns empty, the new build's initial scan is guaranteed to start
+	/// after every surviving writer's commit — so the writer's main-table
+	/// writes are visible to the scan even though the `!bg(prior_gen, *)`
+	/// entries are about to be wiped.
+	///
+	/// Classification matches `wait_for_durable_reservations` and uses only
+	/// durable state, so it works cross-node without in-process coordination.
+	/// Concurrent drainers race safely: each `tx.del(&br)` is a no-op once
+	/// another node has already removed the entry.
+	pub(super) async fn wait_for_prior_generation_reservations(&self) -> Result<()> {
+		let rng = self.ikb.new_br_all_generations_range()?;
+		loop {
+			if self.is_aborted().await {
+				return Ok(());
+			}
+			let keys = {
+				let tx = self.new_read_tx().await?;
+				let keys = catch!(tx, tx.keys(rng.clone(), INDEXING_BATCH_SIZE, 0, None).await);
+				tx.cancel().await?;
+				keys
+			};
+			if keys.is_empty() {
+				return Ok(());
+			}
+			let now = Utc::now();
+			let mut blocked = false;
+			let ctx = self.new_write_tx_ctx().await?;
+			let tx = ctx.tx();
+			for key in keys {
+				let br = Br::decode_key(&key)?;
+				if let Some(reservation) = tx.get(&br, None).await? {
+					// Same retire test as `wait_for_durable_reservations`: any
+					// committed `!bg(gen, ticket, *)` means the writer's user
+					// transaction committed (its main-table writes are durable),
+					// and a TTL-expired reservation owned by an inactive node
+					// means no further commit will arrive.
+					let appending_committed = !tx
+						.keys(self.ikb.new_bg_ticket_range(br.generation, br.ticket)?, 1, 0, None)
+						.await?
+						.is_empty();
+					let writer_dead = reservation.expires_at <= now
+						&& !self.reservation_node_is_live(&tx, reservation.node).await?;
+					if appending_committed || writer_dead {
+						tx.del(&br).await?;
+					} else {
+						blocked = true;
+					}
+				}
+			}
+			if let Err(err) = tx.commit().await {
+				if self
+					.cancel_and_retryable_conflict(
+						&tx,
+						&err,
+						"transient conflict draining prior-generation reservations, retrying",
 					)
 					.await
 				{
@@ -642,10 +748,10 @@ impl Building {
 				if scan.live_ids.contains(&bp.id) {
 					continue;
 				}
-				let Some(ticket) = scan.lookup_tx.get(&bp, None).await? else {
+				let Some(ptr) = scan.lookup_tx.get(&bp, None).await? else {
 					continue;
 				};
-				let bg = self.ikb.new_bg_key(bp.generation, ticket);
+				let bg = self.ikb.new_bg_key(bp.generation, ptr.ticket, ptr.mutation_seq);
 				let Some(appending) = scan.lookup_tx.get(&bg, None).await? else {
 					return Err(Error::CorruptedIndex("Durable appending record is missing").into());
 				};
@@ -713,8 +819,8 @@ impl Building {
 		let generation = self.build_generation.load(Ordering::Acquire);
 		if generation != 0 {
 			let bp = self.ikb.new_bp_key(generation, id_key.clone());
-			if let Some(ticket) = tx.get(&bp, None).await? {
-				let bg = self.ikb.new_bg_key(generation, ticket);
+			if let Some(ptr) = tx.get(&bp, None).await? {
+				let bg = self.ikb.new_bg_key(generation, ptr.ticket, ptr.mutation_seq);
 				let Some(appending) = tx.get(&bg, None).await? else {
 					return Err(Error::CorruptedIndex("Durable appending record is missing").into());
 				};

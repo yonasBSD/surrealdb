@@ -34,7 +34,7 @@ mod tests;
 use std::time::Duration;
 
 pub(crate) use builder::{IndexBuilder, IndexMutation};
-pub(crate) use replay::{Appending, PrimaryAppending};
+pub(crate) use replay::{Appending, PrimaryAppending, PrimaryAppendingTicket};
 pub(crate) use state::{
 	IndexBuildPhase, IndexBuildReportStatus, IndexBuildReservation, IndexBuildState,
 	filter_online_indexes, index_building_info, retire_durable_index,
@@ -49,7 +49,19 @@ use crate::kvs::tx::IndexBuildReservationRelease;
 /// older build attempt.
 pub(crate) type BuildGeneration = u64;
 /// Per-generation ordering token assigned to a writer admitted during a build.
+///
+/// A single user transaction reserves one `BuildTicket` per index it writes to;
+/// every indexed mutation in that transaction shares the ticket and is
+/// disambiguated by `BuildTicketMutationSeq`.
 pub(crate) type BuildTicket = u64;
+/// Per-ticket index of an admitted mutation, distinguishing the different
+/// `!bg` entries that share the same `(generation, ticket)` reservation.
+///
+/// The first mutation in a user transaction's batch uses `0`; subsequent
+/// mutations use `1`, `2`, ... A `u32` gives a per-user-transaction cap of
+/// ~4.3B mutations per index, which is well above any realistic single-txn
+/// indexed write count.
+pub(crate) type BuildTicketMutationSeq = u32;
 
 /// How long a writer admission reservation is considered owned by the writer.
 const BUILD_RESERVATION_TTL_SECS: i64 = 30;
