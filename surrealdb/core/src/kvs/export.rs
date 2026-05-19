@@ -140,9 +140,9 @@ impl<F: fmt::Write> fmt::Write for InlineCommentWriter<'_, F> {
 			'\r' => self.0.write_str("\\r"),
 			// NEL/Next Line
 			'\u{0085}' => self.0.write_str("\\u{0085}"),
-			// line seperator
+			// line separator
 			'\u{2028}' => self.0.write_str("\\u{2028}"),
-			// Paragraph seperator
+			// Paragraph separator
 			'\u{2029}' => self.0.write_str("\\u{2029}"),
 			_ => self.0.write_char(c),
 		}

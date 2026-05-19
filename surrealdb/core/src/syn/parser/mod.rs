@@ -12,7 +12,7 @@
 //!   that the given token type is next and if not returns a parser error.
 //! - Whenever a limited set of tokens can be next it is common to match the token kind and then
 //!   have a catch all arm which calles the macro `unexpected!`. This macro will raise an parse
-//!   error with information about the type of token it recieves and what it expected.
+//!   error with information about the type of token it receives and what it expected.
 //! - If a single token can be optionally next use [`Parser::eat`] this function returns a bool
 //!   depending on if the given tokenkind was eaten.
 //! - If a closing delimiting token is expected use `Parser::expect_closing_delimiter`. This

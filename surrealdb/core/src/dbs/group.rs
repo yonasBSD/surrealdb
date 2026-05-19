@@ -19,11 +19,11 @@ use crate::val::{Number, TryFloatDiv, Value};
 ///
 /// This works by having the iterator return the full value of the record.
 /// The group collector has pulled out all the aggregate expressions from selectors and is updating
-/// those as it recieves values.
+/// those as it receives values.
 ///
 /// Once all the values are collected the collector then does the field calculation replacing the
 /// spaces in the expressions where the aggregate expressions used to be with the values it
-/// calcualted.
+/// calculated.
 #[derive(Debug)]
 pub struct GroupCollector {
 	analysis: AggregationAnalysis,

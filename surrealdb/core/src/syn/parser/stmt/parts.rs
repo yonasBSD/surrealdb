@@ -435,12 +435,9 @@ impl Parser<'_> {
 		}
 	}
 
-	// TODO(gguillemas): Deprecated in 2.0.0. Kept for backward compatibility. Drop
-	// it in 3.0.0.
-	/// Parses a base
+	/// Parses a base.
 	///
-	/// So either `NAMESPACE`, `DATABASE`, `ROOT`, or `SCOPE` if `scope_allowed`
-	/// is true.
+	/// Either `NAMESPACE`, `DATABASE`, or `ROOT`.
 	///
 	/// # Parser state
 	/// Expects the next keyword to be a base.
@@ -451,7 +448,7 @@ impl Parser<'_> {
 			t!("DATABASE") => Ok(Base::Db),
 			t!("ROOT") => Ok(Base::Root),
 			_ => {
-				unexpected!(self, next, "'NAMEPSPACE', 'DATABASE' or 'ROOT'")
+				unexpected!(self, next, "'NAMESPACE', 'DATABASE' or 'ROOT'")
 			}
 		}
 	}

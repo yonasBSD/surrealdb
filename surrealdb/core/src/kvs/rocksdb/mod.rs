@@ -65,7 +65,7 @@ pub struct Datastore {
 	/// column family. Propagated to each transaction so range scans can
 	/// pick the correct prefix-seek mode without consulting global state.
 	prefix_extractor_enabled: bool,
-	/// threshold of estimeded size above which we run a scan in seperate thread.
+	/// threshold of estimated size above which we run a scan in separate thread.
 	inline_scan_threshold: u32,
 	/// Whether scan/count `ReadOptions` set `verify_checksums(true)`.
 	/// When false, CRC32C verification is skipped on cold block reads.
@@ -105,7 +105,7 @@ pub struct Transaction {
 	/// column family. Controls whether `apply_prefix_mode` sets
 	/// `prefix_same_as_start` / `total_order_seek` on scan `ReadOptions`.
 	prefix_extractor_enabled: bool,
-	/// threshold of estimeded size above which we run a scan in seperate thread.
+	/// threshold of estimated size above which we run a scan in separate thread.
 	inline_scan_threshold: u32,
 	/// Whether scan/count `ReadOptions` set `verify_checksums(true)`.
 	scan_verify_checksums: bool,
