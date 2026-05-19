@@ -2535,6 +2535,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferntree"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c61e94ab9b1d56c01922863b022039ef2cbb57e9dbf7bf237df5ae1e91b97676"
+dependencies = [
+ "bytes",
+ "crossbeam-epoch",
+ "parking_lot",
+ "parking_lot_core",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ff"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7893,9 +7906,9 @@ dependencies = [
 
 [[package]]
 name = "surrealmx"
-version = "0.18.0"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6508449a7d1379a92a51ba49391b48ccab0b60dd11a4277c0dda965d8c99dbff"
+checksum = "dc91af30db8f7c730025ddc4e487e4bf4aee1c1abbd683bd2076b97ef5e7c8af"
 dependencies = [
  "arc-swap",
  "bincode",
@@ -7903,6 +7916,7 @@ dependencies = [
  "crossbeam-deque",
  "crossbeam-queue",
  "crossbeam-skiplist",
+ "ferntree",
  "lz4",
  "papaya",
  "parking_lot",

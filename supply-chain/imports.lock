@@ -1000,15 +1000,15 @@ user-login = "seanmonstar"
 user-name = "Sean McArthur"
 
 [[publisher.revision]]
-version = "0.20.0"
-when = "2026-05-09"
+version = "0.22.0"
+when = "2026-05-17"
 user-id = 145457
 user-login = "tobiemh"
 user-name = "Tobie Morgan Hitchcock"
 
 [[publisher.revision-derive]]
-version = "0.20.0"
-when = "2026-05-09"
+version = "0.22.0"
+when = "2026-05-17"
 user-id = 145457
 user-login = "tobiemh"
 user-name = "Tobie Morgan Hitchcock"
@@ -1223,8 +1223,8 @@ user-login = "tobiemh"
 user-name = "Tobie Morgan Hitchcock"
 
 [[publisher.surrealmx]]
-version = "0.18.0"
-when = "2026-02-19"
+version = "0.20.0"
+when = "2026-05-19"
 user-id = 145457
 user-login = "tobiemh"
 user-name = "Tobie Morgan Hitchcock"
