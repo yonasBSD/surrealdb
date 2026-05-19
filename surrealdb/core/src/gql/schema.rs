@@ -1156,8 +1156,20 @@ pub(crate) fn gql_to_sql_kind_with_scope(
 			}
 			_ => Err(type_error(kind, val)),
 		},
-		// TODO: handle nested eithers
-		Kind::Either(ref ks) => {
+		Kind::Either(ks) => {
+			// Parser-built unions are already flat, so only pay the
+			// `Kind::either` flatten + de-dupe cost when a nested variant is
+			// actually present. Flattening may collapse the union to a single
+			// variant; recurse in that case.
+			let ks = if ks.iter().any(|k| matches!(k, Kind::Either(_))) {
+				let flat = Kind::either(ks);
+				let Kind::Either(ks) = flat else {
+					return gql_to_sql_kind_with_scope(val, flat, enum_scope);
+				};
+				ks
+			} else {
+				ks
+			};
 			use Kind::*;
 
 			match val {
@@ -1167,12 +1179,12 @@ pub(crate) fn gql_to_sql_kind_with_scope(
 					} else if ks.contains(&Kind::Null) {
 						Ok(SurValue::Null)
 					} else {
-						Err(type_error(kind, val))
+						Err(type_error(Kind::Either(ks), val))
 					}
 				}
 				num @ GqlValue::Number(_) => {
 					either_try_kind!(ks, num, AllNumbers);
-					Err(type_error(kind, val))
+					Err(type_error(Kind::Either(ks), val))
 				}
 				string @ GqlValue::String(_) => {
 					either_try_kinds!(
@@ -1180,25 +1192,25 @@ pub(crate) fn gql_to_sql_kind_with_scope(
 						String
 					);
 					either_try_kind!(ks, string, Kind::Object);
-					Err(type_error(kind, val))
+					Err(type_error(Kind::Either(ks), val))
 				}
 				bool @ GqlValue::Boolean(_) => {
 					either_try_kind!(ks, bool, Kind::Bool);
-					Err(type_error(kind, val))
+					Err(type_error(Kind::Either(ks), val))
 				}
 				GqlValue::Binary(_) => {
 					Err(resolver_error("binary input for Either is not yet supported"))
 				}
 				GqlValue::Enum(n) => {
-					if let Some(literal) = enum_token_to_literal(ks, n.as_str(), enum_scope) {
+					if let Some(literal) = enum_token_to_literal(&ks, n.as_str(), enum_scope) {
 						return Ok(SurValue::String(literal.into()));
 					}
 					either_try_kind!(ks, &GqlValue::String(n.to_string()), Kind::String);
-					Err(type_error(kind, val))
+					Err(type_error(Kind::Either(ks), val))
 				}
 				list @ GqlValue::List(_) => {
 					either_try_kind!(ks, list, Kind::Array);
-					Err(type_error(kind, val))
+					Err(type_error(Kind::Either(ks), val))
 				}
 				obj @ GqlValue::Object(_) => {
 					// Try geometry kinds first (geometry inputs are objects)
@@ -1208,7 +1220,7 @@ pub(crate) fn gql_to_sql_kind_with_scope(
 						}
 					}
 					either_try_kind!(ks, obj, Kind::Object);
-					Err(type_error(kind, val))
+					Err(type_error(Kind::Either(ks), val))
 				}
 			}
 		}
@@ -1645,4 +1657,39 @@ pub(crate) fn geometry_to_gql_object(g: &SurGeometry) -> Result<GqlValue, GqlErr
 	}
 
 	Ok(GqlValue::Object(map))
+}
+
+#[cfg(test)]
+mod tests {
+	use async_graphql::Number;
+
+	use super::*;
+
+	#[test]
+	fn either_flattens_nested_variants() {
+		// `Kind::Either` nested inside another `Kind::Either` must still resolve
+		// correctly. The parser normally flattens these, but the runtime path
+		// must also handle them defensively for programmatically built kinds.
+		let kind = Kind::Either(vec![Kind::Either(vec![Kind::Int, Kind::String]), Kind::Bool]);
+
+		let int_val = GqlValue::Number(Number::from(7));
+		assert_eq!(gql_to_sql_kind(&int_val, kind.clone()).unwrap(), SurValue::from(7i64));
+
+		let str_val = GqlValue::String("hi".to_owned());
+		assert_eq!(gql_to_sql_kind(&str_val, kind.clone()).unwrap(), SurValue::from("hi"));
+
+		let bool_val = GqlValue::Boolean(true);
+		assert_eq!(gql_to_sql_kind(&bool_val, kind).unwrap(), SurValue::from(true));
+	}
+
+	#[test]
+	fn either_collapses_single_variant_after_dedup() {
+		// After flattening + de-duplication, an `Either` may collapse to a
+		// single variant. The runtime path should recurse and convert against
+		// that bare kind rather than failing.
+		let kind = Kind::Either(vec![Kind::Int, Kind::Either(vec![Kind::Int, Kind::Int])]);
+
+		let val = GqlValue::Number(Number::from(42));
+		assert_eq!(gql_to_sql_kind(&val, kind).unwrap(), SurValue::from(42i64));
+	}
 }
