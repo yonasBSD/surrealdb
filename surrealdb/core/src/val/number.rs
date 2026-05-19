@@ -602,10 +602,14 @@ impl Number {
 
 	pub fn fixed(self, precision: usize) -> Number {
 		match self {
-			// FIXME: This is so cursed, there has to be a better way get a certain amount of
-			// precision then formatting to a string and then parsing it again.
-			Number::Int(v) => format!("{v:.precision$}").parse().unwrap_or_default(),
-			Number::Float(v) => format!("{v:.precision$}").parse().unwrap_or_default(),
+			Number::Int(v) => v.into(),
+			// Truncate via the formatter so subnormals and very large
+			// magnitudes (which would overflow a `10^precision` multiplier)
+			// stay representable; non-finite f64s round-trip too.
+			Number::Float(v) => format!("{v:.precision$}")
+				.parse::<f64>()
+				.expect("formatted f64 always parses back as f64")
+				.into(),
 			Number::Decimal(v) => v.round_dp(precision as u32).into(),
 		}
 	}
@@ -1409,6 +1413,50 @@ mod tests {
 		assert_eq!(
 			Number::Decimal(Decimal::from_str_normalized("1.5").unwrap()).as_array_index(),
 			None,
+		);
+	}
+
+	#[test]
+	fn fixed_int_is_unchanged_regardless_of_precision() {
+		assert_eq!(Number::Int(101).fixed(0), Number::Int(101));
+		assert_eq!(Number::Int(101).fixed(2), Number::Int(101));
+		assert_eq!(Number::Int(101).fixed(319), Number::Int(101));
+		assert_eq!(Number::Int(-7).fixed(5), Number::Int(-7));
+	}
+
+	#[test]
+	fn fixed_float_rounds_to_requested_precision() {
+		assert_eq!(Number::Float(101.5).fixed(2), Number::Float(101.5));
+		assert_eq!(Number::Float(101.1111111).fixed(2), Number::Float(101.11));
+		// Subnormal at precision past f64's significant-digit range: the
+		// trailing digits get truncated, producing a smaller-but-finite
+		// neighbour rather than 0, inf, or NaN.
+		assert_eq!(
+			Number::Float(2.2250738585072014e-308).fixed(319),
+			Number::Float(2.22507385851e-308),
+		);
+	}
+
+	#[test]
+	fn fixed_float_preserves_non_finite() {
+		// The Float arm relies on `format!`/`parse` round-tripping every
+		// f64 — including NaN and ±inf. Pin that invariant here so a future
+		// change to the formatter cannot silently break the `expect` in
+		// `Number::fixed`.
+		let Number::Float(nan) = Number::Float(f64::NAN).fixed(2) else {
+			panic!("expected Number::Float(NaN)");
+		};
+		assert!(nan.is_nan());
+		assert_eq!(Number::Float(f64::INFINITY).fixed(2), Number::Float(f64::INFINITY));
+		assert_eq!(Number::Float(f64::NEG_INFINITY).fixed(2), Number::Float(f64::NEG_INFINITY));
+	}
+
+	#[test]
+	fn fixed_decimal_uses_round_dp() {
+		let d = Decimal::from_str_normalized("1.2345").unwrap();
+		assert_eq!(
+			Number::Decimal(d).fixed(2),
+			Number::Decimal(Decimal::from_str_normalized("1.23").unwrap()),
 		);
 	}
 }
