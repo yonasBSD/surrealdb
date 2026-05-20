@@ -1,6 +1,7 @@
 //TODO: Remove once cache and other backends are properly implemented.
 #![allow(dead_code)]
 
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -177,6 +178,11 @@ pub async fn run(color: ColorMode, parent: &ArgMatches, current: &ArgMatches) ->
 		});
 
 	let set = set_builder.build();
+
+	if set.is_empty() {
+		println!("No benchmarks found, exiting");
+		return Ok(());
+	}
 
 	let mut measurements = Vec::new();
 	for i in set.into_iter() {
@@ -386,11 +392,14 @@ async fn run_bench(
 	let bench_config = &run.case.test.config.parsed.bench;
 
 	let warmup_time = bench_config.warmup.0;
+	let token = tokio_util::sync::CancellationToken::new();
 
 	let before_warmup = Instant::now();
 	let mut count = 0usize;
 	loop {
-		let dbs = builder_from_config(&run.case.test.config.parsed).build_with_path("mem").await?;
+		let dbs = Arc::new(
+			builder_from_config(&run.case.test.config.parsed).build_with_path("mem").await?,
+		);
 
 		let session =
 			util::session_from_test_config(&run.case.test.config.parsed, config.new_planner.into());
@@ -398,6 +407,8 @@ async fn run_bench(
 		if let Some(e) = util::run_imports(run, session.clone(), &dbs).await? {
 			return Ok(BenchRunResult::Import(e));
 		}
+
+		Datastore::index_compaction(dbs.clone(), Duration::from_secs(1), token.clone()).await?;
 
 		let _ = dbs.execute(&run.case.test.source, &session, None).await?;
 
@@ -437,8 +448,9 @@ async fn run_bench(
 	for _ in 0..bench_config.sample_size {
 		let mut sample_duration = 0.0;
 		for _ in 0..iterations_per_samples {
-			let dbs =
-				builder_from_config(&run.case.test.config.parsed).build_with_path("mem").await?;
+			let dbs = Arc::new(
+				builder_from_config(&run.case.test.config.parsed).build_with_path("mem").await?,
+			);
 
 			let session = util::session_from_test_config(
 				&run.case.test.config.parsed,
@@ -448,6 +460,8 @@ async fn run_bench(
 			if let Some(e) = util::run_imports(run, session.clone(), &dbs).await? {
 				return Ok(BenchRunResult::Import(e));
 			}
+
+			Datastore::index_compaction(dbs.clone(), Duration::from_secs(1), token.clone()).await?;
 
 			let start = Instant::now();
 			let _ = dbs.execute(&run.case.test.source, &session, None).await?;

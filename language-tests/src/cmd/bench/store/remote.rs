@@ -125,6 +125,8 @@ impl RemoteStore {
 		let mut params = Object::new();
 		params.insert("user", cfg.user.clone().into_value());
 		params.insert("pass", cfg.password.clone().into_value());
+		params.insert("ns", cfg.ns.clone().into_value());
+		params.insert("db", cfg.db.clone().into_value());
 
 		self.cmd("signin", vec![params.into_value()]).await.context("Login failed")?;
 		self.cmd("use", vec![cfg.ns.clone().into_value(), cfg.db.clone().into_value()])

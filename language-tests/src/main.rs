@@ -16,16 +16,13 @@ use cli::ColorMode;
 /// consume more stack than plain debug. The default ~2 MiB thread stack is insufficient for deep
 /// parser / planner / executor recursion.
 fn runtime_worker_stack_size() -> usize {
-	std::env::var("SURREAL_RUNTIME_STACK_SIZE")
-		.ok()
-		.and_then(|v| v.parse().ok())
-		.unwrap_or_else(|| {
-			if cfg!(debug_assertions) {
-				20 * 1024 * 1024
-			} else {
-				10 * 1024 * 1024
-			}
-		})
+	std::env::var("SURREAL_RUNTIME_STACK_SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or({
+		if cfg!(debug_assertions) {
+			20 * 1024 * 1024
+		} else {
+			10 * 1024 * 1024
+		}
+	})
 }
 
 fn main() -> Result<()> {

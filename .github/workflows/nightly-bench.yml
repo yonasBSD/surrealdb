@@ -1,0 +1,48 @@
+name: Nightly benchmark
+
+on:
+  #push:
+  #  branches:
+  #    - main
+  #pull_request:
+  #  types:
+  #    - opened
+  #    - synchronize
+  #    - reopened
+
+  schedule:
+    - cron: "0 0 * * *" # Run every night at 12 a clock
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  bench:
+    name: Nightly benchmark
+    runs-on: [self-hosted, benchmarking]
+    if: ${{ github.repository == 'surrealdb/surrealdb-private' }} # Don't run outside the private repo
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # stable
+        with:
+          toolchain: stable
+
+      - name: Build language bench suite
+        run: |
+          cd language-tests
+
+          cargo build --release --features bench,bench-remote-store
+
+      - name: Run language suite
+        run: |
+          sudo ./.github/scripts/quiet_system.py ./language-tests/target/release/surrealql-test bench \
+            --store-url ${{ secrets.BENCH_DS_URL }} \
+            --store-user ${{ secrets.BENCH_DS_USER }} \
+            --store-password ${{ secrets.BENCH_DS_PASS }} \
+            run \
+            --path language-tests/tests \
+            --save
