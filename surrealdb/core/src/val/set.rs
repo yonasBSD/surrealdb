@@ -9,11 +9,17 @@ use crate::val::{IndexFormat, Value};
 /// Internal Set type that stores unique values
 ///
 /// Sets use [`VecSet`] internally to maintain uniqueness and sorted order.
-#[revisioned(revision = 1)]
+///
+/// - **Rev 1** — `u16 revision || VecSet<Value>` (length-prefixed). Byte-identical to the legacy
+///   on-disk encoding.
+/// - **Rev 2** — optimised envelope (`u16 revision || u32_le payload_length`), inner `VecSet`
+///   written via the indexed-set prologue past `OFFSET_TABLE_MIN_LEN = 8`. Walker descent stays
+///   zero-allocation through PR-63's Wire-repr fast path (skip + borrow).
+#[revisioned(revision(1), revision(2, optimised))]
 #[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Hash, Encode, BorrowDecode)]
 #[storekey(format = "()")]
 #[storekey(format = "IndexFormat")]
-pub(crate) struct Set(pub(crate) VecSet<Value>);
+pub(crate) struct Set(#[revision(indexed_set)] pub(crate) VecSet<Value>);
 
 impl Set {
 	/// Create a new empty set

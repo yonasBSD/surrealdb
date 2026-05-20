@@ -173,9 +173,9 @@ impl SkipRevisioned for TableName {
 }
 
 impl revision::WalkRevisioned for TableName {
-	type Walker<'r, R: Read + 'r> = revision::LeafWalker<'r, TableName, R>;
+	type Walker<'r, R: revision::BorrowedReader + 'r> = revision::LeafWalker<'r, TableName, R>;
 
-	fn walk_revisioned<'r, R: Read>(
+	fn walk_revisioned<'r, R: revision::BorrowedReader>(
 		reader: &'r mut R,
 	) -> Result<Self::Walker<'r, R>, revision::Error> {
 		Ok(revision::LeafWalker::new(reader))

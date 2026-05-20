@@ -782,7 +782,7 @@ impl<'ctx> Planner<'ctx> {
 				} else {
 					None
 				};
-			let pdf = Self::pre_decode_filter_status_for(
+			let pdf = self.pre_decode_filter_status_for(
 				resolved_table_ctx.as_ref(),
 				None,
 				needed_fields.as_ref(),
@@ -1197,7 +1197,7 @@ impl<'ctx> Planner<'ctx> {
 			let record_id_expr = self.physical_expr(rid_expr).await?;
 			let resolved_table_ctx: Option<ResolvedTableContext> =
 				self.try_resolve_table_ctx(table_name).await;
-			let pdf = Self::pre_decode_filter_status_for(
+			let pdf = self.pre_decode_filter_status_for(
 				resolved_table_ctx.as_ref(),
 				scan_predicate.as_ref(),
 				needed_fields.as_ref(),
@@ -1615,7 +1615,7 @@ impl<'ctx> Planner<'ctx> {
 		} else {
 			(None, None, false)
 		};
-		let pdf = Self::pre_decode_filter_status_for(
+		let pdf = self.pre_decode_filter_status_for(
 			table_ctx.as_ref(),
 			scan_predicate.as_ref(),
 			needed_fields.as_ref(),
@@ -1898,7 +1898,7 @@ impl<'ctx> Planner<'ctx> {
 				None
 			};
 		let source_expr = self.physical_expr(expr).await?;
-		let pdf = Self::pre_decode_filter_status_for(
+		let pdf = self.pre_decode_filter_status_for(
 			resolved_table_ctx.as_ref(),
 			scan_predicate.as_ref(),
 			needed_fields.as_ref(),
@@ -1931,12 +1931,21 @@ impl<'ctx> Planner<'ctx> {
 	/// [`pre_decode_filter_status_at_plan_time`] used by [`TableScan`], [`DynamicScan`] and
 	/// [`RecordIdScan`] planning paths.
 	fn pre_decode_filter_status_for(
+		&self,
 		table_ctx: Option<&ResolvedTableContext>,
 		predicate: Option<&Arc<dyn crate::exec::PhysicalExpr>>,
 		needed_fields: Option<&std::collections::HashSet<String>>,
 	) -> crate::exec::pre_decode_filter::PreDecodeFilterStatus {
 		let projected = table_ctx.map(|tc| tc.field_state_for_projection(needed_fields));
-		pre_decode_filter_status_at_plan_time(predicate, projected.as_ref())
+		// `idiom_recursion_limit` is shared with the SurrealQL `RECURSE` /
+		// `@@` planner (`compute_idiom_recursion`); reusing it caps both
+		// the SurrealQL-level recursion and the pre-decode walker descent
+		// at a single, user-configurable limit (default 256).
+		pre_decode_filter_status_at_plan_time(
+			predicate,
+			projected.as_ref(),
+			self.ctx.config.idiom_recursion_limit,
+		)
 	}
 
 	/// Try to resolve a `ResolvedTableContext` for the given table.

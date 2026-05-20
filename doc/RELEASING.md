@@ -25,6 +25,10 @@ The release workflow is designed to handle two types of releases:
 
 The workflow is **fully idempotent**, meaning you can safely retry any release without errors or duplicate resources.
 
+> For per-release operational notes that administrators should read before
+> deploying a new build (wire-format rotations, removed features, etc.),
+> see [`UPGRADING.md`](./UPGRADING.md).
+
 ## Release Types
 
 ### Nightly Releases

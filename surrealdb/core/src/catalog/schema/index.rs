@@ -55,10 +55,10 @@ impl SkipRevisioned for IndexId {
 }
 
 impl revision::WalkRevisioned for IndexId {
-	type Walker<'r, R: std::io::Read + 'r> = revision::LeafWalker<'r, IndexId, R>;
+	type Walker<'r, R: revision::BorrowedReader + 'r> = revision::LeafWalker<'r, IndexId, R>;
 
 	#[inline]
-	fn walk_revisioned<'r, R: std::io::Read>(
+	fn walk_revisioned<'r, R: revision::BorrowedReader>(
 		reader: &'r mut R,
 	) -> Result<Self::Walker<'r, R>, revision::Error> {
 		Ok(revision::LeafWalker::new(reader))

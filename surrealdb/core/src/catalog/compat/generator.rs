@@ -970,8 +970,12 @@ fn recordid_key_fixtures() -> TypeFixtures {
 	}
 }
 
-/// Generate all fixtures and output as Rust code
-fn generate_all_fixtures() -> String {
+/// Generate all fixtures and output as Rust code.
+///
+/// `file_stem` is the version-tag identifier used in the file name and
+/// header (e.g. `"v3_0_0"`, `"v3_1_0"`). `human_version` is the
+/// release-version string for the docstring (e.g. `"3.0.0"`, `"3.1.0"`).
+fn generate_all_fixtures(file_stem: &str, human_version: &str) -> String {
 	let all_fixtures = vec![
 		access_definition_fixtures(),
 		access_grant_fixtures(),
@@ -1011,11 +1015,13 @@ fn generate_all_fixtures() -> String {
 	];
 
 	let mut output = String::new();
-	output.push_str("//! v3_0_0.rs - Generated file, DO NOT EDIT\n");
-	output.push_str("//! Catalog compatibility fixtures for SurrealDB 3.0.0\n");
+	output.push_str(&format!("//! {file_stem}.rs - Generated file, DO NOT EDIT\n"));
+	output.push_str(&format!("//! Catalog compatibility fixtures for SurrealDB {human_version}\n"));
 	output.push_str("//!\n");
 	output.push_str("//! These fixtures represent the exact serialization format used in\n");
-	output.push_str("//! SurrealDB 3.0.0. They must NEVER be modified after being committed.\n");
+	output.push_str(&format!(
+		"//! SurrealDB {human_version}. They must NEVER be modified after being committed.\n"
+	));
 	output.push_str("//! If deserialization of any fixture fails, it indicates a backwards\n");
 	output.push_str("//! compatibility regression.\n");
 
@@ -1034,22 +1040,46 @@ fn generate_all_fixtures() -> String {
 	output
 }
 
-/// Test that generates fixture output - run with --ignored flag
-#[test]
-#[ignore]
-fn generator() {
+/// Shared body for the version-specific generator tests below.
+fn run_generator(file_stem: &str, human_version: &str) {
 	use sha2::{Digest, Sha256};
 
-	let output = generate_all_fixtures();
-	println!("Copy the following output to surrealdb/core/src/catalog/compat/v3_0_0.rs");
+	let output = generate_all_fixtures(file_stem, human_version);
+	println!("Copy the following output to surrealdb/core/src/catalog/compat/{file_stem}.rs");
 	println!("--- EVERYTHING BELOW ---");
 	println!("{}", output);
 	println!("--- EVERYTHING ABOVE ---");
-	println!("\n// Copy the above output to surrealdb/core/src/catalog/compat/v3_0_0.rs");
+	println!("\n// Copy the above output to surrealdb/core/src/catalog/compat/{file_stem}.rs");
 
 	let hash = Sha256::digest(output.as_bytes());
 	let hash_str = hex::encode(hash);
 	println!("The expected hash is: {}", hash_str);
+}
+
+/// Test that generates fixture output for 3.0.0 - run with --ignored flag.
+/// Kept for parity with the original generator; the v3_0_0.rs file is
+/// frozen at this point so re-running this should only be useful for
+/// regenerating against a fresh fixtures.rs (which would also break the
+/// hash check below).
+#[test]
+#[ignore]
+fn generator() {
+	run_generator("v3_0_0", "3.0.0");
+}
+
+/// Generate fixture bytes for the 3.1.0 wire format snapshot. Run with:
+///
+/// ```text
+/// cargo test -p surrealdb-core --lib \
+///     catalog::compat::generator::generator_v3_1_0 -- --ignored --nocapture
+/// ```
+///
+/// Copy the output into `v3_1_0.rs`, then paste the printed hash into
+/// the assertion in `test_v3_1_0_remains_unchanged` below.
+#[test]
+#[ignore]
+fn generator_v3_1_0() {
+	run_generator("v3_1_0", "3.1.0");
 }
 
 #[test]
@@ -1083,4 +1113,20 @@ fn test_v3_0_0_remains_unchanged() {
 	let hash = Sha256::digest(v3_0_0);
 	let hash_str = hex::encode(hash);
 	assert_eq!(hash_str, "042aa56204bff3007e371be6968e9c684430556f32654b5cee7107a5c1677f4d");
+}
+
+#[test]
+fn test_v3_1_0_remains_unchanged() {
+	use sha2::{Digest, Sha256};
+
+	// Read the v3_1_0.rs file, hash it and assert on the hash.
+	// v3_1_0 is the rev-2 wire format snapshot adopted by PR #206; see
+	// `surrealdb/core/src/val/mod.rs:72-93` for the rationale on Value's
+	// rev-2 walker. NEVER modify v3_1_0.rs after commit; if a real
+	// format change ships, capture a new version snapshot rather than
+	// rotating this hash.
+	let v3_1_0 = include_bytes!("v3_1_0.rs");
+	let hash = Sha256::digest(v3_1_0);
+	let hash_str = hex::encode(hash);
+	assert_eq!(hash_str, "20bfc0b99f3c19fa64a609b0c0a693f96e5c9890833b5fe0c5bb57de15b7af0c");
 }

@@ -635,10 +635,10 @@ impl revision::SkipRevisioned for Strand {
 }
 
 impl revision::WalkRevisioned for Strand {
-	type Walker<'r, R: std::io::Read + 'r> = revision::LeafWalker<'r, Strand, R>;
+	type Walker<'r, R: revision::BorrowedReader + 'r> = revision::LeafWalker<'r, Strand, R>;
 
 	#[inline]
-	fn walk_revisioned<'r, R: std::io::Read>(
+	fn walk_revisioned<'r, R: revision::BorrowedReader>(
 		reader: &'r mut R,
 	) -> Result<Self::Walker<'r, R>, Error> {
 		Ok(revision::LeafWalker::new(reader))

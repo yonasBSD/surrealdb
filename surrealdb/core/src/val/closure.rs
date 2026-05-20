@@ -306,9 +306,9 @@ impl revision::SkipRevisioned for Closure {
 }
 
 impl revision::WalkRevisioned for Closure {
-	type Walker<'r, R: std::io::Read + 'r> = revision::LeafWalker<'r, Closure, R>;
+	type Walker<'r, R: revision::BorrowedReader + 'r> = revision::LeafWalker<'r, Closure, R>;
 
-	fn walk_revisioned<'r, R: std::io::Read>(
+	fn walk_revisioned<'r, R: revision::BorrowedReader>(
 		reader: &'r mut R,
 	) -> Result<Self::Walker<'r, R>, revision::Error> {
 		// Closures never appear on the wire; expose a leaf walker whose

@@ -238,12 +238,19 @@ pub(crate) enum Evidence {
 #[derive(Debug)]
 pub(crate) struct PreDecodeFilter {
 	pub(crate) root: PredNode,
+	/// Hard cap on path-segment count for any pre-decode descent. Sourced
+	/// from `ctx.config.idiom_recursion_limit` at the planner; bounds the
+	/// stack and intermediate allocations done by
+	/// [`crate::val::object_extract`]'s walker descent. Paths longer than
+	/// the limit fall back to full-record decode + post-decode evaluation.
+	pub(crate) depth_limit: u32,
 }
 
 impl PreDecodeFilter {
-	pub(crate) fn new(root: PredNode) -> Self {
+	pub(crate) fn new(root: PredNode, depth_limit: u32) -> Self {
 		Self {
 			root,
+			depth_limit,
 		}
 	}
 
@@ -338,8 +345,26 @@ impl PreDecodeFilter {
 				Record::walk_revisioned(&mut reader).map_err(|_| WalkLeafErr::Bail)?;
 			record_walker.skip_metadata().map_err(|_| WalkLeafErr::Bail)?;
 			let value_walker = record_walker.into_walk_data().map_err(|_| WalkLeafErr::Bail)?;
-			match descend_to_value_walker_parts(value_walker, prefix, path) {
-				DescendResult::Found(w) => Ok(evaluator.evaluate(w)),
+			// Closure form: the descent holds the navigated value's owning
+			// `OwnedIndexedMapView` alive on its stack while we open a fresh
+			// `Value` walker from the borrowed bytes and hand it to the
+			// streaming evaluator. The `Evidence` return type doesn't borrow
+			// from the walker, so we can hand it back across the closure.
+			let result: DescendResult<Result<Evidence, WalkLeafErr>> =
+				descend_to_value_walker_parts(
+					value_walker,
+					prefix,
+					path,
+					self.depth_limit,
+					|value_bytes| {
+						let mut reader: &[u8] = value_bytes;
+						let w = <Value as revision::WalkRevisioned>::walk_revisioned(&mut reader)
+							.map_err(|_| WalkLeafErr::Bail)?;
+						Ok(evaluator.evaluate(w))
+					},
+				);
+			match result {
+				DescendResult::Found(inner) => inner,
 				DescendResult::Missing => Err(WalkLeafErr::Missing),
 				DescendResult::Bail => Err(WalkLeafErr::Bail),
 			}
@@ -366,7 +391,7 @@ impl PreDecodeFilter {
 		full: &[String],
 		fallback: &LeafFallback,
 	) -> Evidence {
-		match extract_field_from_record_bytes(record_bytes, full) {
+		match extract_field_from_record_bytes(record_bytes, full, self.depth_limit) {
 			Extracted::Found(v) => {
 				evidence_from_binary_cmp(&fallback.op, &fallback.literal, fallback.reversed, &v)
 			}
@@ -389,7 +414,12 @@ impl PreDecodeFilter {
 		op: &BinaryOperator,
 		set: &HashSet<Value>,
 	) -> Evidence {
-		let v = match extract_field_from_record_bytes_parts(record_bytes, prefix, path) {
+		let v = match extract_field_from_record_bytes_parts(
+			record_bytes,
+			prefix,
+			path,
+			self.depth_limit,
+		) {
 			Extracted::Found(v) => v,
 			Extracted::Missing => Value::None,
 			Extracted::Bail => return Evidence::Unknown,
@@ -444,7 +474,7 @@ impl PreDecodeFilter {
 		}
 		// Walk the record, descending `prefix` then `path` without
 		// concatenating into a fresh `Vec<String>` per row.
-		match extract_field_from_record_bytes_parts(record_bytes, prefix, path) {
+		match extract_field_from_record_bytes_parts(record_bytes, prefix, path, self.depth_limit) {
 			Extracted::Found(v) => evidence_from_binary_cmp(op, literal, reversed, &v),
 			Extracted::Missing => evidence_from_binary_cmp(op, literal, reversed, &Value::None),
 			Extracted::Bail => Evidence::Unknown,
@@ -471,7 +501,12 @@ impl PreDecodeFilter {
 		// `PredNode::FusedFlatMapAnd` is metadata used by `compile.rs` to
 		// classify nested vs root clauses for field-state checks; the
 		// evaluator infers anchoring from `prefix` alone.
-		match scan_record_object_at_path_for_keys_sorted(record_bytes, prefix, clauses.as_slice()) {
+		match scan_record_object_at_path_for_keys_sorted(
+			record_bytes,
+			prefix,
+			clauses.as_slice(),
+			self.depth_limit,
+		) {
 			ScanResult::Bail => Evidence::Unknown,
 			ScanResult::Missing => combine_and(clauses.iter().map(|clause| {
 				evidence_from_binary_cmp(&clause.op, &clause.literal, clause.reversed, &Value::None)
@@ -599,6 +634,11 @@ mod tests {
 	use crate::expr::operator::BinaryOperator;
 	use crate::val::{Number, Object, Value};
 
+	/// Depth limit used in test fixtures. Matches the default
+	/// `ctx.config.idiom_recursion_limit` (256) so test behaviour reflects
+	/// the production planner's wiring.
+	const TEST_DEPTH_LIMIT: u32 = 256;
+
 	fn wire_record_plain_object(obj: Object) -> Vec<u8> {
 		let val = Value::Object(obj);
 		let mut vb = Vec::new();
@@ -613,7 +653,7 @@ mod tests {
 
 	#[test]
 	fn empty_and_never_rejects() {
-		let pf = PreDecodeFilter::new(PredNode::And(Vec::new()));
+		let pf = PreDecodeFilter::new(PredNode::And(Vec::new()), TEST_DEPTH_LIMIT);
 		let rec = wire_record_plain_object(Object::default());
 		assert_eq!(pf.apply(&[], &rec), PreDecodeFilterOutcome::NeedFullDecode);
 	}
@@ -626,7 +666,7 @@ mod tests {
 			literal: Value::Number(Number::Int(1)),
 			reversed: false,
 		};
-		let pf = PreDecodeFilter::new(root);
+		let pf = PreDecodeFilter::new(root, TEST_DEPTH_LIMIT);
 		let obj =
 			Object::from(BTreeMap::from([(Strand::from("a"), Value::Number(Number::Int(2)))]));
 		let rec = wire_record_plain_object(obj);
@@ -642,7 +682,7 @@ mod tests {
 			set,
 			reversed: false,
 		};
-		let pf = PreDecodeFilter::new(root);
+		let pf = PreDecodeFilter::new(root, TEST_DEPTH_LIMIT);
 		let obj =
 			Object::from(BTreeMap::from([(Strand::from("a"), Value::Number(Number::Int(1)))]));
 		let rec = wire_record_plain_object(obj);
@@ -658,7 +698,7 @@ mod tests {
 			set,
 			reversed: false,
 		};
-		let pf = PreDecodeFilter::new(root);
+		let pf = PreDecodeFilter::new(root, TEST_DEPTH_LIMIT);
 		let obj =
 			Object::from(BTreeMap::from([(Strand::from("a"), Value::Number(Number::Int(99)))]));
 		let rec = wire_record_plain_object(obj);
@@ -674,7 +714,7 @@ mod tests {
 			set,
 			reversed: false,
 		};
-		let pf = PreDecodeFilter::new(root);
+		let pf = PreDecodeFilter::new(root, TEST_DEPTH_LIMIT);
 		let obj =
 			Object::from(BTreeMap::from([(Strand::from("a"), Value::Number(Number::Int(1)))]));
 		let rec = wire_record_plain_object(obj);
@@ -690,7 +730,7 @@ mod tests {
 			set,
 			reversed: false,
 		};
-		let pf = PreDecodeFilter::new(root);
+		let pf = PreDecodeFilter::new(root, TEST_DEPTH_LIMIT);
 		let obj =
 			Object::from(BTreeMap::from([(Strand::from("a"), Value::Number(Number::Int(2)))]));
 		let rec = wire_record_plain_object(obj);
@@ -706,7 +746,7 @@ mod tests {
 			set,
 			reversed: false,
 		};
-		let pf = PreDecodeFilter::new(root);
+		let pf = PreDecodeFilter::new(root, TEST_DEPTH_LIMIT);
 		let obj =
 			Object::from(BTreeMap::from([(Strand::from("a"), Value::Number(Number::Int(5)))]));
 		let rec = wire_record_plain_object(obj);
@@ -721,7 +761,7 @@ mod tests {
 			literal: Value::String("needle".into()),
 			reversed: false,
 		};
-		let pf = PreDecodeFilter::new(root);
+		let pf = PreDecodeFilter::new(root, TEST_DEPTH_LIMIT);
 		let obj =
 			Object::from(BTreeMap::from([(Strand::from("msg"), Value::String("hello".into()))]));
 		let rec = wire_record_plain_object(obj);
@@ -736,7 +776,7 @@ mod tests {
 			literal: Value::from(vec![Value::String("x".into()), Value::String("y".into())]),
 			reversed: false,
 		};
-		let pf = PreDecodeFilter::new(root);
+		let pf = PreDecodeFilter::new(root, TEST_DEPTH_LIMIT);
 		let obj = Object::from(BTreeMap::from([(
 			Strand::from("tags"),
 			Value::from(vec![Value::String("a".into()), Value::String("b".into())]),
@@ -755,7 +795,7 @@ mod tests {
 			reversed: false,
 		};
 		let root = PredNode::Not(Box::new(inner));
-		let pf = PreDecodeFilter::new(root);
+		let pf = PreDecodeFilter::new(root, TEST_DEPTH_LIMIT);
 		let obj =
 			Object::from(BTreeMap::from([(Strand::from("a"), Value::Number(Number::Int(1)))]));
 		let rec = wire_record_plain_object(obj);
@@ -773,7 +813,7 @@ mod tests {
 			]),
 			reversed: false,
 		};
-		let pf = PreDecodeFilter::new(root);
+		let pf = PreDecodeFilter::new(root, TEST_DEPTH_LIMIT);
 		let obj = Object::from(BTreeMap::from([(
 			Strand::from("arr"),
 			Value::from(vec![Value::Number(Number::Int(3))]),
@@ -793,7 +833,7 @@ mod tests {
 				reversed: false,
 			}),
 		};
-		let pf = PreDecodeFilter::new(root);
+		let pf = PreDecodeFilter::new(root, TEST_DEPTH_LIMIT);
 		let obj =
 			Object::from(BTreeMap::from([(Strand::from("a"), Value::Number(Number::Int(2)))]));
 		let rec = wire_record_plain_object(obj);
@@ -813,7 +853,7 @@ mod tests {
 				reversed: false,
 			}),
 		};
-		let pf = PreDecodeFilter::new(root);
+		let pf = PreDecodeFilter::new(root, TEST_DEPTH_LIMIT);
 		// Record has no `outer` key.
 		let obj =
 			Object::from(BTreeMap::from([(Strand::from("other"), Value::Number(Number::Int(2)))]));
@@ -847,7 +887,7 @@ mod tests {
 				clauses: inner,
 			}),
 		};
-		let pf = PreDecodeFilter::new(root);
+		let pf = PreDecodeFilter::new(root, TEST_DEPTH_LIMIT);
 		// Record has no `outer` key.
 		let obj =
 			Object::from(BTreeMap::from([(Strand::from("z"), Value::Number(Number::Int(99)))]));
@@ -885,7 +925,7 @@ mod tests {
 				}),
 			}),
 		};
-		let pf = PreDecodeFilter::new(root);
+		let pf = PreDecodeFilter::new(root, TEST_DEPTH_LIMIT);
 		// {outer: {inner: {a: 1, b: 99}}} — clause `b == 2` is provably false.
 		let inner = Object::from(BTreeMap::from([
 			(Strand::from("a"), Value::Number(Number::Int(1))),
@@ -926,7 +966,7 @@ mod tests {
 				}),
 			}),
 		};
-		let pf = PreDecodeFilter::new(root);
+		let pf = PreDecodeFilter::new(root, TEST_DEPTH_LIMIT);
 		let inner = Object::from(BTreeMap::from([
 			(Strand::from("a"), Value::Number(Number::Int(1))),
 			(Strand::from("b"), Value::Number(Number::Int(2))),
@@ -993,7 +1033,7 @@ mod tests {
 				reversed: false,
 			},
 		};
-		let pf = PreDecodeFilter::new(root);
+		let pf = PreDecodeFilter::new(root, TEST_DEPTH_LIMIT);
 		let obj =
 			Object::from(BTreeMap::from([(Strand::from("msg"), Value::String("hello".into()))]));
 		let rec = wire_record_plain_object(obj);
@@ -1016,7 +1056,7 @@ mod tests {
 				reversed: false,
 			},
 		};
-		let pf = PreDecodeFilter::new(root);
+		let pf = PreDecodeFilter::new(root, TEST_DEPTH_LIMIT);
 		let obj =
 			Object::from(BTreeMap::from([(Strand::from("n"), Value::Number(Number::Int(1)))]));
 		let rec = wire_record_plain_object(obj);
@@ -1039,7 +1079,7 @@ mod tests {
 				reversed: false,
 			},
 		};
-		let pf = PreDecodeFilter::new(root);
+		let pf = PreDecodeFilter::new(root, TEST_DEPTH_LIMIT);
 		let obj = Object::from(BTreeMap::from([(
 			Strand::from("tags"),
 			Value::from(vec![Value::Number(Number::Int(1)), Value::Number(Number::Int(2))]),
@@ -1066,7 +1106,7 @@ mod tests {
 				reversed: false,
 			},
 		};
-		let pf = PreDecodeFilter::new(root);
+		let pf = PreDecodeFilter::new(root, TEST_DEPTH_LIMIT);
 		let obj = Object::from(BTreeMap::from([(
 			Strand::from("tags"),
 			Value::from(vec![Value::String("a".into()), Value::String("b".into())]),
@@ -1094,7 +1134,7 @@ mod tests {
 				reversed: false,
 			},
 		};
-		let pf = PreDecodeFilter::new(root);
+		let pf = PreDecodeFilter::new(root, TEST_DEPTH_LIMIT);
 		let obj = Object::from(BTreeMap::from([(
 			Strand::from("a"),
 			Value::from(vec![Value::Number(Number::Int(1))]),
@@ -1121,7 +1161,7 @@ mod tests {
 				reversed: false,
 			},
 		};
-		let pf = PreDecodeFilter::new(root);
+		let pf = PreDecodeFilter::new(root, TEST_DEPTH_LIMIT);
 		let obj = Object::from(BTreeMap::from([(
 			Strand::from("tags"),
 			Value::from(vec![Value::String("a".into()), Value::String("z".into())]),
@@ -1146,7 +1186,7 @@ mod tests {
 				reversed: false,
 			},
 		};
-		let pf = PreDecodeFilter::new(root);
+		let pf = PreDecodeFilter::new(root, TEST_DEPTH_LIMIT);
 		let obj =
 			Object::from(BTreeMap::from([(Strand::from("a"), Value::Number(Number::Int(2)))]));
 		let rec = wire_record_plain_object(obj);
@@ -1182,7 +1222,7 @@ mod tests {
 				clauses,
 			}),
 		};
-		let pf = PreDecodeFilter::new(root);
+		let pf = PreDecodeFilter::new(root, TEST_DEPTH_LIMIT);
 		// `outer` is present and is an object, but only carries `a`; `b` is
 		// absent. The fused evaluator should treat `b` as `Value::None`,
 		// reduce the AND to ProvablyFalse, and reject the row.

@@ -8,7 +8,7 @@ use revision::{Revisioned, SerializeRevisioned};
 use surrealdb_strand::Strand;
 
 use super::{
-	Extracted, ScanResult, descend_record_value_path, descend_value_slice_path,
+	Extracted, ScanResult, TEST_DEPTH_LIMIT, descend_record_value_path, descend_value_slice_path,
 	extract_field_from_record_bytes, scan_record_object_at_path_for_keys_sorted,
 	scan_record_root_object_for_keys_sorted,
 };
@@ -34,7 +34,7 @@ fn extract_existing_top_level_field() {
 		(Strand::from("b"), Value::Bool(true)),
 	]));
 	let rec = wire_record_plain_object(obj);
-	let result = extract_field_from_record_bytes(&rec, &[String::from("b")]);
+	let result = extract_field_from_record_bytes(&rec, &[String::from("b")], TEST_DEPTH_LIMIT);
 	match result {
 		Extracted::Found(Value::Bool(true)) => {}
 		other => panic!("expected Found(Bool(true)), got {:?}", other),
@@ -46,7 +46,11 @@ fn extract_nested_field_descends_correctly() {
 	let inner = Object::from(BTreeMap::from([(Strand::from("x"), Value::Number(Number::Int(42)))]));
 	let outer = Object::from(BTreeMap::from([(Strand::from("o"), Value::Object(inner))]));
 	let rec = wire_record_plain_object(outer);
-	let result = extract_field_from_record_bytes(&rec, &[String::from("o"), String::from("x")]);
+	let result = extract_field_from_record_bytes(
+		&rec,
+		&[String::from("o"), String::from("x")],
+		TEST_DEPTH_LIMIT,
+	);
 	assert!(matches!(result, Extracted::Found(Value::Number(Number::Int(42)))));
 }
 
@@ -54,7 +58,8 @@ fn extract_nested_field_descends_correctly() {
 fn missing_key_yields_missing() {
 	let obj = Object::from(BTreeMap::from([(Strand::from("only"), Value::Number(Number::Int(1)))]));
 	let rec = wire_record_plain_object(obj);
-	let result = extract_field_from_record_bytes(&rec, &[String::from("missing")]);
+	let result =
+		extract_field_from_record_bytes(&rec, &[String::from("missing")], TEST_DEPTH_LIMIT);
 	assert!(matches!(result, Extracted::Missing));
 }
 
@@ -78,7 +83,8 @@ fn edge_metadata_extracts_data() {
 	};
 	let mut bytes = Vec::new();
 	rec.serialize_revisioned(&mut bytes).unwrap();
-	let result = extract_field_from_record_bytes(&bytes, &[String::from("score")]);
+	let result =
+		extract_field_from_record_bytes(&bytes, &[String::from("score")], TEST_DEPTH_LIMIT);
 	match result {
 		Extracted::Found(Value::Number(Number::Int(7))) => {}
 		other => panic!("expected Found(Int(7)) for edge data, got {:?}", other),
@@ -107,7 +113,8 @@ fn aggregation_view_metadata_extracts_data() {
 	};
 	let mut bytes = Vec::new();
 	rec.serialize_revisioned(&mut bytes).unwrap();
-	let result = extract_field_from_record_bytes(&bytes, &[String::from("total")]);
+	let result =
+		extract_field_from_record_bytes(&bytes, &[String::from("total")], TEST_DEPTH_LIMIT);
 	match result {
 		Extracted::Found(Value::Number(Number::Int(42))) => {}
 		other => panic!("expected Found(Int(42)) for aggregation row data, got {:?}", other),
@@ -117,7 +124,7 @@ fn aggregation_view_metadata_extracts_data() {
 #[test]
 fn empty_path_bails() {
 	let rec = wire_record_plain_object(Object::default());
-	let result = extract_field_from_record_bytes(&rec, &[]);
+	let result = extract_field_from_record_bytes(&rec, &[], TEST_DEPTH_LIMIT);
 	assert!(matches!(result, Extracted::Bail));
 }
 
@@ -189,7 +196,7 @@ fn scan_record_object_at_path_walks_nested_object() {
 
 	let needles: &[&[u8]] = &[b"a", b"b", b"missing"];
 	let path = [String::from("outer")];
-	let result = scan_record_object_at_path_for_keys_sorted(&rec, &path, needles);
+	let result = scan_record_object_at_path_for_keys_sorted(&rec, &path, needles, TEST_DEPTH_LIMIT);
 	match result {
 		ScanResult::Found(values) => {
 			assert_eq!(values.len(), 3);
@@ -213,7 +220,7 @@ fn scan_record_object_at_path_missing_intermediate_yields_missing() {
 
 	let needles: &[&[u8]] = &[b"a"];
 	let path = [String::from("outer"), String::from("inner")];
-	let result = scan_record_object_at_path_for_keys_sorted(&rec, &path, needles);
+	let result = scan_record_object_at_path_for_keys_sorted(&rec, &path, needles, TEST_DEPTH_LIMIT);
 	assert!(matches!(result, ScanResult::Missing));
 }
 
@@ -227,7 +234,7 @@ fn scan_record_object_at_path_non_object_intermediate_bails() {
 
 	let needles: &[&[u8]] = &[b"a"];
 	let path = [String::from("outer"), String::from("anything")];
-	let result = scan_record_object_at_path_for_keys_sorted(&rec, &path, needles);
+	let result = scan_record_object_at_path_for_keys_sorted(&rec, &path, needles, TEST_DEPTH_LIMIT);
 	assert!(matches!(result, ScanResult::Bail));
 }
 
@@ -250,7 +257,7 @@ fn extract_handles_non_ascii_keys() {
 	]));
 	let rec = wire_record_plain_object(obj);
 	for (key, expected) in [("café", 1i64), ("naïve", 2), ("日本", 3)] {
-		match extract_field_from_record_bytes(&rec, &[String::from(key)]) {
+		match extract_field_from_record_bytes(&rec, &[String::from(key)], TEST_DEPTH_LIMIT) {
 			Extracted::Found(Value::Number(Number::Int(n))) => {
 				assert_eq!(n, expected, "wrong value for key {key:?}")
 			}
@@ -269,6 +276,71 @@ fn extract_handles_non_ascii_keys() {
 	}
 }
 
+/// Build a record whose `data` is a chain of `depth` nested objects, each
+/// containing a single field named `"x"` pointing at the next level, with the
+/// innermost level holding `Value::Bool(true)`.
+fn wire_record_nested_x(depth: usize) -> Vec<u8> {
+	let mut value = Value::Bool(true);
+	for _ in 0..depth {
+		let mut entries = BTreeMap::new();
+		entries.insert(Strand::from("x"), value);
+		value = Value::Object(Object::from(entries));
+	}
+	let Value::Object(obj) = value else {
+		unreachable!("at least one level wrapped")
+	};
+	wire_record_plain_object(obj)
+}
+
+#[test]
+fn descent_bails_past_depth_limit() {
+	// Depth-limit guard: a path strictly longer than the configured cap
+	// returns `Bail` regardless of whether the data is present — this is
+	// the defensive cap that prevents pathological deep paths from
+	// pressuring the descent's per-level allocations.
+	let depth = 8usize;
+	let rec = wire_record_nested_x(depth);
+	let path: Vec<String> = std::iter::repeat_n(String::from("x"), depth).collect();
+	let limit: u32 = (depth as u32) - 1;
+
+	let extracted = super::extract_field_from_record_bytes(&rec, &path, limit);
+	assert!(
+		matches!(extracted, Extracted::Bail),
+		"expected Bail when path length {} > depth_limit {}, got {:?}",
+		path.len(),
+		limit,
+		extracted
+	);
+}
+
+#[test]
+fn descent_succeeds_at_exact_depth_limit() {
+	// Boundary: a path with length exactly equal to `depth_limit` must not
+	// be rejected by the cap — the check is strict `>` not `>=`.
+	let depth = 8usize;
+	let rec = wire_record_nested_x(depth);
+	let path: Vec<String> = std::iter::repeat_n(String::from("x"), depth).collect();
+	let limit: u32 = depth as u32;
+
+	let extracted = super::extract_field_from_record_bytes(&rec, &path, limit);
+	match extracted {
+		Extracted::Found(Value::Bool(true)) => {}
+		other => {
+			panic!("expected Found(true) at depth == depth_limit == {}, got {:?}", depth, other)
+		}
+	}
+}
+
+#[test]
+fn descent_bails_on_zero_depth_limit() {
+	// Trivial edge case: a zero limit always bails because every real
+	// descent has at least one segment.
+	let rec = wire_record_nested_x(1);
+	let path = vec![String::from("x")];
+	let extracted = super::extract_field_from_record_bytes(&rec, &path, 0);
+	assert!(matches!(extracted, Extracted::Bail));
+}
+
 #[test]
 fn scan_record_object_at_path_with_empty_path_falls_back_to_root() {
 	// Empty path should produce the same scan output as the root-only
@@ -280,7 +352,7 @@ fn scan_record_object_at_path_with_empty_path_falls_back_to_root() {
 	let rec = wire_record_plain_object(obj);
 
 	let needles: &[&[u8]] = &[b"a", b"missing", b"z"];
-	let via_path = scan_record_object_at_path_for_keys_sorted(&rec, &[], needles);
+	let via_path = scan_record_object_at_path_for_keys_sorted(&rec, &[], needles, TEST_DEPTH_LIMIT);
 	let via_root = scan_record_root_object_for_keys_sorted(&rec, needles).expect("plain row");
 	match via_path {
 		ScanResult::Found(values) => {

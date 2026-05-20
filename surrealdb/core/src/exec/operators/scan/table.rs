@@ -259,6 +259,7 @@ impl ExecOperator for TableScan {
 				&pre_decode_filter_status,
 				&field_state,
 				check_perms,
+				ctx.ctx().config.idiom_recursion_limit,
 			);
 			let mut source = kv_scan_stream(
 				Arc::clone(&txn), beg, end, version,

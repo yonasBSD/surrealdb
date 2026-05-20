@@ -232,7 +232,7 @@ jobs:
           depot-runner: 'true'
 
       - name: Install revision-lock
-        run: cargo install revision-lock
+        run: cargo install revision-lock --version 0.2.0 --locked
 
       - name: Check revision.lock
         run: revision-lock --check

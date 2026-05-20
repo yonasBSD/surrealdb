@@ -326,9 +326,9 @@ impl revision::SkipRevisioned for Idiom {
 }
 
 impl revision::WalkRevisioned for Idiom {
-	type Walker<'r, R: std::io::Read + 'r> = revision::LeafWalker<'r, Idiom, R>;
+	type Walker<'r, R: revision::BorrowedReader + 'r> = revision::LeafWalker<'r, Idiom, R>;
 
-	fn walk_revisioned<'r, R: std::io::Read>(
+	fn walk_revisioned<'r, R: revision::BorrowedReader>(
 		reader: &'r mut R,
 	) -> Result<Self::Walker<'r, R>, revision::Error> {
 		Ok(revision::LeafWalker::new(reader))

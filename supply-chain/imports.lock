@@ -449,13 +449,6 @@ user-id = 6825
 user-login = "sunfishcode"
 user-name = "Dan Gohman"
 
-[[publisher.filetime]]
-version = "0.2.27"
-when = "2026-01-18"
-user-id = 1
-user-login = "alexcrichton"
-user-name = "Alex Crichton"
-
 [[publisher.flatbuffers]]
 version = "25.12.19"
 when = "2025-12-19"
@@ -492,8 +485,8 @@ user-login = "seanmonstar"
 user-name = "Sean McArthur"
 
 [[publisher.h2]]
-version = "0.4.13"
-when = "2026-01-05"
+version = "0.4.14"
+when = "2026-05-04"
 user-id = 359
 user-login = "seanmonstar"
 user-name = "Sean McArthur"
@@ -511,8 +504,8 @@ user-id = 55123
 user-login = "rust-lang-owner"
 
 [[publisher.hashbrown]]
-version = "0.17.0"
-when = "2026-04-09"
+version = "0.17.1"
+when = "2026-05-09"
 user-id = 55123
 user-login = "rust-lang-owner"
 
@@ -944,8 +937,8 @@ user-login = "bluss"
 user-name = "bluss"
 
 [[publisher.rcgen]]
-version = "0.14.7"
-when = "2026-01-19"
+version = "0.14.8"
+when = "2026-05-11"
 user-id = 4556
 user-login = "djc"
 user-name = "Dirkjan Ochtman"
@@ -1000,15 +993,15 @@ user-login = "seanmonstar"
 user-name = "Sean McArthur"
 
 [[publisher.revision]]
-version = "0.22.0"
-when = "2026-05-17"
+version = "0.23.0"
+when = "2026-05-20"
 user-id = 145457
 user-login = "tobiemh"
 user-name = "Tobie Morgan Hitchcock"
 
 [[publisher.revision-derive]]
-version = "0.22.0"
-when = "2026-05-17"
+version = "0.23.0"
+when = "2026-05-20"
 user-id = 145457
 user-login = "tobiemh"
 user-name = "Tobie Morgan Hitchcock"
@@ -1195,8 +1188,8 @@ user-login = "tobiemh"
 user-name = "Tobie Morgan Hitchcock"
 
 [[publisher.surrealdb-protocol]]
-version = "0.10.1"
-when = "2026-03-23"
+version = "0.10.2"
+when = "2026-05-17"
 user-id = 145457
 user-login = "tobiemh"
 user-name = "Tobie Morgan Hitchcock"
@@ -1243,13 +1236,6 @@ user-id = 6825
 user-login = "sunfishcode"
 user-name = "Dan Gohman"
 
-[[publisher.tar]]
-version = "0.4.45"
-when = "2026-03-19"
-user-id = 1
-user-login = "alexcrichton"
-user-name = "Alex Crichton"
-
 [[publisher.target-lexicon]]
 version = "0.13.5"
 when = "2026-02-15"
@@ -1291,6 +1277,13 @@ when = "2024-07-18"
 user-id = 498
 user-login = "ruuda"
 user-name = "Ruud van Asseldonk"
+
+[[publisher.tokio]]
+version = "1.52.3"
+when = "2026-05-08"
+user-id = 6741
+user-login = "Darksonn"
+user-name = "Alice Ryhl"
 
 [[publisher.tokio-io-timeout]]
 version = "1.2.1"
@@ -1363,8 +1356,8 @@ user-login = "seanmonstar"
 user-name = "Sean McArthur"
 
 [[publisher.tower-http]]
-version = "0.6.8"
-when = "2025-12-08"
+version = "0.6.11"
+when = "2026-05-18"
 user-id = 359
 user-login = "seanmonstar"
 user-name = "Sean McArthur"
@@ -1424,6 +1417,13 @@ when = "2026-01-06"
 user-id = 359
 user-login = "seanmonstar"
 user-name = "Sean McArthur"
+
+[[publisher.unicode-segmentation]]
+version = "1.13.2"
+when = "2026-03-26"
+user-id = 1139
+user-login = "Manishearth"
+user-name = "Manish Goregaokar"
 
 [[publisher.unicode-width]]
 version = "0.2.2"
@@ -1506,8 +1506,8 @@ when = "2026-02-12"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasm-encoder]]
-version = "0.248.0"
-when = "2026-04-28"
+version = "0.249.0"
+when = "2026-05-15"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasm-metadata]]
@@ -1527,8 +1527,8 @@ when = "2026-02-12"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasmparser]]
-version = "0.248.0"
-when = "2026-04-28"
+version = "0.249.0"
+when = "2026-05-15"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasmprinter]]
@@ -1612,13 +1612,13 @@ when = "2026-04-30"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.wast]]
-version = "248.0.0"
-when = "2026-04-28"
+version = "249.0.0"
+when = "2026-05-15"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wat]]
-version = "1.248.0"
-when = "2026-04-28"
+version = "1.249.0"
+when = "2026-05-15"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wiggle]]
@@ -1669,6 +1669,13 @@ user-id = 64539
 user-login = "kennykerr"
 user-name = "Kenny Kerr"
 
+[[publisher.windows-core]]
+version = "0.62.2"
+when = "2025-10-06"
+user-id = 64539
+user-login = "kennykerr"
+user-name = "Kenny Kerr"
+
 [[publisher.windows-future]]
 version = "0.2.1"
 when = "2025-05-15"
@@ -1704,9 +1711,23 @@ user-id = 64539
 user-login = "kennykerr"
 user-name = "Kenny Kerr"
 
+[[publisher.windows-result]]
+version = "0.4.1"
+when = "2025-10-06"
+user-id = 64539
+user-login = "kennykerr"
+user-name = "Kenny Kerr"
+
 [[publisher.windows-strings]]
 version = "0.4.2"
 when = "2025-05-19"
+user-id = 64539
+user-login = "kennykerr"
+user-name = "Kenny Kerr"
+
+[[publisher.windows-strings]]
+version = "0.5.1"
+when = "2025-10-06"
 user-id = 64539
 user-login = "kennykerr"
 user-name = "Kenny Kerr"
@@ -1880,8 +1901,8 @@ user-login = "epage"
 user-name = "Ed Page"
 
 [[publisher.winnow]]
-version = "1.0.2"
-when = "2026-04-21"
+version = "1.0.3"
+when = "2026-05-14"
 user-id = 6743
 user-login = "epage"
 user-name = "Ed Page"
@@ -2862,12 +2883,6 @@ criteria = "safe-to-deploy"
 delta = "0.50.1 -> 0.50.3"
 notes = "CI changes, Rust changes, nothing out of the ordinary."
 
-[[audits.bytecode-alliance.audits.num-conv]]
-who = "Alex Crichton <alex@alexcrichton.com>"
-criteria = "safe-to-deploy"
-delta = "0.2.0 -> 0.2.1"
-notes = "Minor update, nothing major"
-
 [[audits.bytecode-alliance.audits.num-traits]]
 who = "Andrew Brown <andrew.brown@intel.com>"
 criteria = "safe-to-deploy"
@@ -2897,22 +2912,10 @@ who = "Nick Fitzgerald <fitzgen@gmail.com>"
 criteria = "safe-to-deploy"
 delta = "0.37.3 -> 0.38.1"
 
-[[audits.bytecode-alliance.audits.openssl]]
-who = "Alex Crichton <alex@alexcrichton.com>"
-criteria = "safe-to-deploy"
-delta = "0.10.78 -> 0.10.79"
-notes = "Fixing known holes and binding minor new APIs."
-
 [[audits.bytecode-alliance.audits.openssl-macros]]
 who = "Pat Hickey <phickey@fastly.com>"
 criteria = "safe-to-deploy"
 version = "0.1.0"
-
-[[audits.bytecode-alliance.audits.openssl-sys]]
-who = "Alex Crichton <alex@alexcrichton.com>"
-criteria = "safe-to-deploy"
-delta = "0.9.114 -> 0.9.115"
-notes = "MSRV updates and other minor changes, all normal."
 
 [[audits.bytecode-alliance.audits.parking]]
 who = "Chris Fallin <chris@cfallin.org>"
@@ -3258,6 +3261,12 @@ criteria = "safe-to-deploy"
 version = "1.4.0"
 notes = "Contains no unsafe"
 aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.bit-vec]]
+who = "George Burgess IV <gbiv@google.com>"
+criteria = "safe-to-run"
+version = "0.6.3"
+aggregated-from = "https://chromium.googlesource.com/chromiumos/third_party/rust_crates/+/refs/heads/main/cargo-vet/audits.toml?format=TEXT"
 
 [[audits.google.audits.bitflags]]
 who = "Lukasz Anforowicz <lukasza@chromium.org>"
@@ -4126,6 +4135,15 @@ end = "2025-10-23"
 notes = "I, Henri Sivonen, wrote encoding_rs for Gecko and have reviewed contributions by others. There are two caveats to the certification: 1) The crate does things that are documented to be UB but that do not appear to actually be UB due to integer types differing from the general rule; https://github.com/hsivonen/encoding_rs/issues/79 . 2) It would be prudent to re-review the code that reinterprets buffers of integers as SIMD vectors; see https://github.com/hsivonen/encoding_rs/issues/87 ."
 aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
 
+[[audits.mozilla.wildcard-audits.unicode-segmentation]]
+who = "Manish Goregaokar <manishsmail@gmail.com>"
+criteria = "safe-to-deploy"
+user-id = 1139 # Manish Goregaokar (Manishearth)
+start = "2019-05-15"
+end = "2027-04-23"
+notes = "All code written or reviewed by Manish"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
 [[audits.mozilla.wildcard-audits.unicode-width]]
 who = "Manish Goregaokar <manishsmail@gmail.com>"
 criteria = "safe-to-deploy"
@@ -4140,7 +4158,7 @@ who = "Manish Goregaokar <manishsmail@gmail.com>"
 criteria = "safe-to-deploy"
 user-id = 1139 # Manish Goregaokar (Manishearth)
 start = "2019-07-25"
-end = "2026-02-01"
+end = "2027-04-23"
 notes = "All code written or reviewed by Manish"
 aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
 
@@ -4257,6 +4275,24 @@ who = "Emilio Cobos Álvarez <emilio@crisal.io>"
 criteria = "safe-to-deploy"
 delta = "0.69.4 -> 0.72.0"
 notes = "I'm the primary maintainer of this crate."
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.bit-vec]]
+who = "Teodor Tanasoaia <ttanasoaia@mozilla.com>"
+criteria = "safe-to-deploy"
+delta = "0.6.3 -> 0.7.0"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.bit-vec]]
+who = "Jim Blandy <jimb@red-bean.com>"
+criteria = "safe-to-deploy"
+delta = "0.7.0 -> 0.8.0"
+aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.bit-vec]]
+who = "Erich Gubler <erichdongubler@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "0.8.0 -> 0.9.1"
 aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.bitflags]]
@@ -4745,23 +4781,6 @@ who = "Gabriele Svelto <gsvelto@mozilla.com>"
 criteria = "safe-to-deploy"
 delta = "0.29.0 -> 0.30.1"
 notes = "Some new wrappers, support for minor platforms and lots of work around type safety that reduces the unsafe surafce."
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
-
-[[audits.mozilla.audits.num-conv]]
-who = "Alex Franchuk <afranchuk@mozilla.com>"
-criteria = "safe-to-deploy"
-version = "0.1.0"
-notes = """
-Very straightforward, simple crate. No dependencies, unsafe, extern,
-side-effectful std functions, etc.
-"""
-aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
-
-[[audits.mozilla.audits.num-conv]]
-who = "Lars Eggert <lars@eggert.org>"
-criteria = "safe-to-deploy"
-delta = "0.1.0 -> 0.2.0"
-notes = "Revision only removes code"
 aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.num-integer]]

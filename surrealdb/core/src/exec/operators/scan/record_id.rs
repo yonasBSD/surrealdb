@@ -333,8 +333,12 @@ pub(crate) async fn execute_record_lookup(
 			};
 			let limit_hint = limit.map(|l| (l + start).try_into().unwrap_or(u32::MAX));
 
-			let pre_decode_filter =
-				pre_decode_filter_for_execute(pre_decode_filter_status, &field_state, check_perms);
+			let pre_decode_filter = pre_decode_filter_for_execute(
+				pre_decode_filter_status,
+				&field_state,
+				check_perms,
+				ctx.ctx().config.idiom_recursion_limit,
+			);
 
 			let mut source = kv_scan_stream(
 				Arc::clone(&txn),

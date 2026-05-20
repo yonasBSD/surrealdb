@@ -126,6 +126,7 @@ pub(crate) fn finalize_pre_decode_filter(
 	root: &PredNode,
 	field_state: &FieldState,
 	check_perms: bool,
+	depth_limit: u32,
 ) -> Result<Arc<PreDecodeFilter>, PreDecodeFilterReason> {
 	let mut refs = BTreeSet::new();
 	collect_referenced_root_segments(root, &mut refs);
@@ -137,7 +138,7 @@ pub(crate) fn finalize_pre_decode_filter(
 			return Err(PreDecodeFilterReason::FieldPermissions);
 		}
 	}
-	Ok(Arc::new(PreDecodeFilter::new(root.clone())))
+	Ok(Arc::new(PreDecodeFilter::new(root.clone(), depth_limit)))
 }
 
 /// Returns `true` if any non-`Allow` field permission could affect a value
@@ -182,6 +183,7 @@ fn field_permission_covers(field_state: &FieldState, name: &str) -> bool {
 pub(crate) fn pre_decode_filter_status_at_plan_time(
 	predicate: Option<&Arc<dyn PhysicalExpr>>,
 	field_state: Option<&FieldState>,
+	depth_limit: u32,
 ) -> PreDecodeFilterStatus {
 	let Some(pred) = predicate else {
 		return PreDecodeFilterStatus::NotApplicable;
@@ -191,10 +193,10 @@ pub(crate) fn pre_decode_filter_status_at_plan_time(
 		Err(r) => return PreDecodeFilterStatus::Ineligible(r),
 	};
 	match field_state {
-		Some(fs) => match finalize_pre_decode_filter(&fused, fs, true) {
+		Some(fs) => match finalize_pre_decode_filter(&fused, fs, true, depth_limit) {
 			Ok(p) => PreDecodeFilterStatus::Active(p),
 			Err(PreDecodeFilterReason::FieldPermissions) => {
-				match finalize_pre_decode_filter(&fused, fs, false) {
+				match finalize_pre_decode_filter(&fused, fs, false, depth_limit) {
 					Ok(_) => PreDecodeFilterStatus::Deferred(Arc::new(fused)),
 					Err(e) => PreDecodeFilterStatus::Ineligible(e),
 				}
@@ -214,12 +216,13 @@ pub(crate) fn pre_decode_filter_for_execute(
 	status: &PreDecodeFilterStatus,
 	field_state: &FieldState,
 	check_perms: bool,
+	depth_limit: u32,
 ) -> Option<Arc<PreDecodeFilter>> {
 	match status {
 		PreDecodeFilterStatus::NotApplicable | PreDecodeFilterStatus::Ineligible(_) => None,
 		PreDecodeFilterStatus::Active(p) => Some(Arc::clone(p)),
 		PreDecodeFilterStatus::Deferred(node) => {
-			finalize_pre_decode_filter(node.as_ref(), field_state, check_perms).ok()
+			finalize_pre_decode_filter(node.as_ref(), field_state, check_perms, depth_limit).ok()
 		}
 	}
 }

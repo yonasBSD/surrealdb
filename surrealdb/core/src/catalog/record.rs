@@ -6,13 +6,12 @@
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use revision::{DeserializeRevisioned, Revisioned, SerializeRevisioned, revisioned};
-use surrealdb_collections::VecMap;
+use revision::{DeserializeRevisioned, revisioned};
 use surrealdb_strand::Strand;
 
 use crate::catalog::aggregation::AggregationStat;
 use crate::kvs::KVValue;
-use crate::val::{Object, RecordId, Value};
+use crate::val::{RecordId, Value};
 
 /// Represents a record stored in the database
 ///
@@ -41,28 +40,9 @@ pub struct Record {
 	pub(crate) data: Value,
 }
 
-/// Strand value for the `"id"` field name. Used by the in-place id
-/// splicer during decode so we don't allocate a fresh `Strand` per record.
+/// Strand value for the `"id"` field name. Used by the post-decode id
+/// splicer so we don't allocate a fresh `Strand` per record.
 const ID_KEY: Strand = Strand::new_static("id");
-
-/// On-disk prefix the `#[revisioned]` derive emits for the `data`
-/// field when it holds a `Value::Object`, up to (and including) the
-/// inner `Object`'s revision tag — i.e. everything that precedes the
-/// `VecMap` length.
-///
-/// The three bytes are:
-///
-/// * `Value::revision()` — `u16(1)` encoded as a varint (`0x01`).
-/// * `Value::Object` variant discriminant — `u32(10)` encoded as a varint (`0x0A`). Matches the
-///   position of `Object` in the `Value` enum definition at `surrealdb/core/src/val/mod.rs`.
-/// * `Object::revision()` — `u16(1)` encoded as a varint (`0x01`).
-///
-/// Hard-coded here for zero-overhead splicing in [`Record::kv_encode_value`]
-/// and zero-overhead peek detection in [`Record::decode_rev1_with_id`].
-/// Drift between this constant and the derive's actual output is caught
-/// at test time by `value_object_prefix_matches_derive_payload` and
-/// `custom_encode_matches_derive_encode_of_stripped_record`.
-const VALUE_OBJECT_PREFIX: &[u8] = &[0x01, 0x0A, 0x01];
 
 impl KVValue for Record {
 	/// The storage key carries the canonical `RecordId`, which the value
@@ -85,52 +65,35 @@ impl KVValue for Record {
 	/// `{ author: { id: ... } }` — serializes unchanged through the
 	/// standard `Value` encoder.
 	///
-	/// No `clone` of the record or its inner `Value` tree is required.
+	/// When `Object` adopted `revision(2, optimised)` the
+	/// previous inline-splice optimisation broke: the rev-2 envelope
+	/// wraps the body in a `u32_le payload_length`, so we can no longer
+	/// write a stripped body byte-by-byte without knowing the length up
+	/// front. Instead, clone the top-level `Object`, remove `"id"`, and
+	/// hand the cleaned record to the derived serializer. The clone is
+	/// O(n) over the immediate keys of the top-level object; nested
+	/// structure is moved, not cloned.
 	fn kv_encode_value(&self) -> Result<Vec<u8>> {
-		let mut buf = Vec::new();
-		// Mirror the auto-derive prologue: every revisioned encoding
-		// starts with the type's `u16` revision tag.
-		SerializeRevisioned::serialize_revisioned(&<Self as Revisioned>::revision(), &mut buf)?;
-		// metadata field is unchanged from the derive.
-		SerializeRevisioned::serialize_revisioned(&self.metadata, &mut buf)?;
-		// data field: custom-encode when the top-level Object carries an id.
 		match &self.data {
 			Value::Object(obj) if obj.0.contains_key("id") => {
-				// Splice in the `Value::Object` prefix (Value rev +
-				// variant discriminant + Object rev), then emit the
-				// VecMap length minus one and the entries with "id"
-				// skipped. Drift from the derived wire format is caught
-				// by `value_object_prefix_matches_derive_payload`.
-				buf.extend_from_slice(VALUE_OBJECT_PREFIX);
-				// Calculate the VecMap length without including the 'id'.
-				let len = obj.0.len() - 1;
-				// Serialize the VecMap length without including the 'id'.
-				SerializeRevisioned::serialize_revisioned(&len, &mut buf)?;
-				for (k, v) in obj.0.iter() {
-					// Skip the 'id' field.
-					if k.as_str() == "id" {
-						continue;
-					}
-					// Serialize the key and value.
-					SerializeRevisioned::serialize_revisioned(k, &mut buf)?;
-					SerializeRevisioned::serialize_revisioned(v, &mut buf)?;
-				}
+				let mut cleaned = obj.clone();
+				cleaned.0.remove("id");
+				let stripped = Record {
+					metadata: self.metadata.clone(),
+					data: Value::Object(cleaned),
+				};
+				Ok(revision::to_vec(&stripped)?)
 			}
-			other => {
-				SerializeRevisioned::serialize_revisioned(other, &mut buf)?;
-			}
+			_ => Ok(revision::to_vec(self)?),
 		}
-		Ok(buf)
 	}
 
 	/// Decode a `Record` and ensure its `data` carries the canonical `id`
 	/// reconstructed from the storage key.
 	///
-	/// For the common case — a current-revision `Value::Object` payload —
-	/// the id is spliced into the right sorted slot **during** VecMap
-	/// construction, avoiding an O(n) post-decode shift. For older
-	/// revisions or non-Object payloads we fall back to the standard
-	/// derived deserializer and then assign the id unconditionally.
+	/// Uses the derived deserialiser for the whole record, then splices
+	/// `id` into the top-level `Object` if the payload is an object that
+	/// doesn't already carry one.
 	fn kv_decode_value(bytes: &[u8], rid: RecordId) -> Result<Record> {
 		let mut reader: &[u8] = bytes;
 		let record_rev = <u16 as DeserializeRevisioned>::deserialize_revisioned(&mut reader)?;
@@ -151,32 +114,20 @@ impl Record {
 		assert!(<Record>::REVISION <= 1, "Record revision exceeds the decoder's handled max");
 
 	/// Decode a `Record` revision-1 body (i.e. after the Record revision
-	/// tag has already been consumed), splicing `id` inline when the
-	/// payload is a current-revision `Value::Object`.
+	/// tag has already been consumed), splicing the canonical `id` into
+	/// the top-level `Object` after the fact.
 	fn decode_rev1_with_id(mut reader: &[u8], rid: RecordId) -> Result<Record> {
-		// Decode the metadata.
 		let metadata =
 			<Option<Metadata> as DeserializeRevisioned>::deserialize_revisioned(&mut reader)?;
-		// Decode the data.
-		let data = if reader.starts_with(VALUE_OBJECT_PREFIX) {
-			// Fast path: current-revision Value::Object. Advance past
-			// the framing bytes for Value and Object.
-			let mut body_reader: &[u8] = &reader[VALUE_OBJECT_PREFIX.len()..];
-			// Deserialize the VecMap and splice the canonical `id` into the
-			// VecMap at its sorted position during decode.
-			let map = VecMap::deserialize_revisioned_with_extra(
-				&mut body_reader,
-				(ID_KEY, Value::RecordId(rid)),
-			)?;
-			// Return the Object with the `id`.
-			Value::Object(Object(map))
-		} else {
-			// Slow path: older `Value`/`Object` revision which is not a
-			// Value::Object will default to standard derived deserialisation.
-			// We should never hit this path, but it's here to be defensive.
-			<Value as DeserializeRevisioned>::deserialize_revisioned(&mut reader)?
-		};
-		// Return the Record
+		let mut data = <Value as DeserializeRevisioned>::deserialize_revisioned(&mut reader)?;
+		// Splice the canonical record id into the top-level `Object` (if
+		// the payload is one). VecMap's `Entry` API maintains the
+		// sorted-key invariant; `Vacant` inserts in O(log n), `Occupied`
+		// preserves whatever the payload already carried (defensive — no
+		// current writer emits an `id` field, but legacy bytes might).
+		if let Value::Object(obj) = &mut data {
+			obj.0.entry(ID_KEY).or_insert_with(|| Value::RecordId(rid));
+		}
 		Ok(Record {
 			metadata,
 			data,
@@ -281,24 +232,10 @@ mod tests {
 
 	#[test]
 	fn custom_encode_matches_derive_encode_of_stripped_record() {
-		// The custom `KVValue` encoder is hand-built on top of the
-		// hard-coded `VALUE_OBJECT_PREFIX` bytes and must remain
-		// byte-identical to what the auto-derived `revisioned` encoder
-		// would emit for the same record with its top-level `id` field
-		// removed. If the `revision` crate ever changes its wire format
-		// (variant tag width, varint encoding, etc.) or the `Value`
-		// enum is reordered, this test will fail and signal that
-		// `VALUE_OBJECT_PREFIX` and the surrounding splice logic need
-		// to be revisited.
-		//
-		// TODO: extend the `revision` crate with first-class helpers
-		// for writing a variant's framing (type revision + variant
-		// discriminant) and for obtaining the prefix bytes of a
-		// specific variant. With those in place, `VALUE_OBJECT_PREFIX`
-		// and the manual splice in `kv_encode_value` can be replaced
-		// by `Value::write_variant_object(..)` / a derived
-		// `Value::variant_object_prefix_bytes()` call, removing the
-		// need to hard-code the wire format of `Value::Object` here.
+		// The custom `KVValue` encoder clones the top-level Object, removes
+		// `"id"`, then hands the cleaned record to the derived serializer.
+		// Result must be byte-identical to the derived encode of a record
+		// that never had an id to begin with.
 		let rid = make_rid("user", "alice");
 		// Record as stored at rest in memory, with `id` present.
 		let mut with_id = Object::default();
@@ -315,29 +252,6 @@ mod tests {
 		// Custom encode of the record-with-id must equal the derived
 		// encode of the record-without-id, byte for byte.
 		assert_eq!(with_id.kv_encode_value().unwrap(), revision::to_vec(&without_id).unwrap());
-	}
-
-	#[test]
-	fn value_object_prefix_matches_derive_payload() {
-		// Sanity-check the hard-coded prefix: a serialized
-		// `Value::Object(Object::default())` must start with
-		// `VALUE_OBJECT_PREFIX` and contain exactly one more byte (the
-		// encoded `usize(0)` for the empty VecMap, in variable-length
-		// encoding). If `Value` is reordered, `Object`'s revision is
-		// bumped, or the underlying varint encoding changes, this test
-		// trips and signals that `VALUE_OBJECT_PREFIX` needs updating.
-		let mut bytes = Vec::new();
-		SerializeRevisioned::serialize_revisioned(&Value::Object(Object::default()), &mut bytes)
-			.unwrap();
-		assert!(
-			bytes.starts_with(VALUE_OBJECT_PREFIX),
-			"empty Object payload must start with VALUE_OBJECT_PREFIX, got {:02x?}",
-			bytes,
-		);
-		// Compare against the encoded length(0) to be encoding-agnostic.
-		let mut zero_len = Vec::new();
-		SerializeRevisioned::serialize_revisioned(&0usize, &mut zero_len).unwrap();
-		assert_eq!(bytes.len(), VALUE_OBJECT_PREFIX.len() + zero_len.len());
 	}
 
 	#[test]

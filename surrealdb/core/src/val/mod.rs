@@ -69,30 +69,74 @@ pub struct SqlNone;
 #[derive(Clone, Copy, Eq, PartialEq, PartialOrd)]
 pub struct Null;
 
-#[revisioned(revision = 1)]
+// `revision(1)` is the legacy on-disk format (varint discriminant +
+// payload). `revision(2, optimised)` wraps each value in a
+// 1-byte tag (variant id + size class) so walkers can skip any value in
+// O(1) via the `u32_le` length prefix on varlen variants.
+//
+// Optimised enum walkers are "materialised" — they don't expose
+// `into_<variant>()` for streaming descent. Instead the macro emits
+// `<variant>_view()` accessors that return `OwnedVariantView<T>` carrying
+// a `Cow<'r, [u8]>` over the variant body. With the `WalkRevisioned:
+// BorrowedReader` bound the source is slice-backed, so the Cow is
+// borrowed — no `Vec<u8>` allocation per descent. The caller then
+// constructs a fresh walker on the borrowed bytes:
+//
+//     let view = walker.object_view()?;          // zero-alloc borrow
+//     let mut r: &[u8] = view.as_bytes();
+//     let inner = Object::walk_revisioned(&mut r)?; // streaming Object walker
+//
+// This recovers fully streaming descent at the Value level while picking
+// up the rev-2 wire compactness. Combined with rev-2 `Object`/`Array`/
+// `Set` indexed prologues, the planner hot path gets O(log n) Map
+// binary search, O(1) Array random access, and O(1) skip past any Value
+// — all zero-alloc through the descent chain.
+#[revisioned(revision(1), revision(2, optimised))]
 #[derive(Clone, Debug, Default, PartialEq, PartialOrd, Hash, Encode, BorrowDecode)]
 #[storekey(format = "()")]
 #[storekey(format = "IndexFormat")]
 pub(crate) enum Value {
 	#[default]
+	#[revision(size = "inline")]
 	None,
+	#[revision(size = "inline")]
 	Null,
+	#[revision(size = "fixed(1)")]
 	Bool(bool),
+	#[revision(size = "varlen")]
 	Number(Number),
+	#[revision(size = "varlen")]
 	String(Strand),
+	#[revision(size = "varlen")]
 	Duration(Duration),
+	#[revision(size = "varlen")]
 	Datetime(Datetime),
+	#[revision(size = "varlen")]
 	Uuid(Uuid),
+	#[revision(size = "varlen")]
 	Array(Array),
+	#[revision(size = "varlen")]
 	Set(Set),
+	#[revision(size = "varlen")]
 	Object(Object),
+	#[revision(size = "varlen")]
 	Geometry(Geometry),
+	#[revision(size = "varlen")]
 	Bytes(Bytes),
+	#[revision(size = "varlen")]
 	Table(TableName),
+	#[revision(size = "varlen")]
 	RecordId(RecordId),
+	#[revision(size = "varlen")]
 	File(File),
+	#[revision(size = "varlen")]
 	Regex(Regex),
+	#[revision(size = "varlen")]
 	Range(Box<Range>),
+	// Closure's manual `SerializeRevisioned` impl errors regardless of the
+	// envelope. Mark `varlen` for completeness; the macro requires every
+	// variant to declare a size class under `optimised`.
+	#[revision(size = "varlen")]
 	Closure(Box<Closure>),
 	// Add new variants here
 }
@@ -1376,13 +1420,28 @@ mod tests {
 	}
 
 	#[rstest]
+	// Rev-2 Value envelope overhead: every varlen variant pays 1 tag byte
+	// + 4 bytes `u32_le` payload length on top of the legacy `u16 rev` +
+	// `u32 disc`. Inline variants (`None`, `Null`) are the entire encoding
+	// in a single tag byte. `Bool` is `fixed(1)` -> tag + 1 byte.
 	#[case::none(Value::None, 2)]
 	#[case::null(Value::Null, 2)]
 	#[case::bool(Value::Bool(true), 3)]
 	#[case::bool(Value::Bool(false), 3)]
-	#[case::string(Value::from("test"), 7)]
-	#[case::object(Value::from(syn::value("{ hello: 'world' }").unwrap()), 18)]
-	#[case::object(Value::from(syn::value("{ compact: true, schema: 0 }").unwrap()), 27)]
+	// String wire shape under rev-2 varlen: rev (1) + tag (1) + u32_le
+	// payload_length (4) + Strand wire (`usize len || utf8`) = 6 + Strand.
+	// "test" is 4 utf8 bytes + 1 length varint = 5 bytes, so 11 total.
+	#[case::string(Value::from("test"), 11)]
+	// Objects under rev-2 Value + rev-2 Object `indexed_map`:
+	//   Value envelope:  rev=2 (1) + tag (1) + u32_le payload_length (4) = 6
+	//   Object envelope: rev=2 (1) + u32_le payload_length (4) = 5
+	//   indexed_map body (sub-threshold): flag (1) + varint len + (K, V)*
+	// Total delta vs rev-1 Value + rev-1 Object: +13 bytes per Object Value
+	// (Value envelope +6, Object envelope +5, indexed_map flag +1, minus
+	// 4 bytes the rev-1 framing was paying). PR-63's Wire-repr zero-copy
+	// `walk_field_0` removed the need for a single-field offset table.
+	#[case::object(Value::from(syn::value("{ hello: 'world' }").unwrap()), 31)]
+	#[case::object(Value::from(syn::value("{ compact: true, schema: 0 }").unwrap()), 40)]
 	fn check_serialize(#[case] value: Value, #[case] expected: usize) {
 		let enc: Vec<u8> = revision::to_vec(&value).unwrap();
 		assert_eq!(expected, enc.len());

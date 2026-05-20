@@ -14,11 +14,19 @@ use crate::fmt::EscapeObjectKey;
 use crate::val::{IndexFormat, RecordId, Strand, Value};
 
 /// Invariant: Keys never contain NUL bytes.
-#[revisioned(revision = 1)]
+///
+/// - **Rev 1** — `u16 revision || VecMap<Strand, Value>` (length-prefixed sorted entries).
+///   Byte-identical to the legacy on-disk encoding.
+/// - **Rev 2** — optimised envelope (`u16 revision || u32_le payload_length`), inner `VecMap`
+///   written via the indexed-map prologue past `OFFSET_TABLE_MIN_LEN = 8`. Walker descent stays
+///   zero-allocation: under PR-63's commit `a7b223a`, `walk_field_0()` on a `Wire`-repr parent
+///   borrows the field bytes directly by bracketing `skip_indexed_map` with
+///   `BorrowedReader::remaining()` snapshots, no decode + re-encode required.
+#[revisioned(revision(1), revision(2, optimised))]
 #[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Hash, Encode, BorrowDecode)]
 #[storekey(format = "()")]
 #[storekey(format = "IndexFormat")]
-pub(crate) struct Object(pub(crate) VecMap<Strand, Value>);
+pub(crate) struct Object(#[revision(indexed_map)] pub(crate) VecMap<Strand, Value>);
 
 impl From<BTreeMap<&str, Value>> for Object {
 	fn from(v: BTreeMap<&str, Value>) -> Self {

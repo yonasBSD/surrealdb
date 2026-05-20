@@ -10,10 +10,54 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use memchr::memmem;
-use revision::WalkRevisioned;
+use revision::{DeserializeRevisioned, WalkRevisioned};
 
 use super::Evidence;
 use crate::val::Value;
+
+/// Pull successive elements out of an `IndexedSeqView<Value>` and apply a
+/// per-element predicate. Handles both the indexed path (O(1) random access
+/// via `element_bytes`) and the legacy sub-threshold path (linear walk of the
+/// dense `Value*` body).
+///
+/// The closure returns `Ok(ControlFlow::Break(v))` to short-circuit with `v`;
+/// `Ok(ControlFlow::Continue(()))` to keep scanning; or `Err(())` to signal
+/// "wire-level error, treat as unknown". Returns `Some(v)` when the predicate
+/// short-circuits, `None` when the scan completes without a break, or the
+/// `Err(())` signal bubbles up as `None` as well (callers map both to
+/// `Evidence::Unknown`).
+fn for_each_array_element<F, T>(
+	view: &revision::optimised::indexed::IndexedSeqView<Value>,
+	mut f: F,
+) -> Result<Option<T>, ()>
+where
+	F: FnMut(Value) -> Result<std::ops::ControlFlow<T>, ()>,
+{
+	let walker = view.walker().map_err(|_| ())?;
+	let len = walker.len();
+	if walker.is_indexed() {
+		for i in 0..len {
+			let bytes = walker.element_bytes(i).map_err(|_| ())?;
+			let mut reader: &[u8] = bytes;
+			let v = <Value as DeserializeRevisioned>::deserialize_revisioned(&mut reader)
+				.map_err(|_| ())?;
+			if let std::ops::ControlFlow::Break(out) = f(v)? {
+				return Ok(Some(out));
+			}
+		}
+	} else {
+		let body = walker.body();
+		let mut reader: &[u8] = body;
+		for _ in 0..len {
+			let v = <Value as DeserializeRevisioned>::deserialize_revisioned(&mut reader)
+				.map_err(|_| ())?;
+			if let std::ops::ControlFlow::Break(out) = f(v)? {
+				return Ok(Some(out));
+			}
+		}
+	}
+	Ok(None)
+}
 
 /// Walker for a [`Value`] backed by a byte slice (KV record bytes).
 pub(crate) type ValueWalker<'r> = <Value as WalkRevisioned>::Walker<'r, &'r [u8]>;
@@ -40,12 +84,22 @@ impl StreamingLeafEvaluator for SubstringMatch {
 		if !leaf.is_string() {
 			return Evidence::Unknown;
 		}
-		let Ok(strand_walker) = leaf.into_string() else {
+		// Rev-2 optimised Value walker: `string_view()` borrows the variant
+		// body. Strand's wire form is `usize len || utf8`, so we skip past
+		// the length prefix and run `memmem` directly on the UTF-8 bytes.
+		let Ok(view) = leaf.string_view() else {
 			return Evidence::Unknown;
 		};
-		let Ok(hit) = strand_walker.with_bytes(|s| self.finder.find(s).is_some()) else {
+		let bytes = view.as_bytes();
+		let mut reader: &[u8] = bytes;
+		let Ok(len) = <usize as DeserializeRevisioned>::deserialize_revisioned(&mut reader) else {
 			return Evidence::Unknown;
 		};
+		if reader.len() < len {
+			return Evidence::Unknown;
+		}
+		let utf8 = &reader[..len];
+		let hit = self.finder.find(utf8).is_some();
 		let truth = hit ^ self.negated;
 		if truth {
 			Evidence::ProvablyTrue
@@ -71,26 +125,34 @@ impl StreamingLeafEvaluator for ArrayElementContains {
 		if !leaf.is_array() {
 			return Evidence::Unknown;
 		}
-		let Ok(array_walker) = leaf.into_array() else {
+		// Rev-2 optimised Value walker: `array_view()` borrows the variant
+		// body; open a streaming Array walker on it.
+		let Ok(array_view) = leaf.array_view() else {
 			return Evidence::Unknown;
 		};
-		let Ok(mut seq) = array_walker.into_walk_field_0() else {
+		let mut array_reader: &[u8] = array_view.as_bytes();
+		let Ok(array_walker) =
+			<crate::val::Array as WalkRevisioned>::walk_revisioned(&mut array_reader)
+		else {
 			return Evidence::Unknown;
 		};
-		while let Some(item) = seq.next_item() {
-			let Ok(elem) = item.decode() else {
-				return Evidence::Unknown;
-			};
-			if elem == *self.needle.as_ref() {
-				let truth = !self.negated;
-				return if truth {
-					Evidence::ProvablyTrue
-				} else {
-					Evidence::ProvablyFalse
-				};
+		let Ok(view) = array_walker.into_walk_field_0() else {
+			return Evidence::Unknown;
+		};
+		let needle = self.needle.as_ref();
+		let hit = for_each_array_element(&view, |elem| {
+			if elem == *needle {
+				Ok(std::ops::ControlFlow::Break(()))
+			} else {
+				Ok(std::ops::ControlFlow::Continue(()))
 			}
-		}
-		let truth = self.negated;
+		});
+		let hit = match hit {
+			Ok(Some(())) => true,
+			Ok(None) => false,
+			Err(()) => return Evidence::Unknown,
+		};
+		let truth = hit ^ self.negated;
 		if truth {
 			Evidence::ProvablyTrue
 		} else {
@@ -154,35 +216,49 @@ impl StreamingLeafEvaluator for ArrayOverlapsLiteralSet {
 		if !leaf.is_array() {
 			return Evidence::Unknown;
 		}
-		let Ok(array_walker) = leaf.into_array() else {
+		// Rev-2 optimised Value walker: `array_view()` borrows the variant
+		// body; open a streaming Array walker on it.
+		let Ok(array_view) = leaf.array_view() else {
 			return Evidence::Unknown;
 		};
-		let Ok(mut seq) = array_walker.into_walk_field_0() else {
+		let mut array_reader: &[u8] = array_view.as_bytes();
+		let Ok(array_walker) =
+			<crate::val::Array as WalkRevisioned>::walk_revisioned(&mut array_reader)
+		else {
+			return Evidence::Unknown;
+		};
+		let Ok(view) = array_walker.into_walk_field_0() else {
 			return Evidence::Unknown;
 		};
 		let n_words = n_lit.div_ceil(64);
 		match self.mode {
 			OverlapMode::Any => {
-				while let Some(item) = seq.next_item() {
-					let Ok(elem) = item.decode() else {
-						return Evidence::Unknown;
-					};
+				let result = for_each_array_element(&view, |elem| {
 					if self.literal_to_idx.contains_key(&elem) {
-						return Evidence::ProvablyTrue;
+						Ok(std::ops::ControlFlow::Break(()))
+					} else {
+						Ok(std::ops::ControlFlow::Continue(()))
 					}
+				});
+				match result {
+					Ok(Some(())) => Evidence::ProvablyTrue,
+					Ok(None) => Evidence::ProvablyFalse,
+					Err(()) => Evidence::Unknown,
 				}
-				Evidence::ProvablyFalse
 			}
 			OverlapMode::None => {
-				while let Some(item) = seq.next_item() {
-					let Ok(elem) = item.decode() else {
-						return Evidence::Unknown;
-					};
+				let result = for_each_array_element(&view, |elem| {
 					if self.literal_to_idx.contains_key(&elem) {
-						return Evidence::ProvablyFalse;
+						Ok(std::ops::ControlFlow::Break(()))
+					} else {
+						Ok(std::ops::ControlFlow::Continue(()))
 					}
+				});
+				match result {
+					Ok(Some(())) => Evidence::ProvablyFalse,
+					Ok(None) => Evidence::ProvablyTrue,
+					Err(()) => Evidence::Unknown,
 				}
-				Evidence::ProvablyTrue
 			}
 			OverlapMode::All => {
 				let mut stack_mask = [0u64; STACK_MASK_WORDS];
@@ -193,22 +269,25 @@ impl StreamingLeafEvaluator for ArrayOverlapsLiteralSet {
 					heap_mask.resize(n_words, 0);
 					heap_mask.as_mut_slice()
 				};
-				while let Some(item) = seq.next_item() {
-					let Ok(elem) = item.decode() else {
-						return Evidence::Unknown;
-					};
-					let Some(&idx) = self.literal_to_idx.get(&elem) else {
-						continue;
-					};
-					mask[idx / 64] |= 1u64 << (idx % 64);
-					if Self::all_bits_set(mask, n_lit) {
-						return Evidence::ProvablyTrue;
+				let result = for_each_array_element(&view, |elem| {
+					if let Some(&idx) = self.literal_to_idx.get(&elem) {
+						mask[idx / 64] |= 1u64 << (idx % 64);
+						if Self::all_bits_set(mask, n_lit) {
+							return Ok(std::ops::ControlFlow::Break(()));
+						}
 					}
-				}
-				if Self::all_bits_set(mask, n_lit) {
-					Evidence::ProvablyTrue
-				} else {
-					Evidence::ProvablyFalse
+					Ok(std::ops::ControlFlow::Continue(()))
+				});
+				match result {
+					Ok(Some(())) => Evidence::ProvablyTrue,
+					Ok(None) => {
+						if Self::all_bits_set(mask, n_lit) {
+							Evidence::ProvablyTrue
+						} else {
+							Evidence::ProvablyFalse
+						}
+					}
+					Err(()) => Evidence::Unknown,
 				}
 			}
 		}

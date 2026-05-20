@@ -201,6 +201,156 @@ where
 	}
 }
 
+// -----------------------------------------------------------------------------
+// Optimised-encoding indexed-prologue impls.
+//
+// `#[revision(indexed_map)]` / `#[revision(indexed_set)]` on a field whose
+// type is `VecMap<K, V>` / `VecSet<T>` makes the macro reach for the
+// `IndexedMapEncoded` / `IndexedSetEncoded` impls below. The wire format
+// is identical to `BTreeMap` / `BTreeSet` under indexed encoding — sorted
+// by key/element bytes, optional offset-table prologue past
+// `OFFSET_TABLE_MIN_LEN = 8`.
+//
+// Deserialisation parses directly into a sorted `Vec<(K, V)>` / `Vec<T>`
+// and constructs via `from_sorted_vec_unchecked`, avoiding the
+// intermediate `BTreeMap` / `BTreeSet` the generic revision-crate
+// helpers would allocate. Wire byte order may diverge from `K::Ord` /
+// `T::Ord` when entries have varying-length keys (the encoder sorts by
+// raw bytes — e.g. Strand keys `"a"` and `"bb"` sort by `(1, "a")` vs
+// `(2, "bb")` rather than UTF-8 codepoint order), so we re-sort by
+// `K::Ord` / `T::Ord` after collecting. For the common case (equal-
+// length keys, or all-ASCII without length variation) the sort is a
+// near no-op on already-sorted input.
+// -----------------------------------------------------------------------------
+
+/// Bit flag on the leading byte of an indexed-map/seq/set body indicating
+/// whether the offset-table prologue is present. Mirrors
+/// `revision::optimised::indexed::seq_walk::FLAG_INDEXED`; reproduced here
+/// because the constant is private to the revision crate.
+const INDEXED_FLAG_BIT: u8 = 0b0000_0001;
+
+/// Skip `count` bytes from a reader.
+#[inline]
+fn discard_bytes<R: std::io::Read>(r: &mut R, count: usize) -> Result<(), Error> {
+	if count == 0 {
+		return Ok(());
+	}
+	let mut buf = vec![0u8; count];
+	r.read_exact(&mut buf).map_err(Error::Io)
+}
+
+impl<K, V> revision::optimised::indexed::IndexedMapEncoded for VecMap<K, V>
+where
+	K: SerializeRevisioned
+		+ DeserializeRevisioned
+		+ revision::SkipRevisioned
+		+ revision::Revisioned
+		+ Ord,
+	V: SerializeRevisioned
+		+ DeserializeRevisioned
+		+ revision::SkipRevisioned
+		+ revision::Revisioned,
+{
+	type Key = K;
+	type Value = V;
+	fn serialize_indexed_map<W: std::io::Write>(&self, w: &mut W) -> Result<(), Error> {
+		revision::optimised::indexed::serialize_indexed_entries(self.iter(), w)
+	}
+	fn deserialize_indexed_map<R: std::io::Read>(r: &mut R) -> Result<Self, Error> {
+		let mut flag_buf = [0u8; 1];
+		r.read_exact(&mut flag_buf).map_err(Error::Io)?;
+		let indexed = (flag_buf[0] & INDEXED_FLAG_BIT) != 0;
+		let len = usize::deserialize_revisioned(r)?;
+
+		let mut entries: Vec<(K, V)> = Vec::with_capacity(len);
+		if !indexed {
+			// Legacy `(K, V)*` body. Entries are sorted by wire bytes,
+			// which may differ from `K::Ord` for varying-length keys.
+			for _ in 0..len {
+				let k = K::deserialize_revisioned(r)?;
+				let v = V::deserialize_revisioned(r)?;
+				entries.push((k, v));
+			}
+		} else {
+			// Indexed body: `[(key_off, val_off); len]` table
+			// (8 bytes each) + region-length pair (2 * `u32_le`)
+			// + dense keys + dense values. Skip the random-access
+			// metadata; `DeserializeRevisioned`'s per-item length
+			// awareness drives the dense regions.
+			let table_bytes = len.checked_mul(8).ok_or_else(|| {
+				Error::Deserialize("indexed-map offset table size overflow".into())
+			})?;
+			discard_bytes(r, table_bytes + 8)?;
+			// Two passes: dense keys first (a sorted ascending run by
+			// wire bytes), then dense values in matching order.
+			let mut keys: Vec<K> = Vec::with_capacity(len);
+			for _ in 0..len {
+				keys.push(K::deserialize_revisioned(r)?);
+			}
+			for k in keys {
+				let v = V::deserialize_revisioned(r)?;
+				entries.push((k, v));
+			}
+		}
+		// Re-sort by `K::Ord` and reject duplicate keys (which the
+		// encoder won't produce, but a corrupt or hand-rolled payload
+		// could).
+		entries.sort_by(|a, b| a.0.cmp(&b.0));
+		if entries.windows(2).any(|w| w[0].0 == w[1].0) {
+			return Err(Error::Deserialize("indexed-map decode: duplicate keys".into()));
+		}
+		Ok(VecMap::from_sorted_vec_unchecked(entries))
+	}
+	fn skip_indexed_map<R: std::io::Read>(r: &mut R) -> Result<(), Error> {
+		revision::optimised::indexed::skip_indexed_map::<K, V, R>(r)
+	}
+}
+
+impl<T> revision::optimised::indexed::IndexedSetEncoded for VecSet<T>
+where
+	T: SerializeRevisioned
+		+ DeserializeRevisioned
+		+ revision::SkipRevisioned
+		+ revision::Revisioned
+		+ Ord,
+{
+	type Item = T;
+	fn serialize_indexed_set<W: std::io::Write>(&self, w: &mut W) -> Result<(), Error> {
+		revision::optimised::indexed::serialize_indexed_set_iter(self.iter(), w)
+	}
+	fn deserialize_indexed_set<R: std::io::Read>(r: &mut R) -> Result<Self, Error> {
+		let mut flag_buf = [0u8; 1];
+		r.read_exact(&mut flag_buf).map_err(Error::Io)?;
+		let indexed = (flag_buf[0] & INDEXED_FLAG_BIT) != 0;
+		let len = usize::deserialize_revisioned(r)?;
+
+		let mut entries: Vec<T> = Vec::with_capacity(len);
+		if !indexed {
+			for _ in 0..len {
+				entries.push(T::deserialize_revisioned(r)?);
+			}
+		} else {
+			// Indexed seq/set body: `[elem_off; len]` table (4 bytes
+			// each), then dense elements.
+			let table_bytes = len.checked_mul(4).ok_or_else(|| {
+				Error::Deserialize("indexed-set offset table size overflow".into())
+			})?;
+			discard_bytes(r, table_bytes)?;
+			for _ in 0..len {
+				entries.push(T::deserialize_revisioned(r)?);
+			}
+		}
+		entries.sort();
+		if entries.windows(2).any(|w| w[0] == w[1]) {
+			return Err(Error::Deserialize("indexed-set decode: duplicate elements".into()));
+		}
+		Ok(VecSet::from_sorted_vec_unchecked(entries))
+	}
+	fn skip_indexed_set<R: std::io::Read>(r: &mut R) -> Result<(), Error> {
+		revision::optimised::indexed::skip_indexed_set::<T, R>(r)
+	}
+}
+
 // VecMap/VecSet share their wire format with BTreeMap/BTreeSet: a
 // length-prefixed run of strictly ascending entries. Walking is therefore
 // identical to the generic MapWalker / SeqWalker.
@@ -209,9 +359,9 @@ where
 	K: revision::Revisioned + Ord,
 	V: revision::Revisioned,
 {
-	type Walker<'r, R: std::io::Read + 'r> = revision::MapWalker<'r, K, V, R>;
+	type Walker<'r, R: revision::BorrowedReader + 'r> = revision::MapWalker<'r, K, V, R>;
 
-	fn walk_revisioned<'r, R: std::io::Read>(
+	fn walk_revisioned<'r, R: revision::BorrowedReader>(
 		reader: &'r mut R,
 	) -> Result<Self::Walker<'r, R>, revision::Error> {
 		revision::MapWalker::new(reader)
@@ -222,9 +372,9 @@ impl<T> revision::WalkRevisioned for VecSet<T>
 where
 	T: revision::Revisioned + Eq + Ord + 'static,
 {
-	type Walker<'r, R: std::io::Read + 'r> = revision::SeqWalker<'r, T, R>;
+	type Walker<'r, R: revision::BorrowedReader + 'r> = revision::SeqWalker<'r, T, R>;
 
-	fn walk_revisioned<'r, R: std::io::Read>(
+	fn walk_revisioned<'r, R: revision::BorrowedReader>(
 		reader: &'r mut R,
 	) -> Result<Self::Walker<'r, R>, revision::Error> {
 		revision::SeqWalker::new(reader)

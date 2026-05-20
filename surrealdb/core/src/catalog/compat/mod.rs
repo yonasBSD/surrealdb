@@ -45,3 +45,5 @@ mod v3_0_0_beta_1;
 mod v3_0_0_beta_3;
 #[rustfmt::skip]
 mod v3_0_0;
+#[rustfmt::skip]
+mod v3_1_0;

@@ -65,10 +65,10 @@ impl SkipRevisioned for NamespaceId {
 }
 
 impl revision::WalkRevisioned for NamespaceId {
-	type Walker<'r, R: std::io::Read + 'r> = revision::LeafWalker<'r, NamespaceId, R>;
+	type Walker<'r, R: revision::BorrowedReader + 'r> = revision::LeafWalker<'r, NamespaceId, R>;
 
 	#[inline]
-	fn walk_revisioned<'r, R: std::io::Read>(
+	fn walk_revisioned<'r, R: revision::BorrowedReader>(
 		reader: &'r mut R,
 	) -> Result<Self::Walker<'r, R>, revision::Error> {
 		Ok(revision::LeafWalker::new(reader))

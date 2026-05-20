@@ -54,9 +54,9 @@ impl revision::SkipRevisioned for Param {
 }
 
 impl revision::WalkRevisioned for Param {
-	type Walker<'r, R: std::io::Read + 'r> = revision::LeafWalker<'r, Param, R>;
+	type Walker<'r, R: revision::BorrowedReader + 'r> = revision::LeafWalker<'r, Param, R>;
 
-	fn walk_revisioned<'r, R: std::io::Read>(
+	fn walk_revisioned<'r, R: revision::BorrowedReader>(
 		reader: &'r mut R,
 	) -> std::result::Result<Self::Walker<'r, R>, revision::Error> {
 		Ok(revision::LeafWalker::new(reader))
