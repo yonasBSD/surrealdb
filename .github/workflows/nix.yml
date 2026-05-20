@@ -15,8 +15,6 @@ on:
       - 'flake.lock'
       - 'pkg/nix/**'
       - '.github/workflows/nix.yml'
-  pull_request:
-    types: [ labeled, synchronize ]
 
 # Setting the shell option, it will run 'bash --noprofile --norc -eo pipefail {0}'
 defaults:
@@ -29,8 +27,12 @@ permissions:  # added using https://github.com/step-security/secure-repo
 jobs:
   build:
     name: Build native Linux binary and Docker image
-    if: ${{ github.ref == 'refs/heads/main' || github.ref_type == 'tag' || github.event.label.name == 'nix' || contains(github.event.pull_request.labels.*.name, 'nix') }}
-    runs-on: [ runner-amd64-2xlarge ]
+    runs-on: ubuntu-latest
+    env:
+      # Trusted refs (main / tags) get full access: Cachix push and smoke tests.
+      # On any other ref cachix runs read-only to prevent cache poisoning, and
+      # built binaries are never executed to avoid running unreviewed code.
+      IS_TRUSTED_REF: ${{ github.ref == 'refs/heads/main' || github.ref_type == 'tag' }}
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
@@ -38,15 +40,26 @@ jobs:
           egress-policy: audit
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # (Actions must be pinned by commit hash) v6.0.2
+
       - uses: cachix/install-nix-action@616559265b40713947b9c190a8ff4b507b5df49b # (Actions must be pinned by commit hash) v31.10.4
+
       - uses: cachix/cachix-action@1eb2ef646ac0255473d23a5907ad7b04ce94065c # (Actions must be pinned by commit hash) v17
         env:
-          USER: runner
+          CACHIX_AUTH_TOKEN: ${{ env.IS_TRUSTED_REF == 'true' && secrets.CACHIX_AUTH_TOKEN || '' }}
         with:
           name: surrealdb
-          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          authToken: '${{ env.CACHIX_AUTH_TOKEN }}'
           extraPullNames: nix-community
+
       - run: nix build .#x86_64-unknown-linux-gnu
-      - run: ./result/bin/surreal help
+
+      - name: Smoke-test binary
+        if: env.IS_TRUSTED_REF == 'true'
+        run: ./result/bin/surreal help
+
       - run: nix build .#docker-image
-      - run: docker load --input ./result
+
+      - name: Smoke-test Docker image
+        if: env.IS_TRUSTED_REF == 'true'
+        run: docker load --input ./result
+
