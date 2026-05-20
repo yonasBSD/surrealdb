@@ -219,7 +219,7 @@ fn statements() -> Vec<TopLevelExpr> {
 				kind: DefineKind::Default,
 				name: Expr::Idiom(Idiom::field("a".to_string())),
 				base: Base::Db,
-				access_type: AccessType::Record(RecordAccess {
+				access_type: AccessType::Record(Box::new(RecordAccess {
 					signup: None,
 					signin: None,
 					jwt: JwtAccess {
@@ -230,7 +230,7 @@ fn statements() -> Vec<TopLevelExpr> {
 						issue: None,
 					},
 					bearer: None,
-				}),
+				})),
 				authenticate: None,
 				// Default durations.
 				duration: AccessDuration {
@@ -306,37 +306,39 @@ fn statements() -> Vec<TopLevelExpr> {
 				max_depth: 64,
 			},
 		})))),
-		TopLevelExpr::Expr(Expr::Define(Box::new(DefineStatement::Field(DefineFieldStatement {
-			kind: DefineKind::Default,
-			name: Expr::Idiom(Idiom(vec![
-				Part::Field(Strand::new_static("foo")),
-				Part::All,
-				Part::All,
-				Part::Flatten,
-			])),
-			what: Expr::Table("bar".into()),
-			field_kind: Some(Kind::Either(vec![
-				Kind::None,
-				Kind::Number,
-				Kind::Array(Box::new(Kind::Record(vec!["foo".into()])), Some(10)),
-			])),
-			flexible: false,
-			readonly: false,
-			value: Some(Expr::Literal(Literal::Null)),
-			assert: Some(Expr::Literal(Literal::Bool(true))),
-			default: DefineDefault::Set(Expr::Literal(Literal::Bool(false))),
-			permissions: Permissions {
-				delete: Permission::Full,
-				update: Permission::None,
-				create: Permission::Specific(Expr::Literal(Literal::Bool(true))),
-				select: Permission::Full,
+		TopLevelExpr::Expr(Expr::Define(Box::new(DefineStatement::Field(Box::new(
+			DefineFieldStatement {
+				kind: DefineKind::Default,
+				name: Expr::Idiom(Idiom(vec![
+					Part::Field(Strand::new_static("foo")),
+					Part::All,
+					Part::All,
+					Part::Flatten,
+				])),
+				what: Expr::Table("bar".into()),
+				field_kind: Some(Kind::Either(vec![
+					Kind::None,
+					Kind::Number,
+					Kind::Array(Box::new(Kind::Record(vec!["foo".into()])), Some(10)),
+				])),
+				flexible: false,
+				readonly: false,
+				value: Some(Expr::Literal(Literal::Null)),
+				assert: Some(Expr::Literal(Literal::Bool(true))),
+				default: DefineDefault::Set(Expr::Literal(Literal::Bool(false))),
+				permissions: Permissions {
+					delete: Permission::Full,
+					update: Permission::None,
+					create: Permission::Specific(Expr::Literal(Literal::Bool(true))),
+					select: Permission::Full,
+				},
+				comment: Expr::Literal(Literal::None),
+				reference: None,
+				computed: None,
+				graphql_alias: None,
+				graphql_deprecated: None,
 			},
-			comment: Expr::Literal(Literal::None),
-			reference: None,
-			computed: None,
-			graphql_alias: None,
-			graphql_deprecated: None,
-		})))),
+		))))),
 		TopLevelExpr::Expr(Expr::Define(Box::new(DefineStatement::Index(DefineIndexStatement {
 			kind: DefineKind::Default,
 			name: Expr::Idiom(Idiom::field("index".to_string())),
@@ -400,10 +402,10 @@ fn statements() -> Vec<TopLevelExpr> {
 					table: "a".into(),
 					key: RecordIdKeyLit::String("b".into()),
 				}))),
-				Part::Graph(Lookup {
+				Part::Graph(Box::new(Lookup {
 					kind: LookupKind::Graph(Dir::Out),
 					..Default::default()
-				}),
+				})),
 				Part::Last,
 				Part::Where(Expr::Literal(Literal::Bool(true))),
 			]))],
@@ -670,14 +672,14 @@ fn statements() -> Vec<TopLevelExpr> {
 			only: true,
 			what: vec![Expr::Idiom(Idiom(vec![
 				Part::Field(Strand::new_static("a")),
-				Part::Graph(Lookup {
+				Part::Graph(Box::new(Lookup {
 					kind: LookupKind::Graph(Dir::Out),
 					what: vec![LookupSubject::Table {
 						table: "b".into(),
 						referencing_field: None,
 					}],
 					..Default::default()
-				}),
+				})),
 			]))],
 			with: Some(With::Index(vec!["index".to_owned(), "index_2".to_owned()])),
 			cond: Some(Cond(Expr::Literal(Literal::Bool(true)))),
@@ -685,14 +687,14 @@ fn statements() -> Vec<TopLevelExpr> {
 				Idiom(vec![Part::Field(Strand::new_static("foo")), Part::Flatten]),
 				Idiom(vec![
 					Part::Field(Strand::new_static("a")),
-					Part::Graph(Lookup {
+					Part::Graph(Box::new(Lookup {
 						kind: LookupKind::Graph(Dir::Out),
 						what: vec![LookupSubject::Table {
 							table: "b".into(),
 							referencing_field: None,
 						}],
 						..Default::default()
-					}),
+					})),
 				]),
 				Idiom(vec![Part::Field(Strand::new_static("c")), Part::All]),
 			])),
@@ -704,14 +706,14 @@ fn statements() -> Vec<TopLevelExpr> {
 			only: true,
 			what: vec![Expr::Idiom(Idiom(vec![
 				Part::Field(Strand::new_static("a")),
-				Part::Graph(Lookup {
+				Part::Graph(Box::new(Lookup {
 					kind: LookupKind::Graph(Dir::Out),
 					what: vec![LookupSubject::Table {
 						table: "b".into(),
 						referencing_field: None,
 					}],
 					..Default::default()
-				}),
+				})),
 			]))],
 			with: Some(With::Index(vec!["index".to_owned(), "index_2".to_owned()])),
 			cond: Some(Cond(Expr::Literal(Literal::Bool(true)))),
@@ -719,14 +721,14 @@ fn statements() -> Vec<TopLevelExpr> {
 				Idiom(vec![Part::Field(Strand::new_static("foo")), Part::Flatten]),
 				Idiom(vec![
 					Part::Field(Strand::new_static("a")),
-					Part::Graph(Lookup {
+					Part::Graph(Box::new(Lookup {
 						kind: LookupKind::Graph(Dir::Out),
 						what: vec![LookupSubject::Table {
 							table: "b".into(),
 							referencing_field: None,
 						}],
 						..Default::default()
-					}),
+					})),
 				]),
 				Idiom(vec![Part::Field(Strand::new_static("c")), Part::All]),
 			])),

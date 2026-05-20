@@ -107,7 +107,7 @@ impl Parser<'_> {
 					self.pop_peek();
 					let lookup =
 						stk.run(|stk| self.parse_lookup(stk, LookupKind::Graph(Dir::Out))).await?;
-					res.push(Part::Graph(lookup))
+					res.push(Part::Graph(Box::new(lookup)))
 				}
 				t!("<") => {
 					if let Some(peek) = self.peek_whitespace1() {
@@ -118,21 +118,21 @@ impl Parser<'_> {
 								.run(|stk| self.parse_lookup(stk, LookupKind::Reference))
 								.await?;
 
-							res.push(Part::Graph(lookup))
+							res.push(Part::Graph(Box::new(lookup)))
 						} else if peek.kind == t!("-") {
 							self.pop_peek();
 							self.pop_peek();
 							let lookup = stk
 								.run(|stk| self.parse_lookup(stk, LookupKind::Graph(Dir::In)))
 								.await?;
-							res.push(Part::Graph(lookup))
+							res.push(Part::Graph(Box::new(lookup)))
 						} else if peek.kind == t!("->") {
 							self.pop_peek();
 							self.pop_peek();
 							let lookup = stk
 								.run(|stk| self.parse_lookup(stk, LookupKind::Graph(Dir::Both)))
 								.await?;
-							res.push(Part::Graph(lookup))
+							res.push(Part::Graph(Box::new(lookup)))
 						} else {
 							break;
 						}
@@ -178,7 +178,7 @@ impl Parser<'_> {
 				t!("->") => {
 					self.pop_peek();
 					let x = self.parse_lookup(stk, LookupKind::Graph(Dir::Out)).await?;
-					res.push(Part::Graph(x))
+					res.push(Part::Graph(Box::new(x)))
 				}
 				t!("<") => {
 					if let Some(peek) = self.peek_whitespace1() {
@@ -186,18 +186,18 @@ impl Parser<'_> {
 							self.pop_peek();
 							self.pop_peek();
 							let lookup = self.parse_lookup(stk, LookupKind::Reference).await?;
-							res.push(Part::Graph(lookup))
+							res.push(Part::Graph(Box::new(lookup)))
 						} else if peek.kind == t!("-") {
 							self.pop_peek();
 							self.pop_peek();
 							let lookup = self.parse_lookup(stk, LookupKind::Graph(Dir::In)).await?;
-							res.push(Part::Graph(lookup))
+							res.push(Part::Graph(Box::new(lookup)))
 						} else if peek.kind == t!("->") {
 							self.pop_peek();
 							self.pop_peek();
 							let lookup =
 								self.parse_lookup(stk, LookupKind::Graph(Dir::Both)).await?;
-							res.push(Part::Graph(lookup))
+							res.push(Part::Graph(Box::new(lookup)))
 						} else {
 							break;
 						}
@@ -219,7 +219,7 @@ impl Parser<'_> {
 				self.pop_peek();
 				let lookup =
 					stk.run(|ctx| self.parse_lookup(ctx, LookupKind::Graph(Dir::Out))).await?;
-				Part::Graph(lookup)
+				Part::Graph(Box::new(lookup))
 			}
 			t!("<") => {
 				let t = self.pop_peek();
@@ -232,7 +232,7 @@ impl Parser<'_> {
 				} else {
 					unexpected!(self, t, "either `<-` `<->` or `->`")
 				};
-				Part::Graph(lookup)
+				Part::Graph(Box::new(lookup))
 			}
 			_ => Part::Field(self.parse_ident_str()?.into()),
 		};
@@ -936,22 +936,22 @@ mod tests {
 					key: RecordIdKeyLit::String("test".into())
 				}))),
 				f("friend"),
-				Part::Graph(Lookup {
+				Part::Graph(Box::new(Lookup {
 					kind: LookupKind::Graph(Dir::Out),
 					what: vec![LookupSubject::Table {
 						table: "like".into(),
 						referencing_field: None
 					}],
 					..Default::default()
-				}),
-				Part::Graph(Lookup {
+				})),
+				Part::Graph(Box::new(Lookup {
 					kind: LookupKind::Graph(Dir::Out),
 					what: vec![LookupSubject::Table {
 						table: "person".into(),
 						referencing_field: None
 					}],
 					..Default::default()
-				}),
+				})),
 			]))
 		);
 	}

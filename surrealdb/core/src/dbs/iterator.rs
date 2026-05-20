@@ -475,11 +475,11 @@ impl Iterator {
 			// recreate the expression for the error.
 			let value = expr::Idiom(vec![
 				expr::Part::Start(Expr::Literal(Literal::RecordId(from.into_literal()))),
-				expr::Part::Lookup(Lookup {
+				expr::Part::Lookup(Box::new(Lookup {
 					kind,
 					what: what.into_iter().map(|x| x.into_literal()).collect(),
 					..Default::default()
-				}),
+				})),
 			])
 			.to_sql();
 

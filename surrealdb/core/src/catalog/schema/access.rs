@@ -369,7 +369,7 @@ impl ToSql for AccessDefinition {
 impl From<AccessType> for crate::expr::AccessType {
 	fn from(v: AccessType) -> Self {
 		match v {
-			AccessType::Record(v) => Self::Record(v.into()),
+			AccessType::Record(v) => Self::Record(Box::new(v.into())),
 			AccessType::Jwt(v) => Self::Jwt(v.into()),
 			AccessType::Bearer(v) => Self::Bearer(v.into()),
 		}
@@ -379,7 +379,7 @@ impl From<AccessType> for crate::expr::AccessType {
 impl From<crate::expr::AccessType> for AccessType {
 	fn from(v: crate::expr::AccessType) -> Self {
 		match v {
-			crate::expr::AccessType::Record(v) => AccessType::Record(v.into()),
+			crate::expr::AccessType::Record(v) => AccessType::Record((*v).into()),
 			crate::expr::AccessType::Jwt(v) => AccessType::Jwt(v.into()),
 			crate::expr::AccessType::Bearer(v) => AccessType::Bearer(v.into()),
 		}

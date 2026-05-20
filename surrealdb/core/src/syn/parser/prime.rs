@@ -77,19 +77,19 @@ impl Parser<'_> {
 						self.pop_peek();
 						let lookup =
 							stk.run(|ctx| self.parse_lookup(ctx, LookupKind::Reference)).await?;
-						Expr::Idiom(Idiom(vec![Part::Graph(lookup)]))
+						Expr::Idiom(Idiom(vec![Part::Graph(Box::new(lookup))]))
 					} else if peek.kind == t!("-") {
 						self.pop_peek();
 						let lookup = stk
 							.run(|ctx| self.parse_lookup(ctx, LookupKind::Graph(Dir::In)))
 							.await?;
-						Expr::Idiom(Idiom(vec![Part::Graph(lookup)]))
+						Expr::Idiom(Idiom(vec![Part::Graph(Box::new(lookup))]))
 					} else if peek.kind == t!("->") {
 						self.pop_peek();
 						let lookup = stk
 							.run(|ctx| self.parse_lookup(ctx, LookupKind::Graph(Dir::Both)))
 							.await?;
-						Expr::Idiom(Idiom(vec![Part::Graph(lookup)]))
+						Expr::Idiom(Idiom(vec![Part::Graph(Box::new(lookup))]))
 					} else {
 						unexpected!(self, token, "`<-`, `<->` or `<~`")
 					}
@@ -159,7 +159,7 @@ impl Parser<'_> {
 				self.pop_peek();
 				let lookup =
 					stk.run(|ctx| self.parse_lookup(ctx, LookupKind::Graph(Dir::Out))).await?;
-				Expr::Idiom(Idiom(vec![Part::Graph(lookup)]))
+				Expr::Idiom(Idiom(vec![Part::Graph(Box::new(lookup))]))
 			}
 			t!("[") => {
 				self.pop_peek();

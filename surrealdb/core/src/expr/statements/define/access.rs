@@ -134,12 +134,14 @@ impl DefineAccessStatement {
 				.unwrap_or(Expr::Literal(Literal::None)),
 			authenticate: def.authenticate.clone(),
 			access_type: match &def.access_type {
-				catalog::AccessType::Record(record_access) => AccessType::Record(RecordAccess {
-					signup: record_access.signup.clone(),
-					signin: record_access.signin.clone(),
-					jwt: convert_jwt_access(&record_access.jwt),
-					bearer: record_access.bearer.as_ref().map(convert_bearer_access),
-				}),
+				catalog::AccessType::Record(record_access) => {
+					AccessType::Record(Box::new(RecordAccess {
+						signup: record_access.signup.clone(),
+						signin: record_access.signin.clone(),
+						jwt: convert_jwt_access(&record_access.jwt),
+						bearer: record_access.bearer.as_ref().map(convert_bearer_access),
+					}))
+				}
 				catalog::AccessType::Jwt(jwt_access) => {
 					AccessType::Jwt(convert_jwt_access(jwt_access))
 				}

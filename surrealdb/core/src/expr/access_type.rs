@@ -10,7 +10,7 @@ use crate::expr::{Algorithm, Expr, Literal};
 
 #[derive(Debug, Hash, Clone, Eq, PartialEq)]
 pub(crate) enum AccessType {
-	Record(RecordAccess),
+	Record(Box<RecordAccess>),
 	Jwt(JwtAccess),
 	Bearer(BearerAccess),
 }
@@ -18,9 +18,9 @@ pub(crate) enum AccessType {
 impl Default for AccessType {
 	fn default() -> Self {
 		// Access type defaults to the most specific
-		Self::Record(RecordAccess {
+		Self::Record(Box::new(RecordAccess {
 			..Default::default()
-		})
+		}))
 	}
 }
 

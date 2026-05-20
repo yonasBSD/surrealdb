@@ -1577,7 +1577,7 @@ pub fn table_mutations_del() -> TableMutations {
 /// Table mutations with Def operation
 pub fn table_mutations_def() -> TableMutations {
 	let mut mutations = TableMutations::new(TableName::from("users"));
-	mutations.1.push(TableMutation::Def(table_basic()));
+	mutations.1.push(TableMutation::Def(Box::new(table_basic())));
 	mutations
 }
 

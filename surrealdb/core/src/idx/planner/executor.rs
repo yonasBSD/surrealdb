@@ -723,7 +723,7 @@ impl QueryExecutor {
 		{
 			let hits = fti.new_hits_iterator(&fte.0.qt, *operator);
 			let it = MatchesThingIterator::new(ir, hits);
-			return Ok(Some(RecordIterator::FullTextMatches(it)));
+			return Ok(Some(RecordIterator::FullTextMatches(Box::new(it))));
 		}
 		Ok(None)
 	}

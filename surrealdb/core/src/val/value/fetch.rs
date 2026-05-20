@@ -43,11 +43,11 @@ impl Value {
 					Value::RecordId(x) => {
 						let what = Expr::Idiom(Idiom(vec![
 							Part::Start(Expr::Literal(Literal::RecordId(x.clone().into_literal()))),
-							Part::Lookup(Lookup {
+							Part::Lookup(Box::new(Lookup {
 								what: g.what.clone(),
 								kind: g.kind.clone(),
 								..Default::default()
-							}),
+							})),
 						]));
 
 						let stm = SelectStatement {

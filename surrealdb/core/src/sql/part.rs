@@ -12,7 +12,7 @@ pub(crate) enum Part {
 	First,
 	Field(Strand),
 	Where(Expr),
-	Graph(Lookup),
+	Graph(Box<Lookup>),
 	Value(Expr),
 	Start(Expr),
 	Method(Strand, Vec<Expr>),
@@ -32,7 +32,7 @@ impl From<Part> for crate::expr::Part {
 			Part::First => Self::First,
 			Part::Field(ident) => Self::Field(ident),
 			Part::Where(value) => Self::Where(value.into()),
-			Part::Graph(graph) => Self::Lookup(graph.into()),
+			Part::Graph(graph) => Self::Lookup(Box::new((*graph).into())),
 			Part::Value(value) => Self::Value(value.into()),
 			Part::Start(value) => Self::Start(value.into()),
 			Part::Method(method, values) => {
@@ -62,7 +62,7 @@ impl From<crate::expr::Part> for Part {
 			crate::expr::Part::First => Self::First,
 			crate::expr::Part::Field(ident) => Self::Field(ident),
 			crate::expr::Part::Where(value) => Self::Where(value.into()),
-			crate::expr::Part::Lookup(graph) => Self::Graph(graph.into()),
+			crate::expr::Part::Lookup(graph) => Self::Graph(Box::new((*graph).into())),
 			crate::expr::Part::Value(value) => Self::Value(value.into()),
 			crate::expr::Part::Start(value) => Self::Start(value.into()),
 			crate::expr::Part::Method(method, values) => {

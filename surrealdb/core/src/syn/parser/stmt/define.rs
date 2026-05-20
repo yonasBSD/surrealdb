@@ -61,9 +61,10 @@ impl Parser<'_> {
 			t!("EVENT") => {
 				stk.run(|stk| self.parse_define_event(stk)).await.map(DefineStatement::Event)
 			}
-			t!("FIELD") => {
-				stk.run(|stk| self.parse_define_field(stk)).await.map(DefineStatement::Field)
-			}
+			t!("FIELD") => stk
+				.run(|stk| self.parse_define_field(stk))
+				.await
+				.map(|s| DefineStatement::Field(Box::new(s))),
 			t!("INDEX") => {
 				stk.run(|stk| self.parse_define_index(stk)).await.map(DefineStatement::Index)
 			}
@@ -522,7 +523,7 @@ impl Parser<'_> {
 								}
 								self.eat(t!(","));
 							}
-							res.access_type = AccessType::Record(ac);
+							res.access_type = AccessType::Record(Box::new(ac));
 						}
 						t!("BEARER") => {
 							self.pop_peek();

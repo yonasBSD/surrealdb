@@ -29,7 +29,9 @@ impl Parser<'_> {
 			t!("TABLE") => self.parse_alter_table(stk).await.map(AlterStatement::Table),
 			t!("EVENT") => self.parse_alter_event(stk).await.map(AlterStatement::Event),
 			t!("INDEX") => self.parse_alter_index(stk).await.map(AlterStatement::Index),
-			t!("FIELD") => self.parse_alter_field(stk).await.map(AlterStatement::Field),
+			t!("FIELD") => {
+				self.parse_alter_field(stk).await.map(|s| AlterStatement::Field(Box::new(s)))
+			}
 			t!("PARAM") => self.parse_alter_param(stk).await.map(AlterStatement::Param),
 			t!("SEQUENCE") => self.parse_alter_sequence(stk).await.map(AlterStatement::Sequence),
 			t!("BUCKET") => self.parse_alter_bucket(stk, next).await.map(AlterStatement::Bucket),

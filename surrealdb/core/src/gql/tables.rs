@@ -2280,7 +2280,7 @@ fn binop_for_relation(
 	};
 	let count_lhs = Expr::FunctionCall(Box::new(FunctionCall {
 		receiver: Function::Normal("count".to_string()),
-		arguments: vec![Expr::Idiom(Idiom(vec![Part::Lookup(lookup)]))],
+		arguments: vec![Expr::Idiom(Idiom(vec![Part::Lookup(Box::new(lookup))]))],
 	}));
 
 	let mut exprs: Vec<Expr> = Vec::new();

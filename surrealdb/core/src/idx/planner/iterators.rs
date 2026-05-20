@@ -128,7 +128,7 @@ pub(crate) enum RecordIterator {
 	UniqueRangeReverse(UniqueRangeReverseThingIterator),
 	UniqueUnion(UniqueUnionThingIterator),
 	UniqueJoin(Box<UniqueJoinThingIterator>),
-	FullTextMatches(MatchesThingIterator<FullTextHitsIterator>),
+	FullTextMatches(Box<MatchesThingIterator<FullTextHitsIterator>>),
 	Knn(KnnIterator),
 }
 

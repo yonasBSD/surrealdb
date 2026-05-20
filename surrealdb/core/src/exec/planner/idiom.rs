@@ -177,7 +177,7 @@ impl<'ctx> Planner<'ctx> {
 					let (mut direction, mut extract_id) = lookup_metadata(&first_lookup);
 					let mut only = first_lookup.only;
 					let mut chain: Arc<dyn ExecOperator> = Arc::new(CurrentValueSource::new());
-					chain = self.plan_lookup_with_input(chain, first_lookup).await?;
+					chain = self.plan_lookup_with_input(chain, *first_lookup).await?;
 
 					// Consume all consecutive Part::Lookup nodes. The
 					// `peek + next` pattern provably yields a `Part::Lookup`,
@@ -196,7 +196,7 @@ impl<'ctx> Planner<'ctx> {
 						direction = d;
 						extract_id = e;
 						only |= next_lookup.only;
-						chain = self.plan_lookup_with_input(chain, next_lookup).await?;
+						chain = self.plan_lookup_with_input(chain, *next_lookup).await?;
 						fused = true;
 					}
 
@@ -299,7 +299,7 @@ impl<'ctx> Planner<'ctx> {
 					needs_full_pipeline || lookup.cond.is_some() || lookup.split.is_some();
 				let extract_id = needs_full_records && !needs_full_pipeline;
 				let only = lookup.only;
-				let plan = self.plan_lookup(lookup).await?;
+				let plan = self.plan_lookup(*lookup).await?;
 				Ok(Arc::new(LookupPart {
 					direction,
 					plan,

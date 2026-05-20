@@ -25,7 +25,7 @@ pub(crate) enum Part {
 	First,
 	Field(Strand),
 	Where(Expr),
-	Lookup(Lookup),
+	Lookup(Box<Lookup>),
 	Value(Expr),
 	/// TODO: Remove, start and move it out of part to elimite invalid state.
 	Start(Expr),

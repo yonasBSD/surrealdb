@@ -17,7 +17,7 @@ pub enum TableMutation {
 	// we do include it in the first field for convenience.
 	Set(RecordId, Value),
 	Del(RecordId),
-	Def(TableDefinition),
+	Def(Box<TableDefinition>),
 	/// Includes the ID, current value (after change), changes that can be
 	/// applied to get the original value
 	/// Example, ("mytb:tobie", {{"note": "surreal"}}, [{"op": "add", "path":
@@ -52,7 +52,7 @@ impl TableMutations {
 	/// Push a table change to the table mutations
 	pub fn push_table_change(&mut self, dt: TableDefinition) {
 		// Push the table change to the entry
-		self.1.push(TableMutation::Def(dt));
+		self.1.push(TableMutation::Def(Box::new(dt)));
 	}
 
 	/// Push a mutation to the table mutations (record change)
@@ -208,12 +208,12 @@ mod tests {
 						]))),
 					),
 					TableMutation::Del(RecordId::new("mytb".into(), "tobie".to_owned())),
-					TableMutation::Def(TableDefinition::new(
+					TableMutation::Def(Box::new(TableDefinition::new(
 						NamespaceId(1),
 						DatabaseId(2),
 						TableId(3),
 						"mytb".into(),
-					)),
+					))),
 				],
 			)]),
 		);
@@ -261,12 +261,12 @@ mod tests {
 								"note" => Value::from("surreal"),
 						})),
 					),
-					TableMutation::Def(TableDefinition::new(
+					TableMutation::Def(Box::new(TableDefinition::new(
 						NamespaceId(1),
 						DatabaseId(2),
 						TableId(3),
 						"mytb".into(),
-					)),
+					))),
 				],
 			)]),
 		);

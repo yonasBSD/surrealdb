@@ -1040,7 +1040,7 @@ fn parse_define_access_record() {
 				kind: DefineKind::Default,
 				name: Expr::Idiom(Idiom::field("a".to_string())),
 				base: Base::Db,
-				access_type: AccessType::Record(RecordAccess {
+				access_type: AccessType::Record(Box::new(RecordAccess {
 					signup: None,
 					signin: None,
 					jwt: JwtAccess {
@@ -1056,7 +1056,7 @@ fn parse_define_access_record() {
 						}),
 					},
 					bearer: None,
-				}),
+				})),
 				authenticate: None,
 				duration: AccessDuration {
 					grant: Expr::Literal(Literal::Duration(PublicDuration::from_days(30).unwrap())),
@@ -1079,7 +1079,7 @@ fn parse_define_access_record() {
 				kind: DefineKind::Default,
 				name: Expr::Idiom(Idiom::field("a".to_string())),
 				base: Base::Db,
-				access_type: AccessType::Record(RecordAccess {
+				access_type: AccessType::Record(Box::new(RecordAccess {
 					signup: None,
 					signin: None,
 					jwt: JwtAccess {
@@ -1093,7 +1093,7 @@ fn parse_define_access_record() {
 						}),
 					},
 					bearer: None,
-				}),
+				})),
 				authenticate: None,
 				duration: AccessDuration {
 					grant: Expr::Literal(Literal::Duration(PublicDuration::from_days(30).unwrap())),
@@ -1121,7 +1121,7 @@ fn parse_define_access_record() {
 				kind: DefineKind::Default,
 				name: Expr::Idiom(Idiom::field("a".to_string())),
 				base: Base::Db,
-				access_type: AccessType::Record(RecordAccess {
+				access_type: AccessType::Record(Box::new(RecordAccess {
 					signup: None,
 					signin: None,
 					jwt: JwtAccess {
@@ -1148,7 +1148,7 @@ fn parse_define_access_record() {
 							}),
 						},
 					}),
-				}),
+				})),
 				authenticate: None,
 				duration: AccessDuration {
 					grant: Expr::Literal(Literal::Duration(PublicDuration::from_days(10).unwrap())),
@@ -1175,7 +1175,7 @@ fn parse_define_access_record() {
 				kind: DefineKind::Default,
 				name: Expr::Idiom(Idiom::field("a".to_string())),
 				base: Base::Db,
-				access_type: AccessType::Record(RecordAccess {
+				access_type: AccessType::Record(Box::new(RecordAccess {
 					signup: None,
 					signin: None,
 					jwt: JwtAccess {
@@ -1202,7 +1202,7 @@ fn parse_define_access_record() {
 							}),
 						},
 					}),
-				}),
+				})),
 				authenticate: None,
 				duration: AccessDuration {
 					grant: Expr::Literal(Literal::Duration(PublicDuration::from_days(10).unwrap())),
@@ -1225,7 +1225,7 @@ fn parse_define_access_record() {
 				kind: DefineKind::Default,
 				name: Expr::Idiom(Idiom::field("a".to_string())),
 				base: Base::Db,
-				access_type: AccessType::Record(RecordAccess {
+				access_type: AccessType::Record(Box::new(RecordAccess {
 					signup: None,
 					signin: None,
 					jwt: JwtAccess {
@@ -1239,7 +1239,7 @@ fn parse_define_access_record() {
 						}),
 					},
 					bearer: None,
-				}),
+				})),
 				authenticate: None,
 				duration: AccessDuration {
 					grant: Expr::Literal(Literal::Duration(PublicDuration::from_days(30).unwrap())),
@@ -1647,7 +1647,7 @@ fn parse_define_field() {
 
 		assert_eq!(
 			res,
-			Expr::Define(Box::new(DefineStatement::Field(DefineFieldStatement {
+			Expr::Define(Box::new(DefineStatement::Field(Box::new(DefineFieldStatement {
 				kind: DefineKind::Default,
 				name: Expr::Idiom(Idiom(vec![
 					Part::Field(Strand::new_static("foo")),
@@ -1677,7 +1677,7 @@ fn parse_define_field() {
 				computed: None,
 				graphql_alias: None,
 				graphql_deprecated: None,
-			})))
+			}))))
 		)
 	}
 
@@ -1958,10 +1958,10 @@ fn parse_delete_2() {
 					table: "a".into(),
 					key: RecordIdKeyLit::String("b".into()),
 				}))),
-				Part::Graph(Lookup {
+				Part::Graph(Box::new(Lookup {
 					kind: LookupKind::Graph(Dir::Out),
 					..Default::default()
-				}),
+				})),
 				Part::Last,
 				Part::Where(Expr::Literal(Literal::Bool(true))),
 			]))],
@@ -2741,14 +2741,14 @@ fn parse_update() {
 			only: true,
 			what: vec![Expr::Idiom(Idiom(vec![
 				Part::Field(Strand::new_static("a")),
-				Part::Graph(Lookup {
+				Part::Graph(Box::new(Lookup {
 					kind: LookupKind::Graph(Dir::Out),
 					what: vec![LookupSubject::Table {
 						table: "b".into(),
 						referencing_field: None
 					}],
 					..Default::default()
-				})
+				}))
 			]))],
 			with: Some(With::Index(vec!["index".to_owned(), "index_2".to_owned()])),
 			cond: Some(Cond(Expr::Literal(Literal::Bool(true)))),
@@ -2756,14 +2756,14 @@ fn parse_update() {
 				Idiom(vec![Part::Field(Strand::new_static("foo")), Part::Flatten]),
 				Idiom(vec![
 					Part::Field(Strand::new_static("a")),
-					Part::Graph(Lookup {
+					Part::Graph(Box::new(Lookup {
 						kind: LookupKind::Graph(Dir::Out),
 						what: vec![LookupSubject::Table {
 							table: "b".into(),
 							referencing_field: None
 						}],
 						..Default::default()
-					})
+					}))
 				]),
 				Idiom(vec![Part::Field(Strand::new_static("c")), Part::All])
 			])),
@@ -2783,14 +2783,14 @@ fn parse_upsert() {
 			only: true,
 			what: vec![Expr::Idiom(Idiom(vec![
 				Part::Field(Strand::new_static("a")),
-				Part::Graph(Lookup {
+				Part::Graph(Box::new(Lookup {
 					kind: LookupKind::Graph(Dir::Out),
 					what: vec![LookupSubject::Table {
 						table: "b".into(),
 						referencing_field: None
 					}],
 					..Default::default()
-				})
+				}))
 			]))],
 			with: Some(With::Index(vec!["index".to_owned(), "index_2".to_owned()])),
 			cond: Some(Cond(Expr::Literal(Literal::Bool(true)))),
@@ -2798,14 +2798,14 @@ fn parse_upsert() {
 				Idiom(vec![Part::Field(Strand::new_static("foo")), Part::Flatten]),
 				Idiom(vec![
 					Part::Field(Strand::new_static("a")),
-					Part::Graph(Lookup {
+					Part::Graph(Box::new(Lookup {
 						kind: LookupKind::Graph(Dir::Out),
 						what: vec![LookupSubject::Table {
 							table: "b".into(),
 							referencing_field: None
 						}],
 						..Default::default()
-					})
+					}))
 				]),
 				Idiom(vec![Part::Field(Strand::new_static("c")), Part::All])
 			])),

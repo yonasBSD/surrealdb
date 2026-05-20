@@ -458,11 +458,11 @@ impl Value {
 							let fields = g.expr.clone().unwrap_or(Fields::value_id());
 							let what = Expr::Idiom(Idiom(vec![
 								Part::Start(Expr::Literal(Literal::RecordId(val.into_literal()))),
-								Part::Lookup(Lookup {
+								Part::Lookup(Box::new(Lookup {
 									what: g.what.clone(),
 									kind: g.kind.clone(),
 									..Default::default()
-								}),
+								})),
 							]));
 
 							let stm = SelectStatement {

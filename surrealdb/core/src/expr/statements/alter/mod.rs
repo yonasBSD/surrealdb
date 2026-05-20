@@ -119,7 +119,7 @@ pub(crate) enum AlterStatement {
 	Event(AlterEventStatement),
 	Index(AlterIndexStatement),
 	Sequence(AlterSequenceStatement),
-	Field(AlterFieldStatement),
+	Field(Box<AlterFieldStatement>),
 	Param(AlterParamStatement),
 	Bucket(AlterBucketStatement),
 	Config(AlterConfigStatement),
