@@ -64,7 +64,9 @@ use crate::val::{Datetime, TableName, Value};
 	cache_events_ts: Uuid::default(),
 	cache_tables_ts: Uuid::default(),
 	cache_indexes_ts: Uuid::default(),
-}, 149)]
+	graphql_alias: None,
+	graphql_deprecated: None,
+}, 151)]
 #[case::subscription(SubscriptionDefinition {
 	id: Uuid::default(),
 	node: Uuid::default(),
@@ -187,7 +189,9 @@ use crate::val::{Datetime, TableName, Value};
 	reference: None,
 	auth_limit: AuthLimit::default(),
 	computed_deps: None,
-}, 44)]
+	graphql_alias: None,
+	graphql_deprecated: None,
+}, 46)]
 #[case::function(FunctionDefinition {
 	name: "function".into(),
 	args: vec![],
@@ -198,7 +202,9 @@ use crate::val::{Datetime, TableName, Value};
 	permissions: Permission::Full,
 	returns: Some(Kind::Any),
 	auth_limit: AuthLimit::default(),
-}, 40)]
+	graphql_alias: None,
+	graphql_deprecated: None,
+}, 42)]
 #[case::index(IndexDefinition {
 	index_id: IndexId(123),
 	name: "test".into(),

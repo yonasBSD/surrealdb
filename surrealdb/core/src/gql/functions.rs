@@ -51,8 +51,14 @@ pub async fn process_fns(
 		let kvs1 = Arc::clone(datastore);
 		let fnd1 = fnd.clone();
 
+		// Honour an explicit `GRAPHQL <ident>` alias when valid; otherwise fall
+		// back to the auto-derived `fn_<name>` form. See GitHub issue #4537.
+		let field_name = match fnd.graphql_alias.as_deref() {
+			Some(alias) if super::tables::is_valid_gql_identifier_pub(alias) => alias.to_string(),
+			_ => format!("fn_{}", fnd.name),
+		};
 		let mut field = Field::new(
-			format!("fn_{}", fnd.name),
+			field_name,
 			kind_to_type_with_enum_prefix(
 				kind.clone(),
 				types,
@@ -119,6 +125,16 @@ pub async fn process_fns(
 				})
 			},
 		);
+
+		// Attach a description that surfaces the SurrealQL `COMMENT` and any
+		// `GRAPHQL_DEPRECATED "reason"` to schema consumers (async-graphql
+		// 7.2.1 doesn't yet expose the `@deprecated` directive setter).
+		if let Some(desc) = super::naming::description_with_deprecation(
+			fnd.comment.as_deref(),
+			fnd.graphql_deprecated.as_deref(),
+		) {
+			field = field.description(desc);
+		}
 
 		// Register each function argument as a GraphQL input value
 		for (arg_name, arg_kind) in fnd.args.iter() {

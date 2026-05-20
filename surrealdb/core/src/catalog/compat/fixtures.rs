@@ -134,6 +134,8 @@ pub fn table_basic() -> TableDefinition {
 		cache_events_ts: UuidExt::nil(),
 		cache_tables_ts: UuidExt::nil(),
 		cache_indexes_ts: UuidExt::nil(),
+		graphql_alias: None,
+		graphql_deprecated: None,
 	}
 }
 
@@ -166,6 +168,8 @@ pub fn table_with_view() -> TableDefinition {
 		cache_events_ts: UuidExt::nil(),
 		cache_tables_ts: UuidExt::nil(),
 		cache_indexes_ts: UuidExt::nil(),
+		graphql_alias: None,
+		graphql_deprecated: None,
 	}
 }
 
@@ -190,6 +194,8 @@ pub fn table_schemafull() -> TableDefinition {
 		cache_events_ts: UuidExt::nil(),
 		cache_tables_ts: UuidExt::nil(),
 		cache_indexes_ts: UuidExt::nil(),
+		graphql_alias: None,
+		graphql_deprecated: None,
 	}
 }
 
@@ -222,6 +228,8 @@ pub fn table_relation() -> TableDefinition {
 		cache_events_ts: UuidExt::nil(),
 		cache_tables_ts: UuidExt::nil(),
 		cache_indexes_ts: UuidExt::nil(),
+		graphql_alias: None,
+		graphql_deprecated: None,
 	}
 }
 
@@ -247,6 +255,8 @@ pub fn table_with_materialized_view() -> TableDefinition {
 		cache_events_ts: UuidExt::nil(),
 		cache_tables_ts: UuidExt::nil(),
 		cache_indexes_ts: UuidExt::nil(),
+		graphql_alias: None,
+		graphql_deprecated: None,
 	}
 }
 
@@ -268,6 +278,8 @@ pub fn table_any_type() -> TableDefinition {
 		cache_events_ts: UuidExt::nil(),
 		cache_tables_ts: UuidExt::nil(),
 		cache_indexes_ts: UuidExt::nil(),
+		graphql_alias: None,
+		graphql_deprecated: None,
 	}
 }
 
@@ -796,6 +808,8 @@ pub fn field_basic() -> FieldDefinition {
 		reference: None,
 		auth_limit: AuthLimit::new_no_limit(),
 		computed_deps: None,
+		graphql_alias: None,
+		graphql_deprecated: None,
 	}
 }
 
@@ -822,6 +836,8 @@ pub fn field_with_type() -> FieldDefinition {
 		reference: None,
 		auth_limit: AuthLimit::new_no_limit(),
 		computed_deps: None,
+		graphql_alias: None,
+		graphql_deprecated: None,
 	}
 }
 
@@ -844,6 +860,8 @@ pub fn field_readonly() -> FieldDefinition {
 		reference: None,
 		auth_limit: AuthLimit::new_no_limit(),
 		computed_deps: None,
+		graphql_alias: None,
+		graphql_deprecated: None,
 	}
 }
 
@@ -873,6 +891,8 @@ pub fn field_flexible_with_reference() -> FieldDefinition {
 			fields: vec!["price".to_string(), "quantity".to_string()],
 			is_complete: true,
 		}),
+		graphql_alias: None,
+		graphql_deprecated: None,
 	}
 }
 
@@ -906,6 +926,8 @@ pub fn field_with_default_set() -> FieldDefinition {
 			fields: vec![],
 			is_complete: false,
 		}),
+		graphql_alias: None,
+		graphql_deprecated: None,
 	}
 }
 
@@ -935,6 +957,8 @@ pub fn field_record_type() -> FieldDefinition {
 			Some("Editor".to_string()),
 		),
 		computed_deps: None,
+		graphql_alias: None,
+		graphql_deprecated: None,
 	}
 }
 
@@ -954,6 +978,8 @@ pub fn function_basic() -> FunctionDefinition {
 		permissions: Permission::Full,
 		returns: None,
 		auth_limit: AuthLimit::new_no_limit(),
+		graphql_alias: None,
+		graphql_deprecated: None,
 	}
 }
 
@@ -967,6 +993,8 @@ pub fn function_with_args() -> FunctionDefinition {
 		permissions: Permission::Full,
 		returns: Some(Kind::Number),
 		auth_limit: AuthLimit::new_no_limit(),
+		graphql_alias: None,
+		graphql_deprecated: None,
 	}
 }
 

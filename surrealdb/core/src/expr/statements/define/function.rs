@@ -23,6 +23,8 @@ pub(crate) struct DefineFunctionStatement {
 	pub comment: Expr,
 	pub permissions: Permission,
 	pub returns: Option<Kind>,
+	pub graphql_alias: Option<String>,
+	pub graphql_deprecated: Option<String>,
 }
 
 impl DefineFunctionStatement {
@@ -37,6 +39,9 @@ impl DefineFunctionStatement {
 	) -> Result<Value> {
 		// Allowed to run?
 		ctx.is_allowed(opt, Action::Edit, ResourceKind::Function, Base::Db)?;
+		// Validate any GRAPHQL_ALIAS at definition time so typos surface here
+		// rather than silently falling back at schema-generation time.
+		super::validate_graphql_alias(&self.graphql_alias, "function")?;
 		// Fetch the transaction
 		let txn = ctx.tx();
 		// Check if the definition exists
@@ -78,6 +83,8 @@ impl DefineFunctionStatement {
 				returns: self.returns.clone(),
 				comment,
 				auth_limit: AuthLimit::new_from_auth(&opt.auth).into(),
+				graphql_alias: self.graphql_alias.clone(),
+				graphql_deprecated: self.graphql_deprecated.clone(),
 			},
 		)
 		.await?;

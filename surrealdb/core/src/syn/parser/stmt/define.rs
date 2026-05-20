@@ -195,6 +195,8 @@ impl Parser<'_> {
 			returns,
 			comment: Expr::Literal(Literal::None),
 			permissions: Permission::default(),
+			graphql_alias: None,
+			graphql_deprecated: None,
 		};
 
 		loop {
@@ -206,6 +208,14 @@ impl Parser<'_> {
 				t!("PERMISSIONS") => {
 					self.pop_peek();
 					res.permissions = stk.run(|ctx| self.parse_permission_value(ctx)).await?;
+				}
+				t!("GRAPHQL_ALIAS") => {
+					self.pop_peek();
+					res.graphql_alias = Some(self.parse_string_lit()?);
+				}
+				t!("GRAPHQL_DEPRECATED") => {
+					self.pop_peek();
+					res.graphql_deprecated = Some(self.parse_string_lit()?);
 				}
 				_ => break,
 			}
@@ -716,6 +726,14 @@ impl Parser<'_> {
 						_ => unexpected!(self, peek, "`SELECT`"),
 					}
 				}
+				t!("GRAPHQL_ALIAS") => {
+					self.pop_peek();
+					res.graphql_alias = Some(self.parse_string_lit()?);
+				}
+				t!("GRAPHQL_DEPRECATED") => {
+					self.pop_peek();
+					res.graphql_deprecated = Some(self.parse_string_lit()?);
+				}
 				_ => break,
 			}
 		}
@@ -1009,6 +1027,14 @@ impl Parser<'_> {
 				t!("COMPUTED") => {
 					self.pop_peek();
 					res.computed = Some(stk.run(|stk| self.parse_expr_field(stk)).await?);
+				}
+				t!("GRAPHQL_ALIAS") => {
+					self.pop_peek();
+					res.graphql_alias = Some(self.parse_string_lit()?);
+				}
+				t!("GRAPHQL_DEPRECATED") => {
+					self.pop_peek();
+					res.graphql_deprecated = Some(self.parse_string_lit()?);
 				}
 				_ => break,
 			}

@@ -47,6 +47,8 @@ pub(crate) struct DefineFieldStatement {
 	pub permissions: Permissions,
 	pub comment: Expr,
 	pub reference: Option<Reference>,
+	pub graphql_alias: Option<String>,
+	pub graphql_deprecated: Option<String>,
 }
 
 impl Default for DefineFieldStatement {
@@ -65,6 +67,8 @@ impl Default for DefineFieldStatement {
 			permissions: Permissions::default(),
 			comment: Expr::Literal(Literal::None),
 			reference: None,
+			graphql_alias: None,
+			graphql_deprecated: None,
 		}
 	}
 }
@@ -138,6 +142,8 @@ impl DefineFieldStatement {
 			reference: self.reference.clone(),
 			auth_limit: AuthLimit::new_from_auth(opt.auth.as_ref()).into(),
 			computed_deps,
+			graphql_alias: self.graphql_alias.clone(),
+			graphql_deprecated: self.graphql_deprecated.clone(),
 		})
 	}
 
@@ -154,6 +160,10 @@ impl DefineFieldStatement {
 
 		// Allowed to run?
 		ctx.is_allowed(opt, Action::Edit, ResourceKind::Field, Base::Db)?;
+
+		// Validate any GRAPHQL_ALIAS at definition time so typos surface here
+		// rather than silently falling back at schema-generation time.
+		super::validate_graphql_alias(&self.graphql_alias, "field")?;
 
 		// Get the NS and DB
 		let (ns_name, db_name) = opt.ns_db()?;

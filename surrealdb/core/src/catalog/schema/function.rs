@@ -11,7 +11,7 @@ use crate::sql::statements::define::DefineKind;
 use crate::sql::{self, DefineFunctionStatement};
 use crate::val::Value;
 
-#[revisioned(revision = 2)]
+#[revisioned(revision = 3)]
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct FunctionDefinition {
 	pub(crate) name: Strand,
@@ -23,6 +23,15 @@ pub struct FunctionDefinition {
 	/// The auth limit of the API.
 	#[revision(start = 2, default_fn = "default_auth_limit")]
 	pub(crate) auth_limit: AuthLimit,
+	/// Optional alias used as the GraphQL Query field name. See GitHub issue
+	/// #4537. `Option<String>::default()` already returns `None`.
+	#[revision(start = 3)]
+	pub(crate) graphql_alias: Option<String>,
+
+	/// Reason emitted on the GraphQL `@deprecated` directive of the
+	/// auto-generated Query field for this function.
+	#[revision(start = 3)]
+	pub(crate) graphql_deprecated: Option<String>,
 }
 
 // This was pushed in after the first beta, so we need to add auth_limit to structs in a
@@ -49,6 +58,8 @@ impl FunctionDefinition {
 				.clone()
 				.map(|x| sql::Expr::Literal(sql::Literal::String(x.into())))
 				.unwrap_or(sql::Expr::Literal(sql::Literal::None)),
+			graphql_alias: self.graphql_alias.clone(),
+			graphql_deprecated: self.graphql_deprecated.clone(),
 		}
 	}
 }
@@ -66,6 +77,8 @@ impl InfoStructure for FunctionDefinition {
 			"permissions" => self.permissions.structure(),
 			"comment", if let Some(v) = self.comment => v.to_sql().into(),
 			"returns", if let Some(v) = self.returns => v.to_sql().into(),
+			"graphql_alias", if let Some(v) = self.graphql_alias => v.into(),
+			"graphql_deprecated", if let Some(v) = self.graphql_deprecated => v.into(),
 		})
 	}
 }

@@ -210,6 +210,8 @@ fn statements() -> Vec<TopLevelExpr> {
 				comment: Expr::Literal(Literal::String(Strand::new_static("test"))),
 				permissions: Permission::Full,
 				returns: None,
+				graphql_alias: None,
+				graphql_deprecated: None,
 			},
 		)))),
 		TopLevelExpr::Expr(Expr::Define(Box::new(DefineStatement::Access(
@@ -289,6 +291,8 @@ fn statements() -> Vec<TopLevelExpr> {
 			comment: Expr::Literal(Literal::None),
 
 			table_type: TableType::Normal,
+			graphql_alias: None,
+			graphql_deprecated: None,
 		})))),
 		TopLevelExpr::Expr(Expr::Define(Box::new(DefineStatement::Event(DefineEventStatement {
 			kind: DefineKind::Default,
@@ -330,6 +334,8 @@ fn statements() -> Vec<TopLevelExpr> {
 			comment: Expr::Literal(Literal::None),
 			reference: None,
 			computed: None,
+			graphql_alias: None,
+			graphql_deprecated: None,
 		})))),
 		TopLevelExpr::Expr(Expr::Define(Box::new(DefineStatement::Index(DefineIndexStatement {
 			kind: DefineKind::Default,

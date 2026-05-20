@@ -1,7 +1,7 @@
 macro_rules! keyword {
 	($($name:ident => $value:tt),* $(,)?) => {
 
-		#[repr(u8)]
+		#[repr(u16)]
 		#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug)]
 		pub enum Keyword{
 			$($name,)*
@@ -104,6 +104,8 @@ keyword! {
 	Functions => "FUNCTIONS",
 	Grant => "GRANT",
 	Graphql => "GRAPHQL",
+	GraphqlAlias => "GRAPHQL_ALIAS",
+	GraphqlDeprecated => "GRAPHQL_DEPRECATED",
 	Group => "GROUP",
 	Headers => "HEADERS",
 	Highlights => "HIGHLIGHTS",

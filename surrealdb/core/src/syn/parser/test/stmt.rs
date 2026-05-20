@@ -255,6 +255,8 @@ fn parse_define_function() {
 			comment: Expr::Literal(Literal::String(Strand::new_static("test"))),
 			permissions: Permission::Full,
 			returns: None,
+			graphql_alias: None,
+			graphql_deprecated: None,
 		})))
 	)
 }
@@ -1605,6 +1607,8 @@ fn parse_define_table() {
 			comment: Expr::Literal(Literal::None),
 
 			table_type: TableType::Normal,
+			graphql_alias: None,
+			graphql_deprecated: None,
 		})))
 	);
 }
@@ -1671,6 +1675,8 @@ fn parse_define_field() {
 				comment: Expr::Literal(Literal::None),
 				reference: None,
 				computed: None,
+				graphql_alias: None,
+				graphql_deprecated: None,
 			})))
 		)
 	}

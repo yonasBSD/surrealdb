@@ -36,7 +36,7 @@ pub struct ComputedDeps {
 	pub is_complete: bool,
 }
 
-#[revisioned(revision = 3)]
+#[revisioned(revision = 4)]
 #[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub struct FieldDefinition {
 	// TODO: Needs to be it's own type.
@@ -68,6 +68,21 @@ pub struct FieldDefinition {
 	/// When `None` on a computed field, deps are extracted on-the-fly at query time.
 	#[revision(start = 3, default_fn = "default_computed_deps")]
 	pub(crate) computed_deps: Option<ComputedDeps>,
+
+	/// Optional alias used as the GraphQL field name. When set, GraphQL
+	/// schema generation prefers this over the raw SurrealQL field name,
+	/// allowing snake_case columns to be exposed as camelCase. See
+	/// GitHub issue #4537. `Option<String>::default()` already returns
+	/// `None` so no explicit `default_fn` is needed.
+	#[revision(start = 4)]
+	pub(crate) graphql_alias: Option<String>,
+
+	/// Reason emitted on the GraphQL `@deprecated` directive. When set, the
+	/// corresponding GraphQL field is marked deprecated in introspection
+	/// (and in input objects), surfacing the reason to schema consumers
+	/// while remaining usable for backwards compatibility.
+	#[revision(start = 4)]
+	pub(crate) graphql_deprecated: Option<String>,
 }
 
 impl FieldDefinition {
@@ -116,6 +131,8 @@ impl FieldDefinition {
 				.map(|x| sql::Expr::Literal(sql::Literal::String(x.into())))
 				.unwrap_or(sql::Expr::Literal(sql::Literal::None)),
 			reference: self.reference.clone().map(|x| x.into()),
+			graphql_alias: self.graphql_alias.clone(),
+			graphql_deprecated: self.graphql_deprecated.clone(),
 		}
 	}
 }
@@ -140,6 +157,8 @@ impl InfoStructure for FieldDefinition {
 				"update" => self.update_permission.structure(),
 			}),
 			"comment", if let Some(v) = self.comment => v.into(),
+			"graphql_alias", if let Some(v) = self.graphql_alias => v.into(),
+			"graphql_deprecated", if let Some(v) = self.graphql_deprecated => v.into(),
 		})
 	}
 }

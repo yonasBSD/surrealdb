@@ -414,7 +414,12 @@ impl fmt::Display for TokenKind {
 }
 
 /// An assertion statically checking the size of TokenKind.
-const _TOKEN_KIND_SIZE_ASSERT: [(); 2] = [(); std::mem::size_of::<TokenKind>()];
+///
+/// `TokenKind::Keyword` carries a `Keyword` enum that grew past 256 variants,
+/// so the inner repr is now `u16` and the whole `TokenKind` ends up at 4 bytes
+/// (1 discriminant + alignment + `u16` payload). If you adjust the `Keyword`
+/// repr keep this assertion in sync.
+const _TOKEN_KIND_SIZE_ASSERT: [(); 4] = [(); std::mem::size_of::<TokenKind>()];
 
 impl TokenKind {
 	pub fn has_data(&self) -> bool {

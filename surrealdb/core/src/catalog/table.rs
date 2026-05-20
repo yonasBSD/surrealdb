@@ -60,7 +60,7 @@ impl revision::WalkRevisioned for TableId {
 	}
 }
 
-#[revisioned(revision = 1)]
+#[revisioned(revision = 2)]
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TableDefinition {
 	pub(crate) namespace_id: NamespaceId,
@@ -83,6 +83,17 @@ pub struct TableDefinition {
 	pub(crate) cache_tables_ts: Uuid,
 	/// The last time that a DEFINE INDEX was added to this table
 	pub(crate) cache_indexes_ts: Uuid,
+
+	/// Optional alias used as the GraphQL type / query / mutation prefix for
+	/// this table. See GitHub issue #4537. `Option<String>::default()` is
+	/// `None`, so the standard `#[revision]` default is sufficient.
+	#[revision(start = 2)]
+	pub(crate) graphql_alias: Option<String>,
+
+	/// Reason emitted on the GraphQL `@deprecated` directive for every
+	/// auto-generated Query/Mutation field that targets this table.
+	#[revision(start = 2)]
+	pub(crate) graphql_deprecated: Option<String>,
 }
 
 impl_kv_value_revisioned!(TableDefinition);
@@ -111,6 +122,8 @@ impl TableDefinition {
 			cache_events_ts: now,
 			cache_tables_ts: now,
 			cache_indexes_ts: now,
+			graphql_alias: None,
+			graphql_deprecated: None,
 		}
 	}
 
@@ -138,6 +151,8 @@ impl TableDefinition {
 				.map(|v| sql::Expr::Literal(sql::Literal::String(v.into())))
 				.unwrap_or(sql::Expr::Literal(sql::Literal::None)),
 			table_type: self.table_type.clone().into(),
+			graphql_alias: self.graphql_alias.clone(),
+			graphql_deprecated: self.graphql_deprecated.clone(),
 			..Default::default()
 		}
 	}
@@ -160,6 +175,8 @@ impl InfoStructure for TableDefinition {
 			"changefeed", if let Some(v) = self.changefeed => v.structure(),
 			"permissions" => self.permissions.structure(),
 			"comment", if let Some(v) = self.comment => v.into(),
+			"graphql_alias", if let Some(v) = self.graphql_alias => v.into(),
+			"graphql_deprecated", if let Some(v) = self.graphql_deprecated => v.into(),
 			"id" => self.table_id.0.into(),
 		})
 	}

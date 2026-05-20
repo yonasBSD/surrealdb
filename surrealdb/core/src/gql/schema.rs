@@ -753,6 +753,21 @@ pub fn unwrap_type(ty: TypeRef) -> TypeRef {
 	}
 }
 
+/// Render a [`TypeRef`] as a string suitable for use in a GraphQL identifier.
+///
+/// `TypeRef::Display` produces shapes like `[child!]!` that contain brackets
+/// and exclamation marks — invalid characters for a GraphQL Name. This helper
+/// flattens nullability and list nesting into underscore-joined alphabetic
+/// segments so callers can build derived type names like
+/// `_filter_list_child` from `array<record<child>>`.
+pub fn filter_type_name(ty: &TypeRef) -> String {
+	match ty {
+		TypeRef::Named(n) => n.to_string(),
+		TypeRef::NonNull(inner) => filter_type_name(inner),
+		TypeRef::List(inner) => format!("list_{}", filter_type_name(inner)),
+	}
+}
+
 /// Try to convert a GraphQL value using one kind from an `Either` type list.
 ///
 /// Special token arms:
@@ -1134,16 +1149,19 @@ pub(crate) fn gql_to_sql_kind_with_scope(
 				let record_id_expr: Expr = record_id_expr.into();
 
 				match record_id_expr {
-					Expr::Literal(Literal::RecordId(t)) => match ts.contains(&t.table) {
-						true => {
+					Expr::Literal(Literal::RecordId(t)) => {
+						// Empty `ts` means "any record table" — accept all.
+						let table_allowed = ts.is_empty() || ts.contains(&t.table);
+						if table_allowed {
 							let key = convert_static_record_id_key(t.key)?;
 							Ok(SurValue::RecordId(SurRecordId {
 								table: t.table,
 								key,
 							}))
+						} else {
+							Err(type_error(kind, val))
 						}
-						false => Err(type_error(kind, val)),
-					},
+					}
 					_ => Err(type_error(kind, val)),
 				}
 			}

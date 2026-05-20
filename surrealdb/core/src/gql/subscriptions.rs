@@ -212,7 +212,7 @@ fn parse_subscription_cond(
 	tb_name: &TableName,
 ) -> Result<Option<Cond>, async_graphql::Error> {
 	let id_cond = parse_id_cond(args, tb_name)?;
-	let where_cond = parse_filter_arg(args, fds, tb_name.as_str())
+	let where_cond = parse_filter_arg(args, fds, tb_name.as_str(), &[])
 		.map_err(|e| async_graphql::Error::new(e.to_string()))?;
 	Ok(combine_cond(id_cond, where_cond))
 }

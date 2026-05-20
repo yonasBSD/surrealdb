@@ -15,6 +15,11 @@ pub(crate) struct DefineFunctionStatement {
 	pub comment: Expr,
 	pub permissions: Permission,
 	pub returns: Option<Kind>,
+	/// Optional GraphQL alias declared via `GRAPHQL_ALIAS "..."`.
+	pub graphql_alias: Option<String>,
+	/// Optional GraphQL deprecation reason declared via
+	/// `GRAPHQL_DEPRECATED "..."`.
+	pub graphql_deprecated: Option<String>,
 }
 
 impl ToSql for DefineFunctionStatement {
@@ -45,6 +50,12 @@ impl ToSql for DefineFunctionStatement {
 		if !matches!(self.comment, Expr::Literal(Literal::None)) {
 			write_sql!(f, fmt, " COMMENT {}", CoverStmts(&self.comment));
 		}
+		if let Some(ref alias) = self.graphql_alias {
+			write_sql!(f, fmt, " GRAPHQL_ALIAS {}", crate::fmt::QuoteStr(alias));
+		}
+		if let Some(ref reason) = self.graphql_deprecated {
+			write_sql!(f, fmt, " GRAPHQL_DEPRECATED {}", crate::fmt::QuoteStr(reason));
+		}
 		let fmt = fmt.increment();
 		write_sql!(f, fmt, " PERMISSIONS {}", self.permissions);
 	}
@@ -60,6 +71,8 @@ impl From<DefineFunctionStatement> for crate::expr::statements::DefineFunctionSt
 			comment: v.comment.into(),
 			permissions: v.permissions.into(),
 			returns: v.returns.map(Into::into),
+			graphql_alias: v.graphql_alias,
+			graphql_deprecated: v.graphql_deprecated,
 		}
 	}
 }
@@ -74,6 +87,8 @@ impl From<crate::expr::statements::DefineFunctionStatement> for DefineFunctionSt
 			comment: v.comment.into(),
 			permissions: v.permissions.into(),
 			returns: v.returns.map(Into::into),
+			graphql_alias: v.graphql_alias,
+			graphql_deprecated: v.graphql_deprecated,
 		}
 	}
 }

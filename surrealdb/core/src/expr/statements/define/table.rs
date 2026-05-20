@@ -44,6 +44,8 @@ pub(crate) struct DefineTableStatement {
 	pub changefeed: Option<ChangeFeed>,
 	pub comment: Expr,
 	pub table_type: TableType,
+	pub graphql_alias: Option<String>,
+	pub graphql_deprecated: Option<String>,
 }
 
 impl Default for DefineTableStatement {
@@ -59,6 +61,8 @@ impl Default for DefineTableStatement {
 			changefeed: None,
 			comment: Expr::Literal(Literal::None),
 			table_type: TableType::default(),
+			graphql_alias: None,
+			graphql_deprecated: None,
 		}
 	}
 }
@@ -74,6 +78,10 @@ impl DefineTableStatement {
 	) -> Result<Value> {
 		// Allowed to run?
 		ctx.is_allowed(opt, Action::Edit, ResourceKind::Table, Base::Db)?;
+
+		// Validate any GRAPHQL_ALIAS at definition time so typos surface here
+		// rather than silently falling back at schema-generation time.
+		super::validate_graphql_alias(&self.graphql_alias, "table")?;
 
 		// Process the name
 		let name =
@@ -133,6 +141,8 @@ impl DefineTableStatement {
 			cache_events_ts: cache_ts,
 			cache_indexes_ts: cache_ts,
 			cache_tables_ts: cache_ts,
+			graphql_alias: self.graphql_alias.clone(),
+			graphql_deprecated: self.graphql_deprecated.clone(),
 		};
 
 		// Add table relational fields
