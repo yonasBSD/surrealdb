@@ -121,15 +121,39 @@ impl FileCollector {
 					}
 
 					// Then handle the remaining values as they might need to be part of the random
-					// sampling.
-					// This implementation is taken from the IteratorRandom::choose_multiple. It is
-					// emperically tested to produce n values uniformly sampled from the iterator.
-					// TODO (DelSkayn): Figure exactly out why this is guarenteed to produce a
-					// uniform sampling.
+					// sampling. This is Vitter's Algorithm R for reservoir sampling — the same
+					// algorithm used by `IteratorRandom::choose_multiple`.
+					//
+					// Correctness: let `n = num` and let `N` be the total length of the
+					// stream. We use 1-based indexing for "the k-th item seen so far".
+					// The loop maintains the invariant that, immediately after seeing the
+					// k-th item, every item seen so far is in the reservoir with
+					// probability `n/k` (with probability `1` while `k <= n`). The fill
+					// loop above establishes the base case at `k = n` (probability `1`).
+					//
+					// In the loop below, `i` is the zero-based offset *into the remaining
+					// iterator*, so when we process this item we have just seen the
+					// `(i + n + 1)`-th item overall. Call that `k+1` where `k = i + n`.
+					// The inductive step is:
+					//
+					//   1. `idx` is drawn uniformly from `{0, 1, ..., k}` — i.e. one of `k + 1` (=
+					//      `i + 1 + n`) values — matching `rng.random_range(0..(i + 1 + num))`.
+					//   2. The new item enters the reservoir iff `idx < n` (i.e. `res.get_mut(idx)`
+					//      returns `Some`), with probability `n/(k+1)`. That is the target
+					//      inclusion probability after seeing `k + 1` items.
+					//   3. For each item already in the reservoir, the probability of being
+					//      replaced at this step is `1/(k+1)` (one specific slot among the `k+1`
+					//      equally-likely outcomes of `idx`), so the probability of survival is
+					//      `k/(k+1)`. Combined with the inductive hypothesis `n/k`, its post-step
+					//      inclusion probability is `n/k * k/(k+1) = n/(k+1)`, preserving the
+					//      invariant.
+					//
+					// At termination (after seeing all `N` items) every item is therefore
+					// in the reservoir with probability `n/N`, i.e. uniform.
 					for (i, v) in iter.enumerate() {
 						let v = v?;
-						// pick an index to insert the value in, swapping existing values if it is
-						// within the range.
+						// Pick an index to insert the value in, swapping existing values
+						// if it is within the range.
 						let idx = rng.random_range(0..(i + 1 + num as usize));
 						if let Some(slot) = res.get_mut(idx as usize) {
 							*slot = v
