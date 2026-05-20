@@ -11,7 +11,7 @@ use crate::catalog::{DatabaseId, NamespaceId, Record};
 use crate::ctx::{Context, FrozenContext};
 use crate::dbs::distinct::SyncDistinct;
 use crate::dbs::{Iterable, Iterator, Operable, Options, Processable, Statement};
-use crate::doc::{DocumentContext, NsDbCtx, NsDbTbCtx};
+use crate::doc::{DocumentContext, NsDbCtx};
 use crate::err::Error;
 use crate::expr::dir::Dir;
 use crate::expr::lookup::{ComputedLookupSubject, LookupKind};
@@ -81,25 +81,25 @@ impl Iterable {
 }
 
 pub(super) enum Collectable {
-	Lookup(NsDbTbCtx, LookupKind, Key),
-	RangeKey(NsDbTbCtx, Key),
-	TableKey(NsDbTbCtx, Key),
+	Lookup(DocumentContext, LookupKind, Key),
+	RangeKey(DocumentContext, Key),
+	TableKey(DocumentContext, Key),
 	Relatable {
-		doc_ctx: NsDbTbCtx,
+		doc_ctx: DocumentContext,
 		f: RecordId,
 		v: RelateThrough,
 		w: RecordId,
 		o: Option<Value>,
 	},
-	RecordId(NsDbTbCtx, RecordId),
-	GenerateRecordId(NsDbTbCtx, TableName),
+	RecordId(DocumentContext, RecordId),
+	GenerateRecordId(DocumentContext, TableName),
 	Value(NsDbCtx, Value),
-	Defer(NsDbTbCtx, RecordId),
-	Mergeable(NsDbTbCtx, TableName, Option<RecordIdKey>, Value),
-	KeyVal(NsDbTbCtx, Key, Val),
-	Count(NsDbTbCtx, usize),
-	IndexItem(NsDbTbCtx, IndexItemRecord),
-	IndexItemKey(NsDbTbCtx, IndexItemRecord),
+	Defer(DocumentContext, RecordId),
+	Mergeable(DocumentContext, TableName, Option<RecordIdKey>, Value),
+	KeyVal(DocumentContext, Key, Val),
+	Count(DocumentContext, usize),
+	IndexItem(DocumentContext, IndexItemRecord),
+	IndexItemKey(DocumentContext, IndexItemRecord),
 }
 
 impl Collectable {
@@ -121,6 +121,7 @@ impl Collectable {
 	#[instrument(level = "trace", name = "Collectable::prepare", skip_all)]
 	pub(super) async fn prepare(
 		self,
+		ctx: &FrozenContext,
 		opt: &Options,
 		txn: &Transaction,
 		rid_only: bool,
@@ -128,7 +129,7 @@ impl Collectable {
 		match self {
 			// Graph edge traversal results - requires special graph parsing and record lookup
 			Self::Lookup(doc_ctx, kind, key) => {
-				Self::process_lookup(doc_ctx, opt, txn, kind, key, rid_only).await
+				Self::process_lookup(doc_ctx, ctx, opt, txn, kind, key, rid_only).await
 			}
 			// Range scan results - lightweight processing for range queries
 			Self::RangeKey(doc_ctx, key) => Self::process_range_key(doc_ctx, key).await,
@@ -171,7 +172,8 @@ impl Collectable {
 
 	#[instrument(level = "trace", skip_all)]
 	async fn process_lookup(
-		mut doc_ctx: NsDbTbCtx,
+		mut doc_ctx: DocumentContext,
+		ctx: &FrozenContext,
 		opt: &Options,
 		txn: &Transaction,
 		kind: LookupKind,
@@ -194,24 +196,22 @@ impl Collectable {
 		// vertex table stored in doc_ctx (e.g. edge tables during cascade delete).
 		// Rebuild the context so downstream processing (events, views, lives,
 		// changefeeds, field validation) uses the correct table definition.
-		if ft.as_ref() != doc_ctx.tb.name {
+		if ft.as_ref() != doc_ctx.tb()?.name {
 			let tb = txn
-				.get_or_add_tb(None, &doc_ctx.ns.name, &doc_ctx.db.name, ft.as_ref(), None)
+				.get_or_add_tb(None, &doc_ctx.ns().name, &doc_ctx.db().name, ft.as_ref(), None)
 				.await?;
-			let fields = txn
-				.all_tb_fields(
-					doc_ctx.ns.namespace_id,
-					doc_ctx.db.database_id,
-					ft.as_ref(),
-					opt.version,
-				)
-				.await?;
-			doc_ctx = NsDbTbCtx {
-				ns: Arc::clone(&doc_ctx.ns),
-				db: Arc::clone(&doc_ctx.db),
-				tb,
-				fields,
+			let parent = NsDbCtx {
+				ns: Arc::clone(doc_ctx.ns()),
+				db: Arc::clone(doc_ctx.db()),
 			};
+			// Carry the same read/mut shape as the incoming context. Graph
+			// and reference traversals are read-only in SELECT but the same
+			// dispatch reaches write paths during cascade-delete, so the
+			// rebuilt context must match.
+			let mutating = matches!(doc_ctx, DocumentContext::NsDbTbMutCtx(_));
+			doc_ctx =
+				DocumentContext::initialise(ctx, &parent, tb, ft.as_ref(), opt.version, mutating)
+					.await?;
 		}
 
 		// Fetch the data from the store
@@ -219,8 +219,8 @@ impl Collectable {
 			Arc::new(Default::default())
 		} else {
 			txn.get_record(
-				doc_ctx.ns.namespace_id,
-				doc_ctx.db.database_id,
+				doc_ctx.ns().namespace_id,
+				doc_ctx.db().database_id,
 				ft.as_ref(),
 				&fk,
 				opt.version,
@@ -235,7 +235,7 @@ impl Collectable {
 		let val = Operable::Value(record);
 		// Process the record
 		Ok(Processable {
-			doc_ctx: DocumentContext::NsDbTbCtx(doc_ctx),
+			doc_ctx,
 			record_strategy: RecordStrategy::KeysAndValues,
 			generate: None,
 			rid: Some(rid.into()),
@@ -245,7 +245,7 @@ impl Collectable {
 	}
 
 	#[instrument(level = "trace", skip_all)]
-	async fn process_range_key(doc_ctx: NsDbTbCtx, key: Key) -> Result<Processable> {
+	async fn process_range_key(doc_ctx: DocumentContext, key: Key) -> Result<Processable> {
 		let key = record::RecordKey::decode_key(&key)?;
 		let val = Record::new(Value::Null);
 		let rid = RecordId {
@@ -256,7 +256,7 @@ impl Collectable {
 		let val = Operable::Value(val.into());
 		// Process the record
 		let pro = Processable {
-			doc_ctx: DocumentContext::NsDbTbCtx(doc_ctx),
+			doc_ctx,
 			record_strategy: RecordStrategy::KeysOnly,
 			generate: None,
 			rid: Some(rid.into()),
@@ -267,7 +267,7 @@ impl Collectable {
 	}
 
 	#[instrument(level = "trace", skip_all)]
-	async fn process_table_key(doc_ctx: NsDbTbCtx, key: Key) -> Result<Processable> {
+	async fn process_table_key(doc_ctx: DocumentContext, key: Key) -> Result<Processable> {
 		let key = record::RecordKey::decode_key(&key)?;
 		let rid = RecordId {
 			table: key.tb.into_owned(),
@@ -275,7 +275,7 @@ impl Collectable {
 		};
 		// Process the record
 		let pro = Processable {
-			doc_ctx: DocumentContext::NsDbTbCtx(doc_ctx),
+			doc_ctx,
 			record_strategy: RecordStrategy::KeysOnly,
 			generate: None,
 			rid: Some(rid.into()),
@@ -287,7 +287,7 @@ impl Collectable {
 
 	#[instrument(level = "trace", skip_all)]
 	async fn process_relatable(
-		doc_ctx: NsDbTbCtx,
+		doc_ctx: DocumentContext,
 		txn: &Transaction,
 		f: RecordId,
 		through: RelateThrough,
@@ -297,7 +297,7 @@ impl Collectable {
 	) -> Result<Processable> {
 		let pro = match (rid_only, through) {
 			(true, RelateThrough::Table(v)) => Processable {
-				doc_ctx: DocumentContext::NsDbTbCtx(doc_ctx),
+				doc_ctx,
 				record_strategy: RecordStrategy::KeysOnly,
 				generate: Some(v),
 				rid: None,
@@ -305,15 +305,15 @@ impl Collectable {
 				val: Operable::Value(Default::default()),
 			},
 			(false, RelateThrough::Table(v)) => Processable {
-				doc_ctx: DocumentContext::NsDbTbCtx(doc_ctx),
+				doc_ctx,
 				record_strategy: RecordStrategy::KeysAndValues,
 				generate: Some(v),
 				rid: None,
 				ir: None,
-				val: Operable::Relate(f, Default::default(), w, o.map(|v| v.into())),
+				val: Operable::Relate(Default::default(), f, w, o.map(|v| v.into())),
 			},
 			(true, RelateThrough::RecordId(v)) => Processable {
-				doc_ctx: DocumentContext::NsDbTbCtx(doc_ctx),
+				doc_ctx,
 				record_strategy: RecordStrategy::KeysOnly,
 				generate: None,
 				rid: Some(v.into()),
@@ -323,17 +323,17 @@ impl Collectable {
 			(false, RelateThrough::RecordId(v)) => {
 				let val = txn
 					.get_record(
-						doc_ctx.ns.namespace_id,
-						doc_ctx.db.database_id,
+						doc_ctx.ns().namespace_id,
+						doc_ctx.db().database_id,
 						&v.table,
 						&v.key,
 						None,
 					)
 					.await?;
-				let val = Operable::Relate(f, val, w, o.map(|v| v.into()));
+				let val = Operable::Relate(val, f, w, o.map(|v| v.into()));
 
 				Processable {
-					doc_ctx: DocumentContext::NsDbTbCtx(doc_ctx),
+					doc_ctx,
 					record_strategy: RecordStrategy::KeysAndValues,
 					generate: None,
 					rid: Some(v.into()),
@@ -349,7 +349,7 @@ impl Collectable {
 	#[instrument(level = "trace", skip_all)]
 	async fn process_record(
 		opt: &Options,
-		doc_ctx: NsDbTbCtx,
+		doc_ctx: DocumentContext,
 		txn: &Transaction,
 		record_id: RecordId,
 		rid_only: bool,
@@ -359,8 +359,8 @@ impl Collectable {
 			Record::new(Value::Null).into_read_only()
 		} else {
 			txn.get_record(
-				doc_ctx.ns.namespace_id,
-				doc_ctx.db.database_id,
+				doc_ctx.ns().namespace_id,
+				doc_ctx.db().database_id,
 				&record_id.table,
 				&record_id.key,
 				opt.version,
@@ -371,7 +371,7 @@ impl Collectable {
 		let val = Operable::Value(val);
 		// Process the document record
 		let pro = Processable {
-			doc_ctx: DocumentContext::NsDbTbCtx(doc_ctx),
+			doc_ctx,
 			record_strategy: RecordStrategy::KeysAndValues,
 			generate: None,
 			rid: Some(record_id.into()),
@@ -383,10 +383,10 @@ impl Collectable {
 	}
 
 	#[instrument(level = "trace", skip_all)]
-	async fn process_yield(doc_ctx: NsDbTbCtx, table_name: TableName) -> Result<Processable> {
+	async fn process_yield(doc_ctx: DocumentContext, table_name: TableName) -> Result<Processable> {
 		// Pass the value through
 		let pro = Processable {
-			doc_ctx: DocumentContext::NsDbTbCtx(doc_ctx),
+			doc_ctx,
 			record_strategy: RecordStrategy::KeysAndValues,
 			generate: Some(table_name),
 			rid: None,
@@ -414,10 +414,10 @@ impl Collectable {
 	}
 
 	#[instrument(level = "trace", skip_all)]
-	async fn process_defer(doc_ctx: NsDbTbCtx, v: RecordId) -> Result<Processable> {
+	async fn process_defer(doc_ctx: DocumentContext, v: RecordId) -> Result<Processable> {
 		// Process the document record
 		let pro = Processable {
-			doc_ctx: DocumentContext::NsDbTbCtx(doc_ctx),
+			doc_ctx,
 			record_strategy: RecordStrategy::KeysAndValues,
 			generate: None,
 			rid: Some(v.into()),
@@ -429,7 +429,7 @@ impl Collectable {
 
 	#[instrument(level = "trace", skip_all)]
 	async fn process_mergeable(
-		doc_ctx: NsDbTbCtx,
+		doc_ctx: DocumentContext,
 		tb: TableName,
 		id: Option<RecordIdKey>,
 		o: Value,
@@ -437,7 +437,7 @@ impl Collectable {
 		// Process the document record
 		let pro = if let Some(id) = id {
 			Processable {
-				doc_ctx: DocumentContext::NsDbTbCtx(doc_ctx),
+				doc_ctx,
 				record_strategy: RecordStrategy::KeysAndValues,
 				generate: None,
 				rid: Some(RecordId::new(tb, id).into()),
@@ -446,7 +446,7 @@ impl Collectable {
 			}
 		} else {
 			Processable {
-				doc_ctx: DocumentContext::NsDbTbCtx(doc_ctx),
+				doc_ctx,
 				record_strategy: RecordStrategy::KeysOnly,
 				generate: Some(tb),
 				rid: None,
@@ -459,7 +459,7 @@ impl Collectable {
 	}
 
 	#[instrument(level = "trace", skip_all)]
-	fn process_key_val(doc_ctx: NsDbTbCtx, key: &Key, val: &[u8]) -> Result<Processable> {
+	fn process_key_val(doc_ctx: DocumentContext, key: &Key, val: &[u8]) -> Result<Processable> {
 		let key = record::RecordKey::decode_key(key)?;
 		let rid = RecordId {
 			table: key.tb.into_owned(),
@@ -470,7 +470,7 @@ impl Collectable {
 		let val = Operable::Value(val.into());
 		// Process the record
 		Ok(Processable {
-			doc_ctx: DocumentContext::NsDbTbCtx(doc_ctx),
+			doc_ctx,
 			record_strategy: RecordStrategy::KeysAndValues,
 			generate: None,
 
@@ -481,11 +481,11 @@ impl Collectable {
 	}
 
 	#[instrument(level = "trace", skip_all)]
-	fn process_count(doc_ctx: NsDbTbCtx, count: usize) -> Processable {
+	fn process_count(doc_ctx: DocumentContext, count: usize) -> Processable {
 		Processable {
 			record_strategy: RecordStrategy::Count,
 			generate: None,
-			doc_ctx: DocumentContext::NsDbTbCtx(doc_ctx),
+			doc_ctx,
 			rid: None,
 			ir: None,
 			val: Operable::Count(count),
@@ -493,12 +493,12 @@ impl Collectable {
 	}
 
 	#[instrument(level = "trace", skip_all)]
-	fn process_index_item_key(doc_ctx: NsDbTbCtx, i: IndexItemRecord) -> Processable {
+	fn process_index_item_key(doc_ctx: DocumentContext, i: IndexItemRecord) -> Processable {
 		let (t, v, ir) = i.consume();
 		Processable {
 			record_strategy: RecordStrategy::KeysOnly,
 			generate: None,
-			doc_ctx: DocumentContext::NsDbTbCtx(doc_ctx),
+			doc_ctx,
 			rid: Some(t),
 			ir: Some(Arc::new(ir)),
 			val: Operable::Value(v.unwrap_or_else(|| Record::new(Value::Null).into_read_only())),
@@ -507,7 +507,7 @@ impl Collectable {
 
 	#[instrument(level = "trace", skip_all)]
 	async fn process_index_item(
-		doc_ctx: NsDbTbCtx,
+		doc_ctx: DocumentContext,
 		txn: &Transaction,
 		i: IndexItemRecord,
 		rid_only: bool,
@@ -521,11 +521,17 @@ impl Collectable {
 			// if it is skippable we only need the record id
 			Record::new(Value::Null).into_read_only()
 		} else {
-			txn.get_record(doc_ctx.ns.namespace_id, doc_ctx.db.database_id, &t.table, &t.key, None)
-				.await?
+			txn.get_record(
+				doc_ctx.ns().namespace_id,
+				doc_ctx.db().database_id,
+				&t.table,
+				&t.key,
+				None,
+			)
+			.await?
 		};
 		let pro = Processable {
-			doc_ctx: DocumentContext::NsDbTbCtx(doc_ctx),
+			doc_ctx,
 			record_strategy: RecordStrategy::KeysAndValues,
 			generate: None,
 			rid: Some(t),
@@ -553,7 +559,7 @@ impl Collector for ConcurrentCollector<'_> {
 			return Ok(());
 		}
 
-		let pro = collectable.prepare(self.opt, self.txn, false).await?;
+		let pro = collectable.prepare(self.ctx, self.opt, self.txn, false).await?;
 		self.ite.process(self.stk, self.ctx, self.opt, self.stm, pro).await?;
 
 		Ok(())
@@ -575,7 +581,8 @@ impl Collector for ConcurrentDistinctCollector<'_> {
 		let skippable = self.coll.ite.skippable() > 0;
 		// If it is skippable, we just need to collect the record id (if any)
 		// to ensure that distinct can be checked.
-		let pro = collectable.prepare(self.coll.opt, self.coll.txn, skippable).await?;
+		let pro =
+			collectable.prepare(self.coll.ctx, self.coll.opt, self.coll.txn, skippable).await?;
 		if self.dis.check_already_processed(&pro) {
 			return Ok(());
 		}
@@ -792,12 +799,12 @@ pub(super) trait Collector {
 		&mut self,
 		ctx: &FrozenContext,
 		opt: &Options,
-		doc_ctx: NsDbTbCtx,
+		doc_ctx: DocumentContext,
 		table: &TableName,
 		sc: ScanDirection,
 	) -> Result<()> {
-		let ns = doc_ctx.ns.namespace_id;
-		let db = doc_ctx.db.database_id;
+		let ns = doc_ctx.ns().namespace_id;
+		let db = doc_ctx.db().database_id;
 
 		// Prepare the start and end keys
 		let beg = record::prefix(ns, db, table)?;
@@ -841,12 +848,12 @@ pub(super) trait Collector {
 		&mut self,
 		ctx: &FrozenContext,
 		opt: &Options,
-		doc_ctx: NsDbTbCtx,
+		doc_ctx: DocumentContext,
 		table: &TableName,
 		sc: ScanDirection,
 	) -> Result<()> {
-		let ns = doc_ctx.ns.namespace_id;
-		let db = doc_ctx.db.database_id;
+		let ns = doc_ctx.ns().namespace_id;
+		let db = doc_ctx.db().database_id;
 
 		// Prepare the start and end keys
 		let beg = record::prefix(ns, db, table)?;
@@ -887,11 +894,11 @@ pub(super) trait Collector {
 		&mut self,
 		ctx: &FrozenContext,
 		opt: &Options,
-		doc_ctx: NsDbTbCtx,
+		doc_ctx: DocumentContext,
 		v: &TableName,
 	) -> Result<()> {
-		let ns = doc_ctx.ns.namespace_id;
-		let db = doc_ctx.db.database_id;
+		let ns = doc_ctx.ns().namespace_id;
+		let db = doc_ctx.db().database_id;
 		let beg = record::prefix(ns, db, v)?;
 		let end = record::suffix(ns, db, v)?;
 		// Create a new iterable range
@@ -936,13 +943,13 @@ pub(super) trait Collector {
 		&mut self,
 		ctx: &FrozenContext,
 		opt: &Options,
-		doc_ctx: NsDbTbCtx,
+		doc_ctx: DocumentContext,
 		table_name: &TableName,
 		r: RecordIdKeyRange,
 		sc: ScanDirection,
 	) -> Result<()> {
-		let ns = doc_ctx.ns.namespace_id;
-		let db = doc_ctx.db.database_id;
+		let ns = doc_ctx.ns().namespace_id;
+		let db = doc_ctx.db().database_id;
 		// Prepare
 		let (beg, end) = Self::range_prepare(ns, db, table_name, r).await?;
 		// Optionally skip keys
@@ -982,13 +989,13 @@ pub(super) trait Collector {
 		&mut self,
 		ctx: &FrozenContext,
 		opt: &Options,
-		doc_ctx: NsDbTbCtx,
+		doc_ctx: DocumentContext,
 		tb: &TableName,
 		r: RecordIdKeyRange,
 		sc: ScanDirection,
 	) -> Result<()> {
-		let ns = doc_ctx.ns.namespace_id;
-		let db = doc_ctx.db.database_id;
+		let ns = doc_ctx.ns().namespace_id;
+		let db = doc_ctx.db().database_id;
 
 		// Get the transaction
 		let txn = ctx.tx();
@@ -1029,7 +1036,7 @@ pub(super) trait Collector {
 		&mut self,
 		ctx: &FrozenContext,
 		opt: &Options,
-		doc_ctx: NsDbTbCtx,
+		doc_ctx: DocumentContext,
 		tb: &TableName,
 		r: RecordIdKeyRange,
 	) -> Result<()> {
@@ -1037,7 +1044,7 @@ pub(super) trait Collector {
 		let txn = ctx.tx();
 		// Prepare
 		let (beg, end) =
-			Self::range_prepare(doc_ctx.ns.namespace_id, doc_ctx.db.database_id, tb, r).await?;
+			Self::range_prepare(doc_ctx.ns().namespace_id, doc_ctx.db().database_id, tb, r).await?;
 		// Create a new iterable range
 		let count = txn.count(beg..end, opt.version).await?;
 		// Collect the count
@@ -1051,13 +1058,13 @@ pub(super) trait Collector {
 		&mut self,
 		ctx: &FrozenContext,
 		opt: &Options,
-		doc_ctx: NsDbTbCtx,
+		doc_ctx: DocumentContext,
 		from: RecordId,
 		kind: LookupKind,
 		what: Vec<ComputedLookupSubject>,
 	) -> Result<()> {
-		let ns = doc_ctx.ns.namespace_id;
-		let db = doc_ctx.db.database_id;
+		let ns = doc_ctx.ns().namespace_id;
+		let db = doc_ctx.db().database_id;
 
 		// Pull out options
 		let tb = &from.table;
@@ -1074,13 +1081,13 @@ pub(super) trait Collector {
 				}
 				// /ns/db/tb/id/IN
 				Dir::In => vec![(
-					graph::egprefix(ns, db, tb, id, dir)?,
-					graph::egsuffix(ns, db, tb, id, dir)?,
+					graph::egprefix(ns, db, tb, id, *dir)?,
+					graph::egsuffix(ns, db, tb, id, *dir)?,
 				)],
 				// /ns/db/tb/id/OUT
 				Dir::Out => vec![(
-					graph::egprefix(ns, db, tb, id, dir)?,
-					graph::egsuffix(ns, db, tb, id, dir)?,
+					graph::egprefix(ns, db, tb, id, *dir)?,
+					graph::egsuffix(ns, db, tb, id, *dir)?,
 				)],
 			},
 			(false, LookupKind::Graph(Dir::Both)) => what
@@ -1128,7 +1135,7 @@ pub(super) trait Collector {
 	async fn collect_index_items(
 		&mut self,
 		ctx: &FrozenContext,
-		doc_ctx: NsDbTbCtx,
+		doc_ctx: DocumentContext,
 		irf: IteratorRef,
 		rs: RecordStrategy,
 	) -> Result<()> {
@@ -1139,7 +1146,7 @@ pub(super) trait Collector {
 		};
 
 		let Some(iterator) =
-			exe.new_iterator(doc_ctx.ns.namespace_id, doc_ctx.db.database_id, irf).await?
+			exe.new_iterator(doc_ctx.ns().namespace_id, doc_ctx.db().database_id, irf).await?
 		else {
 			bail!(Error::QueryNotExecuted {
 				message: "No iterator has been found.".to_string(),
@@ -1167,7 +1174,7 @@ pub(super) trait Collector {
 		&mut self,
 		ctx: &FrozenContext,
 		txn: &Transaction,
-		doc_ctx: NsDbTbCtx,
+		doc_ctx: DocumentContext,
 		mut iterator: RecordIterator,
 	) -> Result<()> {
 		let fetch_size = self.max_fetch_size();
@@ -1191,7 +1198,7 @@ pub(super) trait Collector {
 		&mut self,
 		ctx: &FrozenContext,
 		txn: &Transaction,
-		doc_ctx: NsDbTbCtx,
+		doc_ctx: DocumentContext,
 		mut iterator: RecordIterator,
 	) -> Result<()> {
 		let fetch_size = self.max_fetch_size();
@@ -1215,7 +1222,7 @@ pub(super) trait Collector {
 		&mut self,
 		ctx: &FrozenContext,
 		txn: &Transaction,
-		doc_ctx: NsDbTbCtx,
+		doc_ctx: DocumentContext,
 		mut iterator: RecordIterator,
 	) -> Result<()> {
 		let mut total_count = 0;

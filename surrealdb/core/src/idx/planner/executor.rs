@@ -10,7 +10,7 @@ use crate::catalog::providers::TableProvider;
 use crate::catalog::{DatabaseId, Distance, Index, IndexDefinition, NamespaceId};
 use crate::ctx::FrozenContext;
 use crate::dbs::Options;
-use crate::doc::{CursorDoc, NsDbTbCtx};
+use crate::doc::{CursorDoc, DocumentContext};
 use crate::err::Error;
 use crate::expr::operator::{BooleanOperator, MatchesOperator};
 use crate::expr::{Cond, Expr, FlowResultExt as _, Idiom};
@@ -128,7 +128,7 @@ impl InnerQueryExecutor {
 	#[expect(clippy::mutable_key_type)]
 	#[expect(clippy::too_many_arguments)]
 	pub(super) async fn new(
-		doc_ctx: &NsDbTbCtx,
+		doc_ctx: &DocumentContext,
 		stk: &mut Stk,
 		ctx: &FrozenContext,
 		opt: &Options,
@@ -160,8 +160,8 @@ impl InnerQueryExecutor {
 							Entry::Vacant(e) => {
 								let ix: &IndexDefinition = e.key();
 								let ikb = IndexKeyBase::new(
-									doc_ctx.ns.namespace_id,
-									doc_ctx.db.database_id,
+									doc_ctx.ns().namespace_id,
+									doc_ctx.db().database_id,
 									ix.table_name.clone(),
 									ix.index_id,
 								);
@@ -224,16 +224,16 @@ impl InnerQueryExecutor {
 								let tb = ctx
 									.tx()
 									.expect_tb(
-										doc_ctx.ns.namespace_id,
-										doc_ctx.db.database_id,
+										doc_ctx.ns().namespace_id,
+										doc_ctx.db().database_id,
 										&index_reference.table_name,
 									)
 									.await?;
 								let hi = ctx
 									.get_index_stores()
 									.get_index_hnsw(
-										doc_ctx.ns.namespace_id,
-										doc_ctx.db.database_id,
+										doc_ctx.ns().namespace_id,
+										doc_ctx.db().database_id,
 										ctx,
 										tb.table_id,
 										index_reference,
@@ -290,16 +290,16 @@ impl InnerQueryExecutor {
 								let tb = ctx
 									.tx()
 									.expect_tb(
-										doc_ctx.ns.namespace_id,
-										doc_ctx.db.database_id,
+										doc_ctx.ns().namespace_id,
+										doc_ctx.db().database_id,
 										&index_reference.table_name,
 									)
 									.await?;
 								let di = ctx
 									.get_index_stores()
 									.get_index_diskann(
-										doc_ctx.ns.namespace_id,
-										doc_ctx.db.database_id,
+										doc_ctx.ns().namespace_id,
+										doc_ctx.db().database_id,
 										tb.table_id,
 										index_reference,
 										p,

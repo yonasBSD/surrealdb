@@ -9,8 +9,8 @@ pub(crate) enum Key {
 	/// A cache key for a JWKS document (hashed URL or stable id)
 	#[cfg(feature = "jwks")]
 	Jwk(String),
-	/// A cache key for a database
-	Db(String, String),
+	/// A cache key for fields (on a table)
+	Fds(NamespaceId, DatabaseId, String, Uuid),
 	/// A cache key for events (on a table)
 	Evs(NamespaceId, DatabaseId, String, Uuid),
 	/// A cache key for views (on a table)
@@ -28,7 +28,7 @@ impl<'a> From<Lookup<'a>> for Key {
 		match value {
 			#[cfg(feature = "jwks")]
 			Lookup::Jwk(a) => Key::Jwk(a.to_string()),
-			Lookup::Db(a, b) => Key::Db(a.to_string(), b.to_string()),
+			Lookup::Fds(a, b, c, d) => Key::Fds(a, b, c.to_string(), d),
 			Lookup::Evs(a, b, c, d) => Key::Evs(a, b, c.to_string(), d),
 			Lookup::Fts(a, b, c, d) => Key::Fts(a, b, c.to_string(), d),
 			Lookup::Ixs(a, b, c, d) => Key::Ixs(a, b, c.to_string(), d),

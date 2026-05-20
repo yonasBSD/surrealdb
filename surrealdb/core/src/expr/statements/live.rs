@@ -182,7 +182,7 @@ impl LiveStatement {
 				txn.replace(&key, &subscription_definition).await?;
 				// Refresh the table cache for lives
 				if let Some(cache) = ctx.get_cache() {
-					cache.new_live_queries_version(ns, db, &tb);
+					cache.set_live_queries_version(ns, db, &tb);
 				}
 				// Clear the cache
 				txn.clear_cache();

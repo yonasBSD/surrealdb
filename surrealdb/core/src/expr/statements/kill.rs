@@ -103,7 +103,7 @@ impl KillStatement {
 				txn.clr(&key).await?;
 				// Refresh the table cache for lives
 				if let Some(cache) = ctx.get_cache() {
-					cache.new_live_queries_version(live.ns, live.db, &live.tb);
+					cache.set_live_queries_version(live.ns, live.db, &live.tb);
 				}
 				// Clear the cache
 				txn.clear_cache();

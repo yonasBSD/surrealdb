@@ -2271,7 +2271,7 @@ fn binop_for_relation(
 	}
 
 	let lookup = Lookup {
-		kind: LookupKind::Graph(rel.dir.clone()),
+		kind: LookupKind::Graph(rel.dir),
 		what: vec![LookupSubject::Table {
 			table: rel.relation_table.clone(),
 			referencing_field: None,

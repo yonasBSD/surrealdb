@@ -6,17 +6,16 @@ use reblessive::TreeStack;
 use reblessive::tree::Stk;
 use revision::revisioned;
 use surrealdb_strand::Strand;
-use surrealdb_types::ToSql;
 #[cfg(not(target_family = "wasm"))]
 use tokio::spawn;
 
 use crate::catalog::providers::{DatabaseProvider, NamespaceProvider};
-use crate::catalog::{EventDefinition, EventKind, Record};
+use crate::catalog::{EventDefinition, Record};
 use crate::ctx::{Context, FrozenContext};
-use crate::dbs::{Options, Session, Statement};
+use crate::dbs::{Options, Session};
 use crate::doc::{Action, CursorDoc, Document, DocumentContext};
 use crate::err::Error;
-use crate::expr::FlowResultExt;
+use crate::expr::FlowResultExt as _;
 use crate::iam::{Auth, AuthLimit};
 use crate::key::root::eq::EventQueue;
 use crate::kvs::TransactionType::Write;
@@ -29,40 +28,34 @@ use crate::kvs::{
 use crate::val::{RecordId, Value};
 
 impl Document {
-	/// Processes any DEFINE EVENT clauses defined for this table.
-	/// Synchronous events execute within the current transaction, while async
-	/// events are enqueued for background processing.
+	/// Processes any DEFINE EVENT clauses which
+	/// have been defined for the table which this
+	/// record belongs to. This functions loops
+	/// through the events and processes them all
+	/// within the currently running transaction.
 	pub(super) async fn process_table_events(
 		&mut self,
 		stk: &mut Stk,
 		ctx: &FrozenContext,
 		opt: &Options,
-		stm: &Statement<'_>,
+		action: Action,
 	) -> Result<()> {
 		// Check import
 		if opt.import {
 			return Ok(());
 		}
 		// Check if changed
-		if !self.changed() {
+		if !self.is_modified() {
 			return Ok(());
 		}
 		// Don't run permissions
 		let opt = &opt.new_with_perms(false);
 
-		if self.ev(ctx, opt).await?.is_empty() {
+		if self.doc_ctx.ev()?.is_empty() {
 			return Ok(());
 		}
 
-		let input = self.compute_input_value(stk, ctx, opt, stm).await?;
-
-		let action = if stm.is_delete() {
-			Action::Delete
-		} else if self.is_new() {
-			Action::Create
-		} else {
-			Action::Update
-		};
+		let input = self.materialize_input_value(stk, ctx, opt).await?;
 
 		self.process_events(stk, ctx, opt, action, input).await
 	}
@@ -80,26 +73,26 @@ impl Document {
 			return Ok(());
 		}
 		// Check if changed
-		if !self.changed() {
+		if !self.is_modified() {
 			return Ok(());
 		}
 		// Don't run permissions
 		let opt = &opt.new_with_perms(false);
 
 		// Loop through all event statements
-		for ev in self.ev(ctx, opt).await?.iter() {
+		for ev in self.doc_ctx.ev()?.iter() {
 			// Limit auth
 			let opt = AuthLimit::try_from(&ev.auth_limit)?.limit_opt(opt);
-			// Resolve the event action string for the context.
+			// Get the event action
 			let evt = match action {
 				Action::Create => Value::from("CREATE"),
 				Action::Update => Value::from("UPDATE"),
 				Action::Delete => Value::from("DELETE"),
 			};
-			// Capture before/after values for the event context.
+			// Capture documents for the event context
 			let after = self.current.doc.as_arc();
 			let before = self.initial.doc.as_arc();
-			// Depending on type of event, how do we populate the document
+			// Populate the relevant event document
 			let doc = if action == Action::Delete {
 				&mut self.initial
 			} else {
@@ -107,27 +100,25 @@ impl Document {
 			};
 			// Configure the context
 			let mut ctx = Context::new_child(ctx);
-			ctx.add_value("event", evt.into());
-			ctx.add_value("value", doc.doc.as_arc());
 			ctx.add_value("after", after);
 			ctx.add_value("before", before);
+			ctx.add_value("event", evt.into());
+			ctx.add_value("value", doc.doc.as_arc());
 			ctx.add_value("input", input.clone().unwrap_or_default());
+			// Freeze the context
 			let ctx = ctx.freeze();
 			// Process conditional clause
 			let val = stk
 				.run(|stk| ev.when.compute(stk, &ctx, &opt, Some(doc)))
 				.await
 				.catch_return()
-				.map_err(|e| anyhow::anyhow!("Error while processing event {}: {}", ev.name, e))?;
-			// Execute or enqueue the event if the condition is truthy.
+				.map_err(|e| anyhow::anyhow!("Error while processing event {}: {e}", ev.name))?;
+			// Execute event if value is truthy
 			if val.is_truthy() {
-				if let EventKind::Async {
-					..
-				} = ev.kind
-				{
-					Self::process_async(ctx, opt, ev, &self.doc_ctx, doc).await?;
+				if ev.is_async() {
+					Self::process_event_async(ctx, opt, ev, &self.doc_ctx, doc).await?;
 				} else {
-					Self::process_sync(stk, ctx, opt, None, ev, doc).await?;
+					Self::process_event_sync(stk, ctx, opt, None, ev, doc).await?;
 				}
 			}
 		}
@@ -135,7 +126,26 @@ impl Document {
 		Ok(())
 	}
 
-	async fn process_async(
+	async fn process_event_sync(
+		stk: &mut Stk,
+		ctx: FrozenContext,
+		opt: Options,
+		_lh: Option<&LeaseHandler>,
+		ev: &EventDefinition,
+		doc: &CursorDoc,
+	) -> Result<()> {
+		// Evaluate each THEN expression in order.
+		for v in ev.then.iter() {
+			stk.run(|stk| v.compute(stk, &ctx, &opt, Some(doc)))
+				.await
+				.catch_return()
+				.map_err(|e| anyhow::anyhow!("Error while processing event {}: {e}", ev.name))?;
+		}
+		// Carry on
+		Ok(())
+	}
+
+	async fn process_event_async(
 		ctx: FrozenContext,
 		opt: Options,
 		ev: &EventDefinition,
@@ -160,28 +170,6 @@ impl Document {
 		let event_record = AsyncEventRecord::new(&opt, &ctx, ev, cursor_doc)?;
 		tx.put(&key, &event_record).await?;
 		tx.trigger_async_event();
-		Ok(())
-	}
-
-	async fn process_sync(
-		stk: &mut Stk,
-		ctx: FrozenContext,
-		opt: Options,
-		lh: Option<&LeaseHandler>,
-		ev: &EventDefinition,
-		doc: &CursorDoc,
-	) -> Result<()> {
-		// Evaluate each THEN expression in order.
-		for v in ev.then.iter() {
-			if let Some(lh) = lh.as_ref() {
-				lh.try_maintain_lease().await?;
-			}
-			let res =
-				stk.run(|stk| v.compute(stk, &ctx, &opt, Some(doc))).await.catch_return().map_err(
-					|e| anyhow::anyhow!("Error while processing event {}: {}", ev.name, e),
-				)?;
-			trace!("Event statement returns: {}", res.to_sql());
-		}
 		Ok(())
 	}
 }
@@ -519,6 +507,7 @@ impl AsyncEventContext {
 		warn!("Event processing failed: {:?}", e);
 		catch!(tx, tx.del(eq).await);
 		catch!(tx, tx.commit().await);
+		// Carry on
 		Ok(())
 	}
 
@@ -534,6 +523,6 @@ impl AsyncEventContext {
 		let ctx = ev.build_event_context(ctx);
 		let opt = ev.build_event_options(&ctx.tx(), opt, eq).await?;
 		let doc = ev.build_event_cursor_doc();
-		Document::process_sync(stk, ctx, opt, lh, &ev.event_definition, &doc).await
+		Document::process_event_sync(stk, ctx, opt, lh, &ev.event_definition, &doc).await
 	}
 }

@@ -56,7 +56,6 @@ arbitrary = [
     "surrealdb-strand/arbitrary",
 ]
 allocation-tracking = []
-trace-doc-ops = []
 
 # GraphQL support
 graphql = ["dep:async-graphql"]

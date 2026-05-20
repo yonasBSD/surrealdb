@@ -25,7 +25,7 @@ use crate::doc::{CursorDoc, Document};
 use crate::expr::FlowResultExt as _;
 use crate::idx::index::IndexOperation;
 use crate::kvs::index::{ConsumeResult, IndexMutation};
-use crate::val::Value;
+use crate::val::{RecordId, Value};
 
 impl Document {
 	pub(super) async fn store_index_data(
@@ -36,18 +36,18 @@ impl Document {
 	) -> Result<()> {
 		// Collect indexes or skip
 		let ixs = match &opt.force {
-			Force::All => self.ix(ctx, opt).await?,
-			_ if self.changed() => self.ix(ctx, opt).await?,
+			Force::All => self.doc_ctx.ix()?,
+			_ if self.is_modified() => self.doc_ctx.ix()?,
 			_ => return Ok(()),
 		};
-		// Check if the table is a view
-		let tb = self.tb().await?;
+		// Get the current database
+		let db = self.doc_ctx.db();
+		// Get the document table
+		let tb = self.doc_ctx.tb()?;
+		// Check if the table is DROP
 		if tb.drop {
 			return Ok(());
 		}
-
-		let db = self.db(ctx, opt).await?;
-
 		// Get the record id
 		let rid = self.id()?;
 		// Loop through all index statements
@@ -58,10 +58,8 @@ impl Document {
 			}
 			// Calculate old values
 			let o = Self::build_opt_values(stk, ctx, opt, ix, &self.initial).await?;
-
 			// Calculate new values
 			let n = Self::build_opt_values(stk, ctx, opt, ix, &self.current).await?;
-
 			// For COUNT indexes with a condition, evaluate against the full document
 			let count_cond_match = if let Index::Count(Some(cond)) = &ix.index {
 				let old_matches = stk
@@ -78,27 +76,20 @@ impl Document {
 			} else {
 				None
 			};
-
-			// COUNT WHERE indexes have no indexed values, so predicate
-			// membership changes must still be treated as index mutations.
-			let count_condition_changed = matches!(count_cond_match, Some((old_matches, new_matches)) if old_matches != new_matches);
-
-			// Update the index entries. Building indexes may consume the
-			// mutation into a durable replay queue instead of applying it now.
-			if o != n || count_condition_changed {
-				let mutation = IndexMutation {
-					old_values: o,
-					new_values: n,
-					rid: &rid,
-					count_cond_match,
-				};
-				Self::one_index(&db, tb, stk, ctx, opt, ix, mutation).await?;
+			// Update the index entries. Regular indexes update when the
+			// stored values change. COUNT WHERE indexes have no indexed
+			// values (so `o == n` is trivially true) and need to react
+			// to the predicate-match flag flipping.
+			let cond_changed = matches!(count_cond_match, Some((o, n)) if o != n);
+			if o != n || cond_changed {
+				Self::one_index(db, tb, stk, ctx, opt, ix, o, n, &rid, count_cond_match).await?;
 			}
 		}
 		// Carry on
 		Ok(())
 	}
 
+	#[allow(clippy::too_many_arguments)]
 	async fn one_index(
 		db: &DatabaseDefinition,
 		tb: &TableDefinition,
@@ -106,25 +97,32 @@ impl Document {
 		ctx: &FrozenContext,
 		opt: &Options,
 		ix: &IndexDefinition,
-		mutation: IndexMutation<'_>,
+		o: Option<Vec<Value>>,
+		n: Option<Vec<Value>>,
+		rid: &RecordId,
+		count_cond_match: Option<(bool, bool)>,
 	) -> Result<()> {
-		let rid = mutation.rid;
-		let count_cond_match = mutation.count_cond_match;
+		// Get the index builder
 		let (o, n) = if let Some(ib) = ctx.get_index_builder() {
+			let mutation = IndexMutation {
+				old_values: o,
+				new_values: n,
+				rid,
+				count_cond_match,
+			};
 			match ib.consume(db, ctx, ix, mutation).await? {
-				// The index builder accepted durable responsibility for this
-				// mutation, so the user transaction must not also apply it to
-				// the index directly.
+				// The index builder consumed the value, which means it is currently building the
+				// index asynchronously, we don't index the document and let the index builder
+				// do it later.
 				ConsumeResult::Enqueued => return Ok(()),
-				// No build needs to consume this mutation; apply it normally.
+				// The index builder is done, the index has been built; we can proceed normally
 				ConsumeResult::Ignored(o, n) => (o, n),
 				// The definition was retired after it was read from a cache.
 				ConsumeResult::Retired => return Ok(()),
 			}
 		} else {
-			(mutation.old_values, mutation.new_values)
+			(o, n)
 		};
-
 		// Store all the variables and parameters required by the index operation
 		let mut ic = IndexOperation::new(
 			ctx,
@@ -137,6 +135,7 @@ impl Document {
 			n,
 			rid,
 		);
+		//
 		if let Some((old_matches, new_matches)) = count_cond_match {
 			ic = ic.with_count_cond_match(old_matches, new_matches);
 		}
@@ -152,8 +151,8 @@ impl Document {
 	}
 
 	/// Extract from the given document, the values required by the index and put then in an array.
-	/// Eg. IF the index is composed of the columns `name` and `instrument`
-	/// Given this doc: { "id": 1, "instrument":"piano", "name":"Tobie" }
+	/// Eg. If the index is composed of the columns `name` and `instrument`
+	/// Given this doc: { "id": 1, "instrument": "piano", "name": "Tobie" }
 	/// It will return: ["Tobie", "piano"]
 	pub(crate) async fn build_opt_values(
 		stk: &mut Stk,

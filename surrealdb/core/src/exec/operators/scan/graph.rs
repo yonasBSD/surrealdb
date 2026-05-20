@@ -241,7 +241,7 @@ impl ExecOperator for GraphEdgeScan {
 				// Scan edges for each source record
 				for rid in &source_rids {
 					let mut edges_yielded: usize = 0;
-					'dir_loop: for dir in &directions {
+					'dir_loop: for &dir in &directions {
 						let ranges = compute_graph_ranges(
 							ns_id, db_id, rid, dir, &edge_tables, &ctx,
 						).await?;
@@ -339,7 +339,7 @@ async fn compute_graph_ranges(
 	ns_id: NamespaceId,
 	db_id: DatabaseId,
 	rid: &RecordId,
-	dir: &Dir,
+	dir: Dir,
 	edge_tables: &[EdgeTableSpec],
 	ctx: &ExecutionContext,
 ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ControlFlow> {
@@ -380,7 +380,7 @@ async fn eval_graph_bound(
 	ns_id: NamespaceId,
 	db_id: DatabaseId,
 	rid: &RecordId,
-	dir: &Dir,
+	dir: Dir,
 	edge_table: &TableName,
 	bound: &Bound<Arc<dyn PhysicalExpr>>,
 	is_start: bool,
@@ -422,7 +422,7 @@ fn encode_graph_key(
 	ns_id: NamespaceId,
 	db_id: DatabaseId,
 	rid: &RecordId,
-	dir: &Dir,
+	dir: Dir,
 	edge_table: &TableName,
 	fk: crate::val::RecordIdKey,
 ) -> Result<Vec<u8>, ControlFlow> {

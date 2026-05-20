@@ -70,13 +70,19 @@ impl DatastoreCache {
 		self.cache.clear();
 	}
 
+	/// Set the latest libe query version for a table
+	pub(crate) fn set_live_queries_version(&self, ns: NamespaceId, db: DatabaseId, tb: &TableName) {
+		let key = Lookup::Lvv(ns, db, tb);
+		self.insert(key, Entry::Lvv(Uuid::now_v7()));
+	}
+
+	/// Get the latest live query version for a table
 	pub fn get_live_queries_version(
 		&self,
 		ns: NamespaceId,
 		db: DatabaseId,
 		tb: &TableName,
 	) -> Result<Uuid> {
-		// Get the live-queries cache version
 		let key = Lookup::Lvv(ns, db, tb);
 		let version = match self.get(&key) {
 			Some(val) => val.try_info_lvv()?,
@@ -88,10 +94,5 @@ impl DatastoreCache {
 			}
 		};
 		Ok(version)
-	}
-
-	pub(crate) fn new_live_queries_version(&self, ns: NamespaceId, db: DatabaseId, tb: &TableName) {
-		let key = Lookup::Lvv(ns, db, tb);
-		self.insert(key, Entry::Lvv(Uuid::now_v7()));
 	}
 }

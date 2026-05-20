@@ -58,6 +58,11 @@ impl EventDefinition {
 impl_kv_value_revisioned!(EventDefinition);
 
 impl EventDefinition {
+	/// Returns true if the event is asynchronous.
+	pub(crate) fn is_async(&self) -> bool {
+		matches!(self.kind, EventKind::Async { .. })
+	}
+
 	pub(crate) fn to_sql_definition(&self) -> sql::DefineEventStatement {
 		sql::DefineEventStatement {
 			kind: DefineKind::Default,

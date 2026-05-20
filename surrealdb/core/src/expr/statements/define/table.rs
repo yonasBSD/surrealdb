@@ -17,7 +17,7 @@ use crate::catalog::{
 };
 use crate::ctx::FrozenContext;
 use crate::dbs::Options;
-use crate::doc::{self, CursorDoc, Document, DocumentContext, NsDbTbCtx};
+use crate::doc::{self, CursorDoc, Document, DocumentContext, NsDbCtx};
 use crate::err::Error;
 use crate::expr::changefeed::ChangeFeed;
 use crate::expr::field::Selector;
@@ -155,17 +155,16 @@ impl DefineTableStatement {
 
 		// Update the catalog
 		let tb = txn.put_tb(ns_name, db_name, &tb_def).await?;
-		let fields = txn.all_tb_fields(ns.namespace_id, db.database_id, &name, opt.version).await?;
 
 		// Clear the cache
 		txn.clear_cache();
 
-		let doc_ctx = DocumentContext::NsDbTbCtx(NsDbTbCtx {
+		let parent = NsDbCtx {
 			ns: Arc::clone(&ns),
 			db: Arc::clone(&db),
-			tb,
-			fields,
-		});
+		};
+		let doc_ctx =
+			DocumentContext::initialise(ctx, &parent, tb, &name, opt.version, true).await?;
 
 		// Check if table is a view
 		if let Some(view) = &tb_def.view {
@@ -344,16 +343,13 @@ impl DefineTableStatement {
 				.tx()
 				.get_or_add_tb(Some(ctx), &ns.name, &db.name, view_table_name, None)
 				.await?;
-			let fields = ctx
-				.tx()
-				.all_tb_fields(ns.namespace_id, db.database_id, view_table_name, opt.version)
-				.await?;
-			let doc_ctx = DocumentContext::NsDbTbCtx(NsDbTbCtx {
+			let parent = NsDbCtx {
 				ns: Arc::clone(ns),
 				db: Arc::clone(db),
-				tb,
-				fields,
-			});
+			};
+			let doc_ctx =
+				DocumentContext::initialise(ctx, &parent, tb, view_table_name, opt.version, true)
+					.await?;
 
 			Document::run_triggers(
 				stk,

@@ -60,7 +60,7 @@ struct PrefixEg<'a> {
 impl_kv_key_storekey!(PrefixEg<'_> => Vec<u8>);
 
 impl<'a> PrefixEg<'a> {
-	fn new(ns: NamespaceId, db: DatabaseId, tb: &'a TableName, id: &RecordIdKey, eg: &Dir) -> Self {
+	fn new(ns: NamespaceId, db: DatabaseId, tb: &'a TableName, id: &RecordIdKey, eg: Dir) -> Self {
 		Self {
 			__: b'/',
 			_a: b'*',
@@ -71,7 +71,7 @@ impl<'a> PrefixEg<'a> {
 			tb: Cow::Borrowed(tb),
 			_d: b'~',
 			id: id.clone(),
-			eg: eg.clone(),
+			eg,
 		}
 	}
 }
@@ -100,7 +100,7 @@ impl<'a> PrefixFt<'a> {
 		db: DatabaseId,
 		tb: &'a TableName,
 		id: &RecordIdKey,
-		eg: &Dir,
+		eg: Dir,
 		ft: &'a str,
 	) -> Self {
 		Self {
@@ -113,7 +113,7 @@ impl<'a> PrefixFt<'a> {
 			tb: Cow::Borrowed(tb),
 			_d: b'~',
 			id: id.to_owned(),
-			eg: eg.to_owned(),
+			eg,
 			ft: Cow::Borrowed(ft),
 		}
 	}
@@ -149,10 +149,10 @@ pub fn new<'a>(
 	db: DatabaseId,
 	tb: &'a TableName,
 	id: &RecordIdKey,
-	eg: &Dir,
+	eg: Dir,
 	fk: &'a RecordId,
 ) -> Graph<'a> {
-	Graph::new(ns, db, tb, id.to_owned(), eg.to_owned(), fk)
+	Graph::new(ns, db, tb, id.to_owned(), eg, fk)
 }
 
 pub fn prefix(
@@ -182,7 +182,7 @@ pub fn egprefix(
 	db: DatabaseId,
 	tb: &TableName,
 	id: &RecordIdKey,
-	eg: &Dir,
+	eg: Dir,
 ) -> Result<Vec<u8>> {
 	let mut k = PrefixEg::new(ns, db, tb, id, eg).encode_key()?;
 	k.extend_from_slice(&[0x00]);
@@ -194,7 +194,7 @@ pub fn egsuffix(
 	db: DatabaseId,
 	tb: &TableName,
 	id: &RecordIdKey,
-	eg: &Dir,
+	eg: Dir,
 ) -> Result<Vec<u8>> {
 	let mut k = PrefixEg::new(ns, db, tb, id, eg).encode_key()?;
 	k.extend_from_slice(&[0xff]);
@@ -206,7 +206,7 @@ pub fn ftprefix(
 	db: DatabaseId,
 	tb: &TableName,
 	id: &RecordIdKey,
-	eg: &Dir,
+	eg: Dir,
 	ft: &str,
 ) -> Result<Vec<u8>> {
 	let mut k = PrefixFt::new(ns, db, tb, id, eg, ft).encode_key()?;
@@ -219,7 +219,7 @@ pub fn ftsuffix(
 	db: DatabaseId,
 	tb: &TableName,
 	id: &RecordIdKey,
-	eg: &Dir,
+	eg: Dir,
 	ft: &str,
 ) -> Result<Vec<u8>> {
 	let mut k = PrefixFt::new(ns, db, tb, id, eg, ft).encode_key()?;

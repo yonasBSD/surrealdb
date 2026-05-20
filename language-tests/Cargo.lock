@@ -1264,7 +1264,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1328,6 +1328,19 @@ name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
+
+[[package]]
+name = "ferntree"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c61e94ab9b1d56c01922863b022039ef2cbb57e9dbf7bf237df5ae1e91b97676"
+dependencies = [
+ "bytes",
+ "crossbeam-epoch",
+ "parking_lot",
+ "parking_lot_core",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "ff"
@@ -2096,7 +2109,7 @@ dependencies = [
  "hyper 1.9.0",
  "libc",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tokio",
  "tower-service",
  "tracing",
@@ -3564,15 +3577,15 @@ dependencies = [
 
 [[package]]
 name = "revision"
-version = "0.20.0"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2554a8f54f00623ca0008916733357488569874b84bad55d5a15768d4dddf918"
+checksum = "c3099ed26713a3c553c71b4b6365dd4ad4c5fb6b08e52d9820e403850951fe9c"
 dependencies = [
  "bytes",
  "chrono",
  "geo 0.31.0",
  "regex",
- "revision-derive 0.20.0",
+ "revision-derive 0.22.0",
  "roaring",
  "rust_decimal",
  "uuid",
@@ -3591,9 +3604,9 @@ dependencies = [
 
 [[package]]
 name = "revision-derive"
-version = "0.20.0"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "424de6e69cad1f9f0d7d26aeff49471164ec5f73d159b6df9047167a87398d32"
+checksum = "555b311180eaf6e4fdf8f155665f8235738b12537fe999ab5248c722f1d775c4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3900,7 +3913,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4013,7 +4026,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4303,7 +4316,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 name = "surrealdb-collections"
 version = "3.1.0-beta"
 dependencies = [
- "revision 0.20.0",
+ "revision 0.22.0",
  "storekey",
 ]
 
@@ -4367,7 +4380,7 @@ dependencies = [
  "rayon",
  "reblessive",
  "regex",
- "revision 0.20.0",
+ "revision 0.22.0",
  "ring",
  "roaring",
  "rquickjs",
@@ -4459,7 +4472,7 @@ dependencies = [
 name = "surrealdb-strand"
 version = "3.1.0-beta"
 dependencies = [
- "revision 0.20.0",
+ "revision 0.22.0",
  "serde",
  "storekey",
 ]
@@ -4560,9 +4573,9 @@ dependencies = [
 
 [[package]]
 name = "surrealmx"
-version = "0.18.0"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6508449a7d1379a92a51ba49391b48ccab0b60dd11a4277c0dda965d8c99dbff"
+checksum = "dc91af30db8f7c730025ddc4e487e4bf4aee1c1abbd683bd2076b97ef5e7c8af"
 dependencies = [
  "arc-swap",
  "bincode",
@@ -4570,6 +4583,7 @@ dependencies = [
  "crossbeam-deque",
  "crossbeam-queue",
  "crossbeam-skiplist",
+ "ferntree",
  "lz4",
  "papaya",
  "parking_lot",
@@ -4686,7 +4700,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5497,7 +5511,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

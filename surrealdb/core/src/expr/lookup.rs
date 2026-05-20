@@ -214,8 +214,8 @@ impl ComputedLookupSubject {
 					table,
 					..
 				} => Ok((
-					crate::key::graph::ftprefix(ns, db, tb, id, dir, table)?,
-					crate::key::graph::ftsuffix(ns, db, tb, id, dir, table)?,
+					crate::key::graph::ftprefix(ns, db, tb, id, *dir, table)?,
+					crate::key::graph::ftsuffix(ns, db, tb, id, *dir, table)?,
 				)),
 				// Scan a specific range
 				Self::Range {
@@ -225,14 +225,14 @@ impl ComputedLookupSubject {
 				} => {
 					let beg = match &range.start {
 						Bound::Unbounded => {
-							crate::key::graph::ftprefix(ns, db, tb, id, dir, table)?
+							crate::key::graph::ftprefix(ns, db, tb, id, *dir, table)?
 						}
 						Bound::Included(v) => crate::key::graph::new(
 							ns,
 							db,
 							tb,
 							id,
-							dir,
+							*dir,
 							&RecordId {
 								table: table.clone(),
 								key: v.clone(),
@@ -244,7 +244,7 @@ impl ComputedLookupSubject {
 							db,
 							tb,
 							id,
-							dir,
+							*dir,
 							&RecordId {
 								table: table.clone(),
 								key: v.to_owned(),
@@ -259,14 +259,14 @@ impl ComputedLookupSubject {
 					// Prepare the range end key
 					let end = match &range.end {
 						Bound::Unbounded => {
-							crate::key::graph::ftsuffix(ns, db, tb, id, dir, table)?
+							crate::key::graph::ftsuffix(ns, db, tb, id, *dir, table)?
 						}
 						Bound::Excluded(v) => crate::key::graph::new(
 							ns,
 							db,
 							tb,
 							id,
-							dir,
+							*dir,
 							&RecordId {
 								table: table.clone(),
 								key: v.to_owned(),
@@ -278,7 +278,7 @@ impl ComputedLookupSubject {
 							db,
 							tb,
 							id,
-							dir,
+							*dir,
 							&RecordId {
 								table: table.clone(),
 								key: v.to_owned(),

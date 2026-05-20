@@ -8,8 +8,8 @@ use crate::catalog::aggregation::{self, AggregateFields, AggregationAnalysis, Ag
 use crate::catalog::providers::TableProvider;
 use crate::catalog::{Metadata, Record, RecordType, ViewDefinition};
 use crate::ctx::FrozenContext;
-use crate::dbs::{Options, Statement, Workable};
-use crate::doc::{Action, CursorDoc, Document, DocumentContext, NsDbTbCtx};
+use crate::dbs::Options;
+use crate::doc::{Action, CursorDoc, Document, DocumentContext, Extras, NsDbCtx};
 use crate::err::Error;
 use crate::expr::field::Selector;
 use crate::expr::statements::SelectStatement;
@@ -36,29 +36,19 @@ impl Document {
 		stk: &mut Stk,
 		ctx: &FrozenContext,
 		opt: &Options,
-		stm: &Statement<'_>,
+		action: Action,
 	) -> Result<()> {
 		// Check import
 		if opt.import {
 			return Ok(());
 		}
-		if !self.changed() {
+		if !self.is_modified() {
 			return Ok(());
 		}
 
-		// Get the query action
-		let act = if stm.is_delete() {
-			Action::Delete
-		} else if self.is_new() {
-			Action::Create
-		} else {
-			Action::Update
-		};
-
-		self.process_views(stk, ctx, opt, act).await
+		self.process_views(stk, ctx, opt, action).await
 	}
 
-	// process views but without needing the `Statement<'_>` type.
 	async fn process_views(
 		&self,
 		stk: &mut Stk,
@@ -66,11 +56,10 @@ impl Document {
 		opt: &Options,
 		act: Action,
 	) -> Result<()> {
-		let fts = self.ft(ctx, opt).await?;
+		// Get the foreign tables
+		let fts = self.doc_ctx.ft()?;
 		// Don't run permissions
 		let opt = &opt.new_with_perms(false);
-		// Get the query action
-
 		// Loop through all foreign table statements
 		for ft in fts.iter() {
 			// Get the table definition
@@ -395,16 +384,13 @@ impl Document {
 			.tx()
 			.get_or_add_tb(Some(ctx), &ns.name, &db.name, view_table_name, opt.version)
 			.await?;
-		let fields = ctx
-			.tx()
-			.all_tb_fields(ns.namespace_id, db.database_id, view_table_name, opt.version)
-			.await?;
-		let doc_ctx = DocumentContext::NsDbTbCtx(NsDbTbCtx {
+		let parent = NsDbCtx {
 			ns: Arc::clone(ns),
 			db: Arc::clone(db),
-			tb,
-			fields,
-		});
+		};
+		let doc_ctx =
+			DocumentContext::initialise(ctx, &parent, tb, view_table_name, opt.version, true)
+				.await?;
 
 		Self::run_triggers(
 			stk,
@@ -468,16 +454,13 @@ impl Document {
 				.tx()
 				.get_or_add_tb(Some(ctx), &ns.name, &db.name, view_table_name, opt.version)
 				.await?;
-			let fields = ctx
-				.tx()
-				.all_tb_fields(ns.namespace_id, db.database_id, view_table_name, opt.version)
-				.await?;
-			let doc_ctx = DocumentContext::NsDbTbCtx(NsDbTbCtx {
+			let parent = NsDbCtx {
 				ns: Arc::clone(ns),
 				db: Arc::clone(db),
-				tb,
-				fields,
-			});
+			};
+			let doc_ctx =
+				DocumentContext::initialise(ctx, &parent, tb, view_table_name, opt.version, true)
+					.await?;
 
 			let id = RecordId {
 				table: view_table_name.clone(),
@@ -775,16 +758,13 @@ impl Document {
 			.tx()
 			.get_or_add_tb(Some(ctx), &ns.name, &db.name, view_table_name, opt.version)
 			.await?;
-		let fields = ctx
-			.tx()
-			.all_tb_fields(ns.namespace_id, db.database_id, view_table_name, opt.version)
-			.await?;
-		let doc_ctx = DocumentContext::NsDbTbCtx(NsDbTbCtx {
+		let parent = NsDbCtx {
 			ns: Arc::clone(ns),
 			db: Arc::clone(db),
-			tb,
-			fields,
-		});
+		};
+		let doc_ctx =
+			DocumentContext::initialise(ctx, &parent, tb, view_table_name, opt.version, true)
+				.await?;
 
 		Self::run_triggers(
 			stk,
@@ -1188,16 +1168,13 @@ impl Document {
 			.tx()
 			.get_or_add_tb(Some(ctx), &ns.name, &db.name, view_table_name, opt.version)
 			.await?;
-		let fields = ctx
-			.tx()
-			.all_tb_fields(ns.namespace_id, db.database_id, view_table_name, opt.version)
-			.await?;
-		let doc_ctx = DocumentContext::NsDbTbCtx(NsDbTbCtx {
+		let parent = NsDbCtx {
 			ns: Arc::clone(ns),
 			db: Arc::clone(db),
-			tb,
-			fields,
-		});
+		};
+		let doc_ctx =
+			DocumentContext::initialise(ctx, &parent, tb, view_table_name, opt.version, true)
+				.await?;
 
 		Self::run_triggers(
 			stk,
@@ -1242,19 +1219,19 @@ impl Document {
 			doc_ctx,
 			r#gen: None,
 			retry: false,
-			extras: Workable::Normal,
+			extras: Extras::Normal,
 			current: current
 				.map(|x| CursorDoc::new(Some(Arc::clone(&id)), None, x))
 				.unwrap_or_else(|| CursorDoc::new(None, None, Value::None)),
 			initial: initial
 				.map(|x| CursorDoc::new(Some(Arc::clone(&id)), None, x))
 				.unwrap_or_else(|| CursorDoc::new(None, None, Value::None)),
-			// unused
-			current_reduced: CursorDoc::new(None, None, Value::None),
-			initial_reduced: CursorDoc::new(None, None, Value::None),
+			current_reduced: None,
+			initial_reduced: None,
 			record_strategy: RecordStrategy::KeysAndValues,
 			input_data: None,
 			mutated: false,
+			modified: tokio::sync::OnceCell::new(),
 			id: Some(id),
 		};
 

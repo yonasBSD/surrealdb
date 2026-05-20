@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::catalog::providers::TableProvider;
 use crate::ctx::FrozenContext;
-use crate::dbs::{Options, Statement};
+use crate::dbs::Statement;
 use crate::doc::Document;
 use crate::err::Error;
 
@@ -10,24 +10,26 @@ impl Document {
 	pub(super) async fn store_record_data(
 		&mut self,
 		ctx: &FrozenContext,
-		opt: &Options,
 		stm: &Statement<'_>,
 	) -> Result<()> {
 		// Check if changed
-		if !self.changed() {
+		if !self.is_modified() {
 			return Ok(());
 		}
-		// Check if the table is a view
-		if self.tb().await?.drop {
+		// Get the document table
+		let tb = self.doc_ctx.tb()?;
+		// Check if the table is DROP
+		if tb.drop {
 			return Ok(());
 		}
 		// Get the record id
 		let rid = self.id()?;
-		// Get NS & DB
-		let (ns, db) = ctx.expect_ns_db_ids(opt).await?;
+		// Get the namespace id
+		let ns = self.doc_ctx.ns().namespace_id;
+		// Get the database id
+		let db = self.doc_ctx.db().database_id;
 		// Prep the doc
 		let doc = self.current.doc.clone().into_read_only();
-
 		// Match the statement type
 		match stm {
 			// This is a INSERT statement so try to insert the key.
