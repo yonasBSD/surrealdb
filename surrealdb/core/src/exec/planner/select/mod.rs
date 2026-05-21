@@ -858,17 +858,22 @@ impl<'ctx> Planner<'ctx> {
 				std::borrow::Cow::Borrowed(self.ctx)
 			};
 
-		// Propagate txn, version, and cycle guard to the inner planner.
-		// Inheriting the cycle guard means a self-referential permission
-		// or computed-field body whose subquery flows through this nested
-		// planner will see the parent's in-progress tables and fall back.
-		let pp = if let Some(ref txn) = self.txn {
+		// Propagate txn, version, auth, and cycle guard to the inner
+		// planner. Inheriting the cycle guard means a self-referential
+		// permission or computed-field body whose subquery flows through
+		// this nested planner will see the parent's in-progress tables
+		// and fall back. Inheriting auth keeps fast-path eligibility
+		// decisions consistent with the outer statement.
+		let mut pp = if let Some(ref txn) = self.txn {
 			Planner::with_txn(&planning_ctx, Arc::clone(txn), self.ns.clone(), self.db.clone())
 		} else {
 			Planner::new(&planning_ctx)
 		}
 		.with_version(version.clone())
 		.with_cycle_guard(self.cycle_guard());
+		if let Some(ref auth) = self.auth {
+			pp = pp.with_auth(Arc::clone(auth));
+		}
 
 		let needed_fields = Self::extract_needed_fields(
 			&fields,

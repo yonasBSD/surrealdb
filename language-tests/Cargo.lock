@@ -1605,25 +1605,6 @@ dependencies = [
 
 [[package]]
 name = "geo"
-version = "0.31.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2fc1a1678e54befc9b4bcab6cd43b8e7f834ae8ea121118b0fd8c42747675b4a"
-dependencies = [
- "earcutr",
- "float_next_after",
- "geo-types",
- "geographiclib-rs",
- "i_overlay",
- "log",
- "num-traits",
- "robust",
- "rstar 0.12.2",
- "serde",
- "spade",
-]
-
-[[package]]
-name = "geo"
 version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f3901269ec6d4f6068d3f09e5f02f995bd076398dcd1dfec407cd230b02d11b"
@@ -3662,15 +3643,15 @@ dependencies = [
 
 [[package]]
 name = "revision"
-version = "0.22.0"
+version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3099ed26713a3c553c71b4b6365dd4ad4c5fb6b08e52d9820e403850951fe9c"
+checksum = "65f9ed06d35b440507177492b41a7edc82e60eb03175c84296d9f4595280ae9e"
 dependencies = [
  "bytes",
  "chrono",
- "geo 0.31.0",
+ "geo",
  "regex",
- "revision-derive 0.22.0",
+ "revision-derive 0.23.0",
  "roaring",
  "rust_decimal",
  "uuid",
@@ -3689,9 +3670,9 @@ dependencies = [
 
 [[package]]
 name = "revision-derive"
-version = "0.22.0"
+version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "555b311180eaf6e4fdf8f155665f8235738b12537fe999ab5248c722f1d775c4"
+checksum = "bdbf03d5e019736198cac5417fff65a67f6ed46726db4c78e70468f2f4ecd052"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4433,7 +4414,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 name = "surrealdb-collections"
 version = "3.1.0-beta"
 dependencies = [
- "revision 0.22.0",
+ "revision 0.23.0",
  "storekey",
 ]
 
@@ -4466,7 +4447,7 @@ dependencies = [
  "fst",
  "futures",
  "fuzzy-matcher",
- "geo 0.32.0",
+ "geo",
  "geo-types",
  "getrandom 0.3.4",
  "half",
@@ -4497,7 +4478,7 @@ dependencies = [
  "rayon",
  "reblessive",
  "regex",
- "revision 0.22.0",
+ "revision 0.23.0",
  "ring",
  "roaring",
  "rquickjs",
@@ -4563,7 +4544,7 @@ dependencies = [
  "chrono",
  "flatbuffers",
  "futures",
- "geo 0.32.0",
+ "geo",
  "prost 0.14.3",
  "prost-types",
  "rust_decimal",
@@ -4589,7 +4570,7 @@ dependencies = [
 name = "surrealdb-strand"
 version = "3.1.0-beta"
 dependencies = [
- "revision 0.22.0",
+ "revision 0.23.0",
  "serde",
  "storekey",
 ]
@@ -4632,7 +4613,7 @@ dependencies = [
  "castaway",
  "chrono",
  "flatbuffers",
- "geo 0.32.0",
+ "geo",
  "hex",
  "http 1.4.0",
  "papaya",

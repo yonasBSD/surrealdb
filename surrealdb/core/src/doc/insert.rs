@@ -126,9 +126,9 @@ impl Document {
 		// Check table permissions after create
 		self.check_create_permissions(stk, ctx, opt, &self.current).await?;
 		// Store the document and index data
-		self.store_index_data(stk, ctx, opt).await?;
-		self.store_edges_data(ctx, opt).await?;
 		self.store_record_data(ctx, stm).await?;
+		self.store_edges_data(ctx, opt).await?;
+		self.store_index_data(stk, ctx, opt).await?;
 		// Process additional table operations
 		self.process_table_references(stk, ctx, opt).await?;
 		self.process_table_views(stk, ctx, opt, super::Action::Create).await?;
@@ -174,8 +174,9 @@ impl Document {
 		// Check table permissions after update
 		self.recheck_update_permissions(stk, ctx, opt, &self.current).await?;
 		// Store the document and index data
-		self.store_index_data(stk, ctx, opt).await?;
 		self.store_record_data(ctx, stm).await?;
+		self.store_edges_data(ctx, opt).await?;
+		self.store_index_data(stk, ctx, opt).await?;
 		// Process additional table operations
 		self.process_table_references(stk, ctx, opt).await?;
 		self.process_table_views(stk, ctx, opt, super::Action::Update).await?;

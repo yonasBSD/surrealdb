@@ -104,6 +104,19 @@ use crate::expr::{Expr, Function, FunctionCall};
 /// - [`idiom`] — Idiom-to-physical-part conversion
 /// - [`source`] — Lookup, index function, and source planning
 /// - [`util`] — Pure utility functions
+///
+/// # Auth-aware planning
+///
+/// `Planner::auth` carries the calling statement's `Arc<Auth>` when the
+/// caller has one in scope (executor, `plan_or_compute`, `SequencePlan`).
+/// New plan-time decisions that depend on whether permission evaluation
+/// will actually run at execute time should use the
+/// `should_check_perms_for_*` helpers on `Planner` rather than re-deriving
+/// the logic from `auth_enabled` + the `Auth` API directly. The helpers
+/// mirror `crate::exec::permission::should_check_perms`, default to
+/// "permissions apply" when the auth principal isn't wired through (deep
+/// nested compilation, txn-less paths), and keep the auth check
+/// consistent across the planner.
 pub struct Planner<'ctx> {
 	/// The frozen context containing query parameters, capabilities, and session info.
 	ctx: &'ctx FrozenContext,
@@ -128,6 +141,17 @@ pub struct Planner<'ctx> {
 	/// Propagated to `GraphEdgeScan` operators created during idiom
 	/// conversion so that graph edge traversals respect the VERSION clause.
 	pub(crate) version: Option<Arc<dyn crate::exec::PhysicalExpr>>,
+	/// Optional auth principal for the planning statement.
+	///
+	/// Forwarded by the executor / macro layer when the calling
+	/// `ExecutionContext` (or `Options`) is in scope. The planner only
+	/// consults this for plan-time decisions that depend on whether
+	/// permission evaluation will actually run at execute time — chiefly
+	/// the `Permission::Full` eligibility check in
+	/// [`try_fast_path_pair`]. `None` means "assume permissions apply",
+	/// which keeps every nested / sub-statement planner conservative
+	/// without needing every call site to thread the principal through.
+	pub(crate) auth: Option<Arc<crate::iam::Auth>>,
 	/// Plan-time cycle detector for permission and computed-field
 	/// compilation. Default empty for fresh planners (`new` / `with_txn`);
 	/// nested planners spawned to compile a permission or computed-field
@@ -163,6 +187,7 @@ impl<'ctx> Planner<'ctx> {
 			ns: None,
 			db: None,
 			version: None,
+			auth: None,
 			cycle_guard: CycleGuard::default(),
 			ns_db_ids_cache: tokio::sync::OnceCell::new(),
 			planner_strategy: *ctx.new_planner_strategy(),
@@ -188,6 +213,7 @@ impl<'ctx> Planner<'ctx> {
 			ns,
 			db,
 			version: None,
+			auth: None,
 			cycle_guard: CycleGuard::default(),
 			ns_db_ids_cache: tokio::sync::OnceCell::new(),
 			planner_strategy: *ctx.new_planner_strategy(),
@@ -225,6 +251,45 @@ impl<'ctx> Planner<'ctx> {
 	pub fn with_version(mut self, version: Option<Arc<dyn crate::exec::PhysicalExpr>>) -> Self {
 		self.version = version;
 		self
+	}
+
+	/// Attach the calling statement's auth principal.
+	///
+	/// See the `auth` field for what the planner uses this for. Callers
+	/// that have an `Options` or `ExecutionContext` in scope should clone
+	/// the `Arc<Auth>` and pass it through; callers without it (deeply
+	/// nested permission / computed-field compilation, txn-less paths)
+	/// can leave it unset and the planner will fall back to the
+	/// conservative defaults.
+	#[must_use]
+	pub(crate) fn with_auth(mut self, auth: Arc<crate::iam::Auth>) -> Self {
+		self.auth = Some(auth);
+		self
+	}
+
+	/// Mirror [`crate::exec::permission::should_check_perms`] for the View
+	/// action at plan time.
+	///
+	/// Returns `true` when permissions will be evaluated at execute time
+	/// (conservative default, including the case where the auth principal
+	/// isn't wired through to the planner). Returns `false` only when the
+	/// runtime would bypass permission evaluation -- root/owner with the
+	/// viewer role on the relevant level, or an anonymous session in an
+	/// auth-disabled datastore.
+	///
+	/// `ns` and `db` are the namespace/database names the operation
+	/// targets, used to verify the principal's actor level matches.
+	pub(crate) fn should_check_perms_for_view(&self, ns: &str, db: &str) -> bool {
+		let Some(ref auth) = self.auth else {
+			// No auth attached -- can't reason about runtime behaviour.
+			return true;
+		};
+		if !self.ctx.auth_enabled() && auth.is_anon() {
+			return false;
+		}
+		let allowed = auth.has_viewer_role();
+		let db_in_actor_level = auth.is_root() || auth.is_ns_check(ns) || auth.is_db_check(ns, db);
+		!allowed || !db_in_actor_level
 	}
 
 	/// Inherit a parent planner's cycle guard.
@@ -1305,7 +1370,16 @@ impl<'ctx> Planner<'ctx> {
 // ============================================================================
 
 macro_rules! try_plan_expr {
-	($expr:expr, $ctx:expr, $txn:expr) => {{
+	// Three-arg form preserved for compilation contexts that don't have an
+	// auth principal in scope (deep nested permission / computed-field
+	// compilation, planner tests, etc.). Delegates with `auth = None` so
+	// the planner stays on its conservative defaults.
+	($expr:expr, $ctx:expr, $txn:expr) => {{ $crate::exec::planner::try_plan_expr!($expr, $ctx, $txn, None) }};
+	// Four-arg form: caller has the session's `Arc<Auth>` available
+	// (typically via `Options` or `ExecutionContext`) and forwards it so
+	// the planner can make plan-time decisions that depend on whether
+	// permissions will actually run at execute time.
+	($expr:expr, $ctx:expr, $txn:expr, $auth:expr) => {{
 		let __expr: &$crate::expr::Expr = $expr;
 		if matches!(
 			__expr,
@@ -1324,7 +1398,7 @@ macro_rules! try_plan_expr {
 		} else if *$ctx.new_planner_strategy() == $crate::dbs::NewPlannerStrategy::ComputeOnly {
 			Err($crate::err::Error::PlannerUnsupported(String::new()))
 		} else {
-			$crate::exec::planner::plan_expr_inner(__expr, $ctx, $txn).await
+			$crate::exec::planner::plan_expr_inner(__expr, $ctx, $txn, $auth).await
 		}
 	}};
 }
@@ -1338,10 +1412,16 @@ pub(crate) use try_plan_expr;
 ///
 /// When a transaction is provided, the planner resolves table definitions
 /// and indexes at plan time, enabling sort elimination and concrete scan operators.
+///
+/// `auth`, when provided, lets the planner make decisions that depend on
+/// whether permissions will actually run at execute time -- see
+/// [`Planner::with_auth`]. Callers that don't have an auth principal handy
+/// (deep nested compilation, txn-less paths) can pass `None`.
 pub(crate) async fn plan_expr_inner(
 	expr: &Expr,
 	ctx: &FrozenContext,
 	txn: Arc<crate::kvs::Transaction>,
+	auth: Option<Arc<crate::iam::Auth>>,
 ) -> Result<Arc<dyn ExecOperator>, Error> {
 	// Extract ns/db from the context session parameters if available
 	let ns =
@@ -1358,7 +1438,11 @@ pub(crate) async fn plan_expr_inner(
 				_ => None,
 			}
 		});
-	Planner::with_txn(ctx, txn, ns, db).plan(expr).await
+	let mut planner = Planner::with_txn(ctx, txn, ns, db);
+	if let Some(auth) = auth {
+		planner = planner.with_auth(auth);
+	}
+	planner.plan(expr).await
 }
 
 /// Convert an expression to a physical expression via a **txn-less**

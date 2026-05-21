@@ -4,7 +4,7 @@ use anyhow::{Result, bail, ensure};
 use reblessive::tree::Stk;
 use surrealdb_types::ToSql;
 
-use crate::catalog::RecordType;
+use crate::catalog::{LATEST_EDGE_VARIANT, RecordType};
 use crate::ctx::{Context, FrozenContext};
 use crate::dbs::{Options, Statement};
 use crate::doc::{Document, Extras};
@@ -84,8 +84,28 @@ impl Document {
 		self.current.doc.to_mut().def(RecordId::clone(&rid));
 		// This is a RELATE statement, so reset fields
 		if let Extras::Relate(l, r, _) = &self.extras {
-			// Mark that this is an edge node
-			self.current.doc.set_record_type(RecordType::Edge);
+			// Stamp the record-type marker to the current adjacency-key
+			// generation. This runs before `store_record_data` writes the
+			// record to disk, so the on-disk metadata always matches the
+			// keys `store_edges_data` will emit later in the pipeline.
+			//
+			// Three cases are folded together by this single condition:
+			//   * Brand-new edge (`current` not yet an edge): stamp it.
+			//   * Re-RELATE of a stale-variant edge (e.g. legacy variant 1 being migrated to 2):
+			//     advance the stamp so the post-migration record reflects the upgraded layout.
+			//   * Re-RELATE of a current-variant edge: no-op skip, avoiding an `Arc::make_mut`
+			//     clone for nothing.
+			//
+			// `current` starts as a clone of `initial`, and users can't
+			// address `metadata` themselves, so the only way `current`
+			// can already carry the current variant here is if `initial`
+			// did — i.e. there's no risk of a stale write masking a
+			// genuine migration.
+			if self.current.doc.edge_variant() != Some(LATEST_EDGE_VARIANT) {
+				self.current.doc.set_record_type(RecordType::Edge {
+					variant: LATEST_EDGE_VARIANT,
+				});
+			}
 			// If this document existed before, check the `in` field
 			match (self.initial.doc.as_ref().pick(&IN), self.is_new()) {
 				// If the document id matches, then all good
@@ -121,9 +141,13 @@ impl Document {
 				}
 			}
 		}
-		// This is an UPDATE of a graph edge, so reset fields
+		// This is an UPDATE of a graph edge, so reset its `in` / `out`
+		// fields to whatever the prior record held. The edge marker
+		// itself doesn't need to be re-stamped: `current` is a clone
+		// of `initial`, and only `data` (not `metadata`) is reachable
+		// through `to_mut()`, so the variant on the prior edge flows
+		// through to the new write untouched.
 		if self.initial.doc.is_edge() {
-			self.current.doc.set_record_type(RecordType::Edge);
 			self.current.doc.to_mut().put(&IN, self.initial.doc.as_ref().pick(&IN));
 			self.current.doc.to_mut().put(&OUT, self.initial.doc.as_ref().pick(&OUT));
 		}

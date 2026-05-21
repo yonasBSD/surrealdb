@@ -18,6 +18,7 @@ use crate::expr::reference::ReferenceDeleteStrategy;
 use crate::expr::statements::{DeleteStatement, UpdateStatement};
 use crate::expr::{AssignOperator, Data, Expr, FlowResultExt as _, Idiom, Literal, Lookup, Part};
 use crate::idx::planner::ScanDirection;
+use crate::key::graph;
 use crate::key::r#ref::Ref;
 use crate::kvs::{NORMAL_BATCH_SIZE, ScanLimit};
 use crate::val::{RecordId, TableName, Value};
@@ -102,16 +103,53 @@ impl Document {
 		let Value::RecordId(ref r) = r else {
 			fail!("Expected a record id for the `out` field, found {}", r.to_sql());
 		};
-		// Purge the left pointer edge
-		let key1 = crate::key::graph::new(ns, db, &l.table, &l.key, Dir::Out, rid);
-		// Purge the left inner edge
-		let key2 = crate::key::graph::new(ns, db, &rid.table, &rid.key, Dir::In, l);
-		// Purge the right inner edge
-		let key3 = crate::key::graph::new(ns, db, &rid.table, &rid.key, Dir::Out, r);
-		// Purge the right pointer edge
-		let key4 = crate::key::graph::new(ns, db, &r.table, &r.key, Dir::In, rid);
-		// Purge the edges
-		futures::try_join!(txn.del(&key1), txn.del(&key2), txn.del(&key3), txn.del(&key4))?;
+		// The four keys deleted below mirror the encoding written by
+		// `store_edges_data` for a single relation — linking the `in` vertex
+		// (`l`), the edge record (`rid`), and the `out` vertex (`r`):
+		//
+		//              ltr (target = r)         pointer
+		//          ┌─────────────────────┬─ ─ ─ ─ ─ ─ ─ ─ ─ ┐
+		//          │                     ▼                  ▼
+		//     ┌────┴─────┐   etl  ┌────────────┐  etr   ┌──────────┐
+		//     │   left   │───────▶│ rid (edge) │───────▶│  right   │
+		//     └──────────┘   in   └────────────┘  out   └────┬─────┘
+		//           ▼                    ▼                   │
+		//           └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┴───────────────────┘
+		//                  pointer         rtl (source = l)
+		//
+		// `ltr` / `rtl` are vertex-side ("pointer") keys: stored on the
+		// IN / OUT vertex with the opposite endpoint embedded so that
+		// `->edge->vertex` (or its mirror) range scans can resolve the
+		// far vertex without reading the edge record.
+		//
+		// `etl` / `etr` are edge-side ("inner") keys: their adjacency
+		// already names the vertex in (ft, fk), so they keep the legacy
+		// layout without an embedded target — same across both variants.
+		let etl = graph::new(ns, db, &rid.table, &rid.key, Dir::In, l);
+		let etr = graph::new(ns, db, &rid.table, &rid.key, Dir::Out, r);
+		// Vertex-side keys are written in exactly one of two layouts and
+		// the record's `RecordType::Edge { variant }` stamp tells us
+		// which. Variant 1 records (legacy or pre-target-vertex layout)
+		// only ever wrote `crate::key::graph::new` keys; variant 2
+		// records (target-vertex-bearing layout) only ever wrote
+		// `crate::key::graph::new_pointer` keys, because the RELATE
+		// writer pre-deletes the legacy form before writing the new
+		// one. So we delete only the layout that actually exists on
+		// disk, halving the txn ops compared to probing both formats.
+		let variant = self.initial.doc.edge_variant().unwrap_or_default();
+		// Detect which variant the edge is currently
+		match variant {
+			1 => {
+				let ltr = graph::new(ns, db, &l.table, &l.key, Dir::Out, rid);
+				let rtl = graph::new(ns, db, &r.table, &r.key, Dir::In, rid);
+				futures::try_join!(txn.del(&ltr), txn.del(&etl), txn.del(&etr), txn.del(&rtl))?;
+			}
+			_ => {
+				let ltr = graph::new_pointer(ns, db, &l.table, &l.key, Dir::Out, rid, r);
+				let rtl = graph::new_pointer(ns, db, &r.table, &r.key, Dir::In, rid, l);
+				futures::try_join!(txn.del(&ltr), txn.del(&etl), txn.del(&etr), txn.del(&rtl))?;
+			}
+		}
 		// Carry on
 		Ok(())
 	}
@@ -151,7 +189,9 @@ impl Document {
 		let batch = cursor.next_batch(ScanLimit::Count(1)).await?;
 		// Only proceed if there are edges for this record.
 		if !batch.is_empty() {
-			// Create a `DELETE FROM record:id<->` statement
+			// Create a `DELETE FROM record:id<->` statement. `Part::Lookup`
+			// boxes its payload after the recent enum-variant slimming on
+			// main (#209), so wrap the `Lookup` accordingly.
 			let stm = DeleteStatement {
 				what: vec![Expr::Idiom(Idiom(vec![
 					Part::Start(Expr::Literal(Literal::RecordId(rid.clone().into_literal()))),

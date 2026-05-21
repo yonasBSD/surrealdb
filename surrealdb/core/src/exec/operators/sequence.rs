@@ -153,9 +153,10 @@ async fn execute_block_with_context(
 		}
 
 		let frozen_ctx = Arc::clone(current_ctx.ctx());
+		let auth = current_ctx.options().map(|o| Arc::clone(&o.auth));
 
 		// Try to plan the expression with current context
-		match try_plan_expr!(expr, &frozen_ctx, current_ctx.txn()) {
+		match try_plan_expr!(expr, &frozen_ctx, current_ctx.txn(), auth) {
 			Ok(plan) => {
 				if plan.mutates_context() {
 					current_ctx = plan.output_context(&current_ctx).await?;

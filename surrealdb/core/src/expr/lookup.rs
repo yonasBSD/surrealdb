@@ -239,6 +239,10 @@ impl ComputedLookupSubject {
 							},
 						)
 						.encode_key()?,
+						// Append `0xff` to skip past any new-format key for
+						// this fk that embeds a target vertex after the
+						// legacy bytes; see `eval_graph_bound` in the
+						// streaming scan operator for the same logic.
 						Bound::Excluded(v) => crate::key::graph::new(
 							ns,
 							db,
@@ -252,7 +256,7 @@ impl ComputedLookupSubject {
 						)
 						.encode_key()
 						.map(|mut v| {
-							v.push(0x00);
+							v.push(0xff);
 							v
 						})?,
 					};
@@ -273,6 +277,8 @@ impl ComputedLookupSubject {
 							},
 						)
 						.encode_key()?,
+						// Append `0xff` to include any new-format key for
+						// this fk (target bytes follow the legacy encoding).
 						Bound::Included(v) => crate::key::graph::new(
 							ns,
 							db,
@@ -286,7 +292,7 @@ impl ComputedLookupSubject {
 						)
 						.encode_key()
 						.map(|mut v| {
-							v.push(0x00);
+							v.push(0xff);
 							v
 						})?,
 					};

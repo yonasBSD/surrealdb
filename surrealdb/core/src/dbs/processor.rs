@@ -184,11 +184,11 @@ impl Collectable {
 		let (ft, fk) = match kind {
 			LookupKind::Graph(_) => {
 				let gra = graph::Graph::decode_key(&key)?;
-				(gra.ft, gra.fk)
+				(gra.edge.table, gra.edge.key)
 			}
 			LookupKind::Reference => {
 				let refe = r#ref::Ref::decode_key(&key)?;
-				(refe.ft, refe.fk)
+				(refe.ft.into_owned(), refe.fk.into_owned())
 			}
 		};
 
@@ -196,10 +196,9 @@ impl Collectable {
 		// vertex table stored in doc_ctx (e.g. edge tables during cascade delete).
 		// Rebuild the context so downstream processing (events, views, lives,
 		// changefeeds, field validation) uses the correct table definition.
-		if ft.as_ref() != doc_ctx.tb()?.name {
-			let tb = txn
-				.get_or_add_tb(None, &doc_ctx.ns().name, &doc_ctx.db().name, ft.as_ref(), None)
-				.await?;
+		if ft != doc_ctx.tb()?.name {
+			let tb =
+				txn.get_or_add_tb(None, &doc_ctx.ns().name, &doc_ctx.db().name, &ft, None).await?;
 			let parent = NsDbCtx {
 				ns: Arc::clone(doc_ctx.ns()),
 				db: Arc::clone(doc_ctx.db()),
@@ -210,8 +209,7 @@ impl Collectable {
 			// rebuilt context must match.
 			let mutating = matches!(doc_ctx, DocumentContext::NsDbTbMutCtx(_));
 			doc_ctx =
-				DocumentContext::initialise(ctx, &parent, tb, ft.as_ref(), opt.version, mutating)
-					.await?;
+				DocumentContext::initialise(ctx, &parent, tb, &ft, opt.version, mutating).await?;
 		}
 
 		// Fetch the data from the store
@@ -221,15 +219,15 @@ impl Collectable {
 			txn.get_record(
 				doc_ctx.ns().namespace_id,
 				doc_ctx.db().database_id,
-				ft.as_ref(),
+				&ft,
 				&fk,
 				opt.version,
 			)
 			.await?
 		};
 		let rid = RecordId {
-			table: ft.into_owned(),
-			key: fk.into_owned(),
+			table: ft,
+			key: fk,
 		};
 		// Parse the data from the store
 		let val = Operable::Value(record);

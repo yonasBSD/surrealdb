@@ -1419,7 +1419,9 @@ pub fn record_with_metadata() -> Record {
 	let mut obj = Object::default();
 	obj.insert("id".to_string(), Value::RecordId(test_record_rid()));
 	let mut record = Record::new(Value::Object(obj));
-	record.set_record_type(RecordType::Edge);
+	record.set_record_type(RecordType::Edge {
+		variant: 1,
+	});
 	record
 }
 

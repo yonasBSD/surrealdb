@@ -76,7 +76,9 @@ fn edge_metadata_extracts_data() {
 	]));
 	let rec = Record {
 		metadata: Some(Metadata {
-			record_type: RecordType::Edge,
+			record_type: RecordType::Edge {
+				variant: Default::default(),
+			},
 			aggregation_stats: Vec::new(),
 		}),
 		data: Value::Object(obj),

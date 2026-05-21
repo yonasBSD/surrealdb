@@ -173,31 +173,58 @@ impl<'ctx> Planner<'ctx> {
 				// CurrentValueSource, we thread the output of one lookup as the
 				// input to the next, forming a streaming DAG:
 				//   GraphEdgeScan(->person, GraphEdgeScan(->likes, CurrentValueSource))
+				//
+				// When a consecutive `->edge->vertex` pair is fast-path
+				// eligible (no edge-side filters/projections, edge table has
+				// `PERMISSIONS FULL`), both hops collapse into a single scan
+				// in `TargetVertex` mode that reads the target vertex from
+				// the adjacency key directly. See [`try_fast_path_pair`].
 				if let Part::Lookup(first_lookup) = part {
-					let (mut direction, mut extract_id) = lookup_metadata(&first_lookup);
-					let mut only = first_lookup.only;
-					let mut chain: Arc<dyn ExecOperator> = Arc::new(CurrentValueSource::new());
-					chain = self.plan_lookup_with_input(chain, *first_lookup).await?;
-
-					// Consume all consecutive Part::Lookup nodes. The
-					// `peek + next` pattern provably yields a `Part::Lookup`,
-					// but if a future Part variant ever matches the peek and
-					// not the destructure we'd rather see a typed error than
-					// a panic on user input.
-					let mut fused = false;
+					// Collect every consecutive lookup so we can inspect pairs.
+					// `Part::Lookup` boxes its payload (#209), so we deref each
+					// one as we collect.
+					let mut lookups: Vec<crate::expr::lookup::Lookup> = vec![*first_lookup];
 					while matches!(iter.peek(), Some(Part::Lookup(_))) {
-						let Some(Part::Lookup(next_lookup)) = iter.next() else {
+						let Some(Part::Lookup(lu)) = iter.next() else {
 							return Err(Error::Internal(
 								"convert_parts lookup fusion: iter.peek() reported Part::Lookup but iter.next() did not yield one"
 									.into(),
 							));
 						};
-						let (d, e) = lookup_metadata(&next_lookup);
-						direction = d;
-						extract_id = e;
-						only |= next_lookup.only;
-						chain = self.plan_lookup_with_input(chain, *next_lookup).await?;
-						fused = true;
+						lookups.push(*lu);
+					}
+					let fused = lookups.len() > 1;
+					let only = lookups.iter().any(|l| l.only);
+
+					let mut chain: Arc<dyn ExecOperator> = Arc::new(CurrentValueSource::new());
+					let mut direction = LookupDirection::Out;
+					let mut extract_id = false;
+
+					let mut idx = 0;
+					while idx < lookups.len() {
+						let advance = if idx + 1 < lookups.len() {
+							self.try_fast_path_pair(&lookups[idx], &lookups[idx + 1]).await?
+						} else {
+							None
+						};
+						if let Some(plan) = advance {
+							// Fast path: replace the (edge, vertex) pair with
+							// a single TargetVertex scan whose metadata is
+							// taken from the *vertex* lookup so downstream
+							// behavior matches the original two-scan chain.
+							chain = self.plan_target_vertex_scan(chain, plan).await?;
+							let (d, e) = lookup_metadata(&lookups[idx + 1]);
+							direction = d;
+							extract_id = e;
+							idx += 2;
+						} else {
+							let lu = lookups[idx].clone();
+							let (d, e) = lookup_metadata(&lu);
+							direction = d;
+							extract_id = e;
+							chain = self.plan_lookup_with_input(chain, lu).await?;
+							idx += 1;
+						}
 					}
 
 					converted.push(Arc::new(LookupPart {

@@ -32,6 +32,14 @@ pub enum GraphScanOutput {
 	TargetId,
 	/// Return the full edge records (fetched from the datastore)
 	FullEdge,
+	/// Skip the edge entirely and return the final target vertex.
+	///
+	/// Used when a `->edge->vertex` traversal touches no edge data and the
+	/// edge table has no permissions / events that need to gate access.
+	/// New-format adjacency keys carry the target vertex directly; legacy
+	/// keys trigger an inline fallback scan of the edge's own adjacency to
+	/// recover the target, preserving correctness on unmigrated data.
+	TargetVertex,
 }
 
 /// Specification for an edge table to scan, optionally with ID range bounds.
@@ -74,6 +82,18 @@ pub struct GraphEdgeScan {
 	/// What to output: EdgeId, TargetId, or FullEdge
 	pub(crate) output_mode: GraphScanOutput,
 
+	/// Filter on the final vertex table(s) for `TargetVertex` mode.
+	///
+	/// Populated by the planner when collapsing `->edge->vertex` into a
+	/// single scan. New-format keys whose embedded target table does not
+	/// match this list are skipped; legacy keys trigger an inline fallback
+	/// that scans the edge's adjacency restricted to these tables. The
+	/// planner only produces this scan when the next-hop vertex tables are
+	/// known (see `Planner::try_fast_path_pair`), so this is always
+	/// non-empty in practice; an empty list is treated defensively as
+	/// "match any target", but no current call site constructs that case.
+	pub(crate) target_tables: Vec<TableName>,
+
 	/// Optional VERSION timestamp for time-travel queries.
 	pub(crate) version: Option<Arc<dyn PhysicalExpr>>,
 
@@ -98,6 +118,7 @@ impl GraphEdgeScan {
 			direction,
 			edge_tables,
 			output_mode,
+			target_tables: Vec::new(),
 			version,
 			limit: None,
 			metrics: Arc::new(OperatorMetrics::new()),
@@ -106,6 +127,13 @@ impl GraphEdgeScan {
 
 	pub(crate) fn with_limit(mut self, limit: usize) -> Self {
 		self.limit = Some(limit);
+		self
+	}
+
+	/// Configure the next-hop target vertex tables. Only meaningful when
+	/// `output_mode == TargetVertex`; ignored otherwise.
+	pub(crate) fn with_target_tables(mut self, tables: Vec<TableName>) -> Self {
+		self.target_tables = tables;
 		self
 	}
 }
@@ -179,6 +207,7 @@ impl ExecOperator for GraphEdgeScan {
 		let direction = self.direction;
 		let edge_tables = self.edge_tables.clone();
 		let output_mode = self.output_mode;
+		let target_tables = self.target_tables.clone();
 		let edge_limit = self.limit;
 		let version_expr = self.version.clone();
 		let scan_batch_size = ctx.root().ctx.config.scan_batch_size;
@@ -247,63 +276,258 @@ impl ExecOperator for GraphEdgeScan {
 						).await?;
 
 						for (beg, end) in ranges {
-							let mut cursor = txn
-								.open_keys_cursor(beg..end, ScanDirection::Forward, 0, version)
-								.await
-								.context("Failed to open graph cursor")?;
+							// Outer cursor over the source vertex's adjacency.
+							// In `TargetVertex` mode, legacy-format keys (no
+							// embedded target) are buffered into a bounded
+							// chunk and resolved after the cursor closes,
+							// since opening a second cursor on `txn` while
+							// the outer cursor still borrows it is not
+							// allowed. When the buffer fills before the
+							// range is exhausted, we drain it via inner
+							// scans and resume the outer cursor past the
+							// last processed key.
+							let mut current_beg = beg;
 							let mut limit_hit = false;
-							'cursor_loop: loop {
-								// Cap each batch to the remaining edge budget
-								// (when `edge_limit` is set) so we don't
-								// over-fetch past the user's LIMIT.
-								let remaining = edge_limit.map(|l| {
-									l.saturating_sub(edges_yielded).min(
-										crate::kvs::NORMAL_BATCH_SIZE as usize,
-									)
-								});
-								let batch_size = remaining
-									.map(|r| r as u32)
-									.unwrap_or(crate::kvs::NORMAL_BATCH_SIZE);
-								if batch_size == 0 {
-									limit_hit = true;
-									break;
+							'range_chunks: loop {
+								let mut legacy_edges: Vec<RecordId> = Vec::new();
+								let mut chunk_bound_hit = false;
+								let mut last_processed_key: Option<Vec<u8>> = None;
+								{
+									let mut cursor = txn
+										.open_keys_cursor(
+											current_beg.clone()..end.clone(),
+											ScanDirection::Forward,
+											0,
+											version,
+										)
+										.await
+										.context("Failed to open graph cursor")?;
+									'cursor_loop: loop {
+										// Cap each batch to the remaining edge
+										// budget (when `edge_limit` is set) so we
+										// don't over-fetch past the user's LIMIT.
+										let remaining = edge_limit.map(|l| {
+											l.saturating_sub(edges_yielded)
+												.min(crate::kvs::NORMAL_BATCH_SIZE as usize)
+										});
+										let batch_size = remaining
+											.map(|r| r as u32)
+											.unwrap_or(crate::kvs::NORMAL_BATCH_SIZE);
+										if batch_size == 0 {
+											limit_hit = true;
+											break;
+										}
+										let batch = cursor
+											.next_batch(crate::kvs::ScanLimit::Count(batch_size))
+											.await
+											.context("Failed to scan graph edge")?;
+										if batch.is_empty() {
+											break;
+										}
+										for key in &batch {
+											let decoded = decode_graph_edge(key)?;
+											if output_mode == GraphScanOutput::TargetVertex {
+												match decoded.target {
+													// New-format key: the embedded
+													// target vertex lets us skip
+													// the edge-record hop entirely.
+													Some(target)
+														if target_tables.is_empty()
+															|| target_tables
+																.contains(&target.table) =>
+													{
+														rid_batch.push(target);
+														edges_yielded += 1;
+													}
+													Some(_) => {
+														// Target table doesn't
+														// match the next-hop
+														// filter; skip.
+													}
+													None => {
+														// Legacy key: defer the
+														// fallback scan until the
+														// outer cursor closes
+														// (see below). Bound the
+														// buffer to `scan_batch_size`
+														// so a vertex with many
+														// un-migrated edges
+														// doesn't OOM the scan.
+														legacy_edges.push(decoded.edge);
+														if legacy_edges.len()
+															>= scan_batch_size
+														{
+															chunk_bound_hit = true;
+															last_processed_key =
+																Some(key.to_vec());
+															break;
+														}
+													}
+												}
+											} else {
+												// `TargetId` / `FullEdge` operate
+												// on the edge identity (unchanged
+												// behavior).
+												rid_batch.push(decoded.edge);
+												edges_yielded += 1;
+											}
+											if edge_limit.is_some_and(|l| edges_yielded >= l) {
+												limit_hit = true;
+												break;
+											}
+										}
+										// `batch`'s borrow of the cursor ends with
+										// the for-loop above (NLL), so it's safe
+										// to await `resolve_record_batch` here.
+										// Flushing inside the cursor loop bounds
+										// `rid_batch` to ~`scan_batch_size +
+										// NORMAL_BATCH_SIZE` even for high-fanout
+										// edge ranges.
+										if rid_batch.len() >= scan_batch_size {
+											let values = resolve_record_batch(
+												&ctx,
+												&txn,
+												ns_id,
+												db_id,
+												&rid_batch,
+												fetch_full,
+												check_perms,
+												version,
+												CachePolicy::ReadWrite,
+												&mut perm_cache,
+											)
+											.await?;
+											yield ValueBatch {
+												values,
+											};
+											rid_batch.clear();
+										}
+										if limit_hit || chunk_bound_hit {
+											break 'cursor_loop;
+										}
+									}
+									drop(cursor);
 								}
-								let batch = cursor
-									.next_batch(crate::kvs::ScanLimit::Count(batch_size))
-									.await
-									.context("Failed to scan graph edge")?;
-								if batch.is_empty() {
-									break;
-								}
-								for key in &batch {
-									let target_rid = decode_graph_edge(key)?;
-									rid_batch.push(target_rid);
-									edges_yielded += 1;
-									if edge_limit.is_some_and(|l| edges_yielded >= l) {
-										limit_hit = true;
-										break;
+
+								// Legacy-format fallback: for each adjacency entry
+								// that did not embed a target, walk the edge's
+								// own adjacency (restricted to the requested
+								// target tables) to recover the target vertex.
+								// Runs after the outer cursor is dropped so we
+								// can hold an inner cursor on `txn`.
+								if !legacy_edges.is_empty() && !limit_hit {
+									let inner_specs: Vec<EdgeTableSpec> =
+										if target_tables.is_empty() {
+											Vec::new()
+										} else {
+											target_tables
+												.iter()
+												.cloned()
+												.map(|t| EdgeTableSpec {
+													table: t,
+													range_start: std::ops::Bound::Unbounded,
+													range_end: std::ops::Bound::Unbounded,
+												})
+												.collect()
+										};
+									'legacy_loop: for edge_rid in legacy_edges {
+										let inner_ranges = compute_graph_ranges(
+											ns_id,
+											db_id,
+											&edge_rid,
+											dir,
+											&inner_specs,
+											&ctx,
+										)
+										.await?;
+										for (ibeg, iend) in inner_ranges {
+											let mut inner_cursor = txn
+												.open_keys_cursor(
+													ibeg..iend,
+													ScanDirection::Forward,
+													0,
+													version,
+												)
+												.await
+												.context(
+													"Failed to open legacy-fallback graph cursor",
+												)?;
+											loop {
+												let inner_batch = inner_cursor
+													.next_batch(crate::kvs::ScanLimit::Count(
+														crate::kvs::NORMAL_BATCH_SIZE,
+													))
+													.await
+													.context(
+														"Failed to scan edge adjacency for legacy graph fallback",
+													)?;
+												if inner_batch.is_empty() {
+													break;
+												}
+												for ik in &inner_batch {
+													// On edge-side adjacency keys the
+													// `(ft, fk)` slot holds the endpoint
+													// vertex, not an edge -- the legacy
+													// fallback walks the edge's own
+													// adjacency precisely to recover
+													// that vertex. Bind it under a name
+													// that reflects what it actually is.
+													let endpoint = decode_graph_edge(ik)?.edge;
+													rid_batch.push(endpoint);
+													edges_yielded += 1;
+													if edge_limit
+														.is_some_and(|l| edges_yielded >= l)
+													{
+														limit_hit = true;
+														break;
+													}
+												}
+												if rid_batch.len() >= scan_batch_size {
+													let values = resolve_record_batch(
+														&ctx,
+														&txn,
+														ns_id,
+														db_id,
+														&rid_batch,
+														fetch_full,
+														check_perms,
+														version,
+														CachePolicy::ReadWrite,
+														&mut perm_cache,
+													)
+													.await?;
+													yield ValueBatch {
+														values,
+													};
+													rid_batch.clear();
+												}
+												if limit_hit {
+													break;
+												}
+											}
+											drop(inner_cursor);
+											if limit_hit {
+												break 'legacy_loop;
+											}
+										}
 									}
 								}
-								// `batch`'s borrow of the cursor ends with the
-								// for-loop above (NLL), so it's safe to await
-								// `resolve_record_batch` here. Flushing inside
-								// the cursor loop bounds `rid_batch` to
-								// ~`scan_batch_size + NORMAL_BATCH_SIZE` even
-								// for high-fanout edge ranges.
-								if rid_batch.len() >= scan_batch_size {
-									let values = resolve_record_batch(
-										&ctx, &txn, ns_id, db_id, &rid_batch, fetch_full,
-										check_perms, version, CachePolicy::ReadWrite,
-										&mut perm_cache,
-									).await?;
-									yield ValueBatch { values };
-									rid_batch.clear();
+
+								// Continue chunking only when the cursor was
+								// suspended because the legacy buffer filled.
+								// `last_processed_key` is the legacy key that
+								// triggered the bound; resume past it with
+								// `0xff` (the same sentinel used by the range
+								// bounds, see `eval_graph_bound`).
+								if !chunk_bound_hit || limit_hit {
+									break 'range_chunks;
 								}
-								if limit_hit {
-									break 'cursor_loop;
-								}
+								let mut next_beg = last_processed_key
+									.expect("chunk_bound_hit implies a key was processed");
+								next_beg.push(0xff);
+								current_beg = next_beg;
 							}
-							drop(cursor);
+
 							if limit_hit {
 								break 'dir_loop;
 							}
@@ -373,8 +597,14 @@ async fn compute_graph_ranges(
 /// | Bound     | start (`is_start=true`)  | end (`is_start=false`)     |
 /// |-----------|--------------------------|----------------------------|
 /// | Unbounded | `ftprefix`               | `ftsuffix`                 |
-/// | Included  | exact key                | key + `0x00` (include key) |
-/// | Excluded  | key + `0x00` (skip past) | exact key (stop before)    |
+/// | Included  | exact key                | key + `0xff` (include key) |
+/// | Excluded  | key + `0xff` (skip past) | exact key (stop before)    |
+///
+/// The suffix byte is `0xff` (rather than `0x00`) so that new-format keys,
+/// which append the target vertex after `fk`, are still captured by an
+/// Included end / skipped by an Excluded start. The first byte after `fk`
+/// in a new-format key is the first byte of the target table name's
+/// storekey encoding, which is always `< 0xff` for practical table names.
 #[allow(clippy::too_many_arguments)]
 async fn eval_graph_bound(
 	ns_id: NamespaceId,
@@ -399,18 +629,22 @@ async fn eval_graph_bound(
 		Bound::Included(expr) => {
 			let fk = evaluate_bound_key(expr, ctx).await?;
 			let mut key = encode_graph_key(ns_id, db_id, rid, dir, edge_table, fk)?;
-			// Included start: exact key; Included end: append suffix to include key
+			// Included start: exact key.
+			// Included end: append `0xff` to include the key and any
+			// new-format-with-target variant of the same fk.
 			if !is_start {
-				key.push(0x00);
+				key.push(0xff);
 			}
 			Ok(key)
 		}
 		Bound::Excluded(expr) => {
 			let fk = evaluate_bound_key(expr, ctx).await?;
 			let mut key = encode_graph_key(ns_id, db_id, rid, dir, edge_table, fk)?;
-			// Excluded start: append suffix to skip past key; Excluded end: exact key
+			// Excluded start: append `0xff` to skip past both legacy and
+			// new-format-with-target variants of the same fk.
+			// Excluded end: exact key.
 			if is_start {
-				key.push(0x00);
+				key.push(0xff);
 			}
 			Ok(key)
 		}
@@ -441,14 +675,14 @@ fn encode_graph_key(
 	.context("Failed to encode graph range key")
 }
 
-/// Decode a graph key into the target [`RecordId`].
-fn decode_graph_edge(key: &[u8]) -> Result<RecordId, ControlFlow> {
-	let decoded =
-		crate::key::graph::Graph::decode_key(key).context("Failed to decode graph key")?;
-	Ok(RecordId {
-		table: decoded.ft.into_owned(),
-		key: decoded.fk.into_owned(),
-	})
+/// Decode a graph key. For legacy keys, returns the edge id; for new-format
+/// keys, also returns the embedded target vertex.
+///
+/// Thin wrapper over [`crate::key::graph::Graph::decode_key`] that converts
+/// the anyhow error into a [`ControlFlow`] with a consistent context string,
+/// so call sites in the scan pipeline can stay on `?`.
+fn decode_graph_edge(key: &[u8]) -> Result<crate::key::graph::DecodedGraph, ControlFlow> {
+	crate::key::graph::Graph::decode_key(key).context("Failed to decode graph key")
 }
 
 #[cfg(test)]

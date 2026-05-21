@@ -749,7 +749,12 @@ impl Executor {
 				// `ExecutionContext` local to `execute_operator_plan` that
 				// never reaches `self.ctx`. Planning the RHS directly keeps
 				// the bind-into-session logic in one place — here.
-				let res = match try_plan_expr!(&stm.what, &self.ctx, Arc::clone(&txn)) {
+				let res = match try_plan_expr!(
+					&stm.what,
+					&self.ctx,
+					Arc::clone(&txn),
+					Some(Arc::clone(&self.opt.auth))
+				) {
 					Ok(plan) => self.execute_operator_plan(plan, Arc::clone(&txn)).await,
 					Err(err @ (Error::PlannerUnsupported(_) | Error::PlannerUnimplemented(_))) => {
 						if let Error::PlannerUnimplemented(msg) = &err {
@@ -832,7 +837,12 @@ impl Executor {
 			// Process all other normal statements
 			TopLevelExpr::Expr(e) => {
 				// Try the new streaming execution path first
-				match try_plan_expr!(&e, &self.ctx, Arc::clone(&txn)) {
+				match try_plan_expr!(
+					&e,
+					&self.ctx,
+					Arc::clone(&txn),
+					Some(Arc::clone(&self.opt.auth))
+				) {
 					Ok(plan) => {
 						// Set the transaction on the context
 						ctx_mut!().set_transaction(Arc::clone(&txn));

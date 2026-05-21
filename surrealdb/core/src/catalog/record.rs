@@ -147,10 +147,27 @@ impl Record {
 		matches!(
 			&self.metadata,
 			Some(Metadata {
-				record_type: RecordType::Edge,
+				record_type: RecordType::Edge { .. },
 				..
 			})
 		)
+	}
+
+	/// Returns the adjacency-key format variant of this edge record, if
+	/// any. Returns `None` for non-edge records. Callers that need to
+	/// preserve an existing edge's variant on UPDATE (rather than
+	/// downgrading it to a different write-time default) should source
+	/// the variant from this helper on the prior document.
+	pub const fn edge_variant(&self) -> Option<u16> {
+		match &self.metadata {
+			Some(Metadata {
+				record_type: RecordType::Edge {
+					variant,
+				},
+				..
+			}) => Some(*variant),
+			_ => None,
+		}
 	}
 
 	/// Wraps this record in an `Arc` for shared ownership.
@@ -174,19 +191,54 @@ impl Record {
 	}
 }
 
+/// The adjacency-key layout generation used when writing brand-new edges.
+///
+/// Existing edges keep whatever variant they were originally stamped with
+/// so their on-disk keys stay valid — only first-write picks this value.
+/// Bump when the on-disk adjacency-key layout for new edges advances; add
+/// a matching dispatch arm in `doc/edges.rs::store_edges_data` (write) and
+/// `doc/purge.rs::purge_pointers` (delete) at the same time.
+pub(crate) const LATEST_EDGE_VARIANT: u16 = 2;
+
 /// Types of records that can be stored in the database
 ///
 /// This enum defines the different types of records that can be stored.
-/// Currently, only Edge is supported, but this can be extended to support
-/// other record types in the future.
-#[revisioned(revision = 1)]
+/// Edge records carry a `variant` discriminator so format-aware paths
+/// (adjacency-key writes, edge purge) know which on-disk layout the
+/// record was created against and can dispatch accordingly.
+#[revisioned(revision = 2)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, PartialOrd, Hash)]
 pub(crate) enum RecordType {
 	/// Represents a normal table record
 	#[default]
 	Table,
-	/// Represents an edge in a graph
+	/// Revision-1 unit form of `Edge`. Records persisted before the
+	/// variant marker existed deserialize through this variant and are
+	/// upgraded to `Edge { variant: 1 }`, which corresponds to the
+	/// original adjacency-key layout (no embedded target vertex).
+	#[revision(end = 2, convert_fn = "upgrade_edge_v1", fields_name = "EdgeV1")]
 	Edge,
+	/// Represents an edge in a graph. `variant` identifies which
+	/// adjacency-key layout was used when the edge was written, so the
+	/// purge path knows exactly which keys to delete without probing
+	/// multiple formats. New edges get the current format generation;
+	/// older edges keep whatever variant they were written with.
+	#[revision(start = 2)]
+	Edge {
+		variant: u16,
+	},
+}
+
+impl RecordType {
+	/// Legacy unit `Edge` records predate the variant marker and were
+	/// always written with the original adjacency-key layout. Stamp
+	/// them as variant 1 on decode so format-aware code paths can treat
+	/// them uniformly with explicitly-stamped records going forward.
+	fn upgrade_edge_v1(_fields: EdgeV1, _revision: u16) -> Result<Self, revision::Error> {
+		Ok(Self::Edge {
+			variant: 1,
+		})
+	}
 }
 
 /// Metadata associated with a record
@@ -218,6 +270,59 @@ mod tests {
 			table: TableName::new(table),
 			key: RecordIdKey::String(Strand::new(key)),
 		}
+	}
+
+	#[test]
+	fn legacy_unit_edge_decodes_to_variant_one() {
+		// Records persisted before the variant marker existed wrote
+		// `RecordType::Edge` as a rev-1 unit variant. The rev-1 → rev-2
+		// upgrade path must map them to `Edge { variant: 1 }` so the
+		// purge layer (which dispatches on the variant) treats them as
+		// the original adjacency-key layout.
+		use revision::{DeserializeRevisioned, SerializeRevisioned, revisioned};
+
+		#[revisioned(revision = 1)]
+		#[derive(Debug, PartialEq)]
+		enum LegacyRecordType {
+			Table,
+			Edge,
+		}
+
+		let mut bytes = Vec::new();
+		LegacyRecordType::Edge.serialize_revisioned(&mut bytes).unwrap();
+
+		let decoded =
+			<RecordType as DeserializeRevisioned>::deserialize_revisioned(&mut bytes.as_slice())
+				.unwrap();
+		assert_eq!(
+			decoded,
+			RecordType::Edge {
+				variant: 1,
+			}
+		);
+	}
+
+	#[test]
+	fn current_edge_round_trips_through_metadata() {
+		// A `Metadata` containing `Edge { variant: N }` must round-trip
+		// through the revisioned encoder/decoder without losing the
+		// variant marker. This guards against accidental regressions
+		// where Metadata's encoding inadvertently strips struct-variant
+		// fields on the RecordType field.
+		use revision::{DeserializeRevisioned, SerializeRevisioned};
+
+		let original = Metadata {
+			record_type: RecordType::Edge {
+				variant: 7,
+			},
+			aggregation_stats: Vec::new(),
+		};
+		let mut bytes = Vec::new();
+		original.serialize_revisioned(&mut bytes).unwrap();
+		let decoded =
+			<Metadata as DeserializeRevisioned>::deserialize_revisioned(&mut bytes.as_slice())
+				.unwrap();
+		assert_eq!(decoded, original);
 	}
 
 	#[test]
