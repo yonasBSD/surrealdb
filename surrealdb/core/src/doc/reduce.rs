@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use reblessive::tree::Stk;
+use tracing::instrument;
 
 use crate::catalog::Permission;
 use crate::ctx::{Context, FrozenContext};
@@ -124,6 +125,74 @@ impl Document {
 		} else {
 			Ok(full.clone())
 		}
+	}
+
+	/// Apply `PERMISSIONS FOR select` to the COMPUTED fields of `doc`
+	/// after they have been populated by
+	/// [`Document::computed_fields_inner`]. The reduce kernel
+	/// ([`Self::reduce_document`]) runs *before* computed fields exist,
+	/// so without this step a subscriber without permission to read a
+	/// computed field would still receive its value in the LIVE
+	/// notification (and, for `SubscriptionFields::Diff`, in the patch
+	/// ops). Stored fields are intentionally skipped here — they were
+	/// already filtered by `reduce_document`.
+	#[instrument(level = "trace", target = "surrealdb::core::doc::reduce", skip_all)]
+	pub(crate) async fn filter_computed_field_permissions(
+		&self,
+		stk: &mut Stk,
+		ctx: &FrozenContext,
+		opt: &Options,
+		doc: &mut CursorDoc,
+	) -> Result<()> {
+		// If permissions are disabled, nothing to do.
+		if !ctx.check_perms(opt, Action::View)? {
+			return Ok(());
+		}
+		// Snapshot once; cuts accumulate on `doc`, but `each`, `pick` and
+		// the cursor passed to permission predicates all read from the
+		// snapshot so later cuts don't perturb earlier evaluations.
+		let original = doc.clone();
+		for fd in self.doc_ctx.fd()?.iter() {
+			// Only filter computed fields here; stored fields were
+			// already handled by `reduce_document`.
+			if fd.computed.is_none() {
+				continue;
+			}
+			// SECURITY: apply the field's AUTH LIMIT before evaluating
+			// PERMISSIONS FOR select so the predicate runs under the
+			// definer's downgraded auth, not the caller's.
+			let opt = AuthLimit::try_from(&fd.auth_limit)?.limit_opt(opt);
+			match &fd.select_permission {
+				Permission::Full => (),
+				Permission::None => {
+					for k in original.doc.as_ref().each(&fd.name).iter() {
+						doc.doc.to_mut().cut(k);
+					}
+				}
+				Permission::Specific(e) => {
+					for k in original.doc.as_ref().each(&fd.name).iter() {
+						// Disable permissions
+						let opt = &opt.new_with_perms(false);
+						// Get the computed value
+						let val = Arc::new(original.doc.as_ref().pick(k));
+						// Configure the context
+						let mut child_ctx = Context::new_child(ctx);
+						child_ctx.add_value("value", val);
+						let child_ctx = child_ctx.freeze();
+						// Process the PERMISSION clause
+						if !stk
+							.run(|stk| e.compute(stk, &child_ctx, opt, Some(&original)))
+							.await
+							.catch_return()?
+							.is_truthy()
+						{
+							doc.doc.to_mut().cut(k);
+						}
+					}
+				}
+			}
+		}
+		Ok(())
 	}
 
 	/// Reduce-the-fields kernel. Iterates the table's field definitions
