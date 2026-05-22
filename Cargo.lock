@@ -2545,9 +2545,9 @@ dependencies = [
 
 [[package]]
 name = "ferntree"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c61e94ab9b1d56c01922863b022039ef2cbb57e9dbf7bf237df5ae1e91b97676"
+checksum = "a1c631d458d3a990f4281cbf6e3d92f7b47ff3935e03841a62aa1100085f11f4"
 dependencies = [
  "bytes",
  "crossbeam-epoch",
@@ -7868,9 +7868,9 @@ dependencies = [
 
 [[package]]
 name = "surrealmx"
-version = "0.20.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc91af30db8f7c730025ddc4e487e4bf4aee1c1abbd683bd2076b97ef5e7c8af"
+checksum = "b13327a21d61feb345e74f2cab34c911605d9e3459c79800800843bf3c6b5d4d"
 dependencies = [
  "arc-swap",
  "bincode",

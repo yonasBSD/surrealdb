@@ -558,7 +558,7 @@ version = "2.4.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.ferntree]]
-version = "0.6.0"
+version = "0.7.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.ff]]
