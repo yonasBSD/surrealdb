@@ -41,7 +41,6 @@ impl HttpClient {
 	where
 		F: Fn(Attempt) -> Action + Send + Sync + 'static,
 	{
-		use std::str::FromStr;
 		use std::sync::Arc;
 		use std::time::Duration;
 
@@ -65,18 +64,23 @@ impl HttpClient {
 				return attempt.stop();
 			}
 
-			// Check domain name allowlist
+			// Re-validate the redirect target against allow/deny rules using the
+			// same port-aware logic as `check_allowed_net`, so that port-specific
+			// rules (e.g. `deny_net = ["example.com:6379"]`) are enforced on every
+			// hop in the redirect chain.
 			let url = attempt.url();
-			let target = match NetTarget::from_str(url.host_str().unwrap_or(""))
-				.map_err(|e| crate::err::Error::InvalidUrl(format!("Invalid host: {}", e)))
-			{
-				Ok(x) => x,
-				Err(e) => return attempt.error(e),
+			let host = match url.host() {
+				Some(h) => h,
+				None => {
+					let url_str = url.to_string();
+					return attempt.error(crate::err::Error::InvalidUrl(url_str));
+				}
 			};
+			let port = url.port_or_known_default();
+			let target = NetTarget::Host(host.to_owned(), port);
 
 			if !filter_clone.allow.matches(&target) || filter_clone.deny.matches(&target) {
-				let url = url.to_string();
-				return attempt.error(crate::err::Error::NetTargetNotAllowed(url));
+				return attempt.error(crate::err::Error::NetTargetNotAllowed(target.to_string()));
 			}
 
 			policy(attempt)

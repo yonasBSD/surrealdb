@@ -284,6 +284,8 @@ impl<'a> arbitrary::Arbitrary<'a> for DefineFieldStatement {
 			permissions,
 			comment: u.arbitrary()?,
 			reference: u.arbitrary()?,
+			graphql_alias: u.arbitrary()?,
+			graphql_deprecated: u.arbitrary()?,
 		})
 	}
 }
