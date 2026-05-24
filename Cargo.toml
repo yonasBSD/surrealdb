@@ -122,9 +122,9 @@ clap = "4.6.1"
 dashmap = "6.1.0"
 dialoguer = "0.11"
 deunicode = "1.6.2"
-diskann = { version = "=0.51.0", default-features = false }
-diskann-utils = "=0.51.0"
-diskann-vector = "=0.51.0"
+diskann = { version = "=0.52.0", default-features = false }
+diskann-utils = "=0.52.0"
+diskann-vector = "=0.52.0"
 ext-sort = "^0.1.5"
 fastnum = "0.7.4"
 flatbuffers = { version = "25.12.19", features = ["serde"] }
@@ -228,8 +228,8 @@ toml = "0.9.12"
 wasm-encoder = "0.245"
 wasm-opt = "0.116.1"
 wasmparser = "0.245"
-wasmtime = { version = "43.0.2", default-features = false, features = ["async", "cranelift", "winch", "runtime", "std", "wat", "component-model", "parallel-compilation"] }
-wasmtime-wasi = { version = "43.0.2", features = ["p1", "p2"] }
+wasmtime = { version = "44.0.2", default-features = false, features = ["async", "cranelift", "winch", "runtime", "std", "wat", "component-model", "parallel-compilation"] }
+wasmtime-wasi = { version = "44.0.2", features = ["p1", "p2"] }
 wit-bindgen = { version = "0.51", default-features = false, features = ["macros", "realloc"] }
 zstd = "0.13.3"
 
@@ -511,7 +511,16 @@ debug = "line-tables-only"
 split-debuginfo = "unpacked"
 
 [profile.profiling]
-debug = true
 inherits = "release"
+# `line-tables-only` keeps frame symbolication for `sample` / `perf` /
+# flamegraphs while dropping local-variable info — ~half the debug-data
+# size and a noticeably faster final-binary LTO pass.
+debug = "line-tables-only"
 strip = false
 panic = 'unwind'
+# ThinLTO + multi-codegen-unit final binary. Still cross-crate inlines
+# (within 1-3% of full LTO on hot loops in practice), but the link step
+# parallelises across cores instead of running one 30+ minute single-threaded
+# rustc. Worth it for an iterative profiling loop.
+lto = "thin"
+codegen-units = 16

@@ -526,8 +526,28 @@ impl HnswIndex {
 	}
 
 	/// Ensures the in-memory graph layers are up-to-date with the persisted state.
+	///
+	/// Concurrent kNN searches all invoke this before reading the graph. To keep
+	/// them from serialising on a single write lock, we validate under a shared
+	/// read lock first and only escalate to a write lock when an actual reload
+	/// is required. The write-lock branch double-checks because another task may
+	/// have refreshed the state while we waited.
 	pub(crate) async fn check_state(&self, ctx: &FrozenContext) -> Result<()> {
-		self.hnsw.write().await.check_state(ctx).await
+		// Fast path: validate under a read lock. Multiple readers run concurrently,
+		// so steady-state (no peer writer bumped the version) no longer serialises.
+		{
+			let guard = self.hnsw.read().await;
+			if !guard.needs_state_reload(ctx).await? {
+				return Ok(());
+			}
+		}
+		// Slow path: a reload is required. Acquire the write lock and re-validate
+		// before reloading — a concurrent task may have already refreshed.
+		let mut guard = self.hnsw.write().await;
+		if guard.needs_state_reload(ctx).await? {
+			guard.check_state(ctx).await?;
+		}
+		Ok(())
 	}
 
 	/// Performs a k-nearest neighbor search, combining pending and committed results.

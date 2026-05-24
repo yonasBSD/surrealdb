@@ -12,6 +12,7 @@ use anyhow::Result;
 use revision::{DeserializeRevisioned, SerializeRevisioned, revisioned};
 use roaring::RoaringTreemap;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 #[cfg(not(target_family = "wasm"))]
 use crate::catalog::{DatabaseId, IndexId, NamespaceId, TableId};
@@ -82,7 +83,10 @@ impl DiskAnnDocs {
 
 	fn next_doc_id(&mut self) -> DocId {
 		self.state_updated = true;
-		if let Some(doc_id) = self.state.available.iter().next() {
+		// `RoaringTreemap::min()` is O(1) and states the intent directly; the
+		// previous `iter().next()` happened to be ascending but only because the
+		// upstream iterator implementation guarantees so.
+		if let Some(doc_id) = self.state.available.min() {
 			self.state.available.remove(doc_id);
 			doc_id
 		} else {
@@ -123,6 +127,13 @@ impl DiskAnnDocs {
 	/// Positive mappings are inserted into the process-local cache only when the transaction is
 	/// read-only. Write transactions may observe uncommitted `!dd` values, so those hits stay local
 	/// to the caller and are not published into the shared cache.
+	// NOTE (#7318 review followup, P3): each result here pays two `Strand`/`RecordIdKey`
+	// clones (`table.clone()` + `id.as_ref().clone()`) to assemble the `RecordId`. Per result,
+	// not per query, so KNN with `k` neighbours pays `2k` clones. `Strand` clones are cheap for
+	// the typical inline/static variants and a heap copy only for long table names. The "real"
+	// fix would make `RecordId` hold `Arc<RecordIdKey>` / `Arc<Table>` so the per-result cost
+	// becomes a pair of ref-count bumps — that's a workspace-wide refactor (every consumer of
+	// `RecordId` would change), so it's deliberately scoped out of this PR.
 	#[cfg(not(target_family = "wasm"))]
 	pub(super) async fn get_things_batch(
 		ikb: &IndexKeyBase,
@@ -624,6 +635,13 @@ impl DiskAnnElementDocs {
 	}
 }
 
+/// Soft cap on hashed-vector collision-bucket size. Real-world hash collisions across
+/// distinct full-fidelity vectors are vanishingly rare; if a bucket grows past this size we
+/// emit a `warn!` because every lookup of the bucket is O(bucket-size) full-vector compares
+/// (see [`DiskAnnElementHashedDocs::get_docs`]) and an adversarial or buggy hash distribution
+/// would otherwise silently scale the cost of every KNN search.
+const HASHED_BUCKET_WARN_THRESHOLD: usize = 16;
+
 #[revisioned(revision = 1)]
 pub(crate) struct DiskAnnElementHashedDocs {
 	/// Collision bucket keyed by vector hash; each entry retains the full vector for
@@ -635,10 +653,16 @@ pub(crate) struct DiskAnnElementHashedDocs {
 enum RemoveResult {
 	/// The whole hash bucket became empty and its graph element should be removed.
 	Empty(ElementId),
-	/// The bucket still exists, but a doc set and possibly a graph element changed.
-	Updated {
-		changed_doc_set: Option<ElementId>,
-		removed_element: Option<ElementId>,
+	/// The doc set of one bucket entry shrank, but the entry (and its graph element)
+	/// still has other docs sharing it. Caller must evict the cached doc set.
+	BucketShrunk {
+		e_id: ElementId,
+	},
+	/// One entry in the bucket was removed entirely (its last doc went away). The
+	/// graph element must be removed from the upstream graph; the rest of the bucket
+	/// is intact and must be persisted back to KV.
+	EntryRemoved {
+		e_id: ElementId,
 	},
 	/// The requested vector/document pair was not present.
 	Unchanged,
@@ -672,6 +696,20 @@ impl DiskAnnElementHashedDocs {
 
 	fn add(&mut self, element_id: ElementId, vec: SerializedVector, doc_id: DocId) {
 		self.vectors.push((vec, DiskAnnElementDocs::new(element_id, doc_id)));
+		// Real-world vector-hash collisions across distinct full-fidelity vectors are
+		// vanishingly rare; warn loudly if we ever cross the soft cap so an unexpected hash
+		// distribution doesn't silently scale KNN search by bucket size. Fire on every
+		// power-of-two crossing at or above the threshold (16, 32, 64, …) so an operator
+		// sees runaway growth, not just the first crossing.
+		let len = self.vectors.len();
+		if len >= HASHED_BUCKET_WARN_THRESHOLD && len.is_power_of_two() {
+			warn!(
+				bucket_size = len,
+				new_element_id = element_id,
+				"DiskANN hashed-vector collision bucket exceeded soft warn threshold; \
+				 every lookup of this hash now does {len} full-vector compares",
+			);
+		}
 	}
 
 	fn remove(&mut self, vec: &SerializedVector, doc_id: DocId) -> RemoveResult {
@@ -684,11 +722,10 @@ impl DiskAnnElementHashedDocs {
 					action = Some((i, ed.e_id));
 					break;
 				}
-				let element_id = ed.e_id;
+				let e_id = ed.e_id;
 				ed.docs = new_docs;
-				return RemoveResult::Updated {
-					changed_doc_set: Some(element_id),
-					removed_element: None,
+				return RemoveResult::BucketShrunk {
+					e_id,
 				};
 			}
 		}
@@ -697,9 +734,8 @@ impl DiskAnnElementHashedDocs {
 			if self.vectors.is_empty() {
 				return RemoveResult::Empty(e_id);
 			}
-			return RemoveResult::Updated {
-				changed_doc_set: Some(e_id),
-				removed_element: Some(e_id),
+			return RemoveResult::EntryRemoved {
+				e_id,
 			};
 		}
 		RemoveResult::Unchanged
@@ -994,23 +1030,23 @@ impl DiskAnnVecDocs {
 		let key = self.ikb.new_dh_key(ser_vec.compute_hash());
 		if let Some(mut ehd) = ctx.tx.get(&key, None).await? {
 			match ehd.remove(&ser_vec, doc_id) {
-				RemoveResult::Empty(element_id) => {
+				RemoveResult::Empty(e_id) => {
 					ctx.tx.del(&key).await?;
-					self.evict_cached_doc_set(element_id);
-					graph.remove(ctx, element_id).await?;
+					self.evict_cached_doc_set(e_id);
+					graph.remove(ctx, e_id).await?;
 				}
-				RemoveResult::Updated {
-					changed_doc_set,
-					removed_element,
+				RemoveResult::BucketShrunk {
+					e_id,
 				} => {
 					ctx.tx.set(&key, &ehd).await?;
-					if let Some(element_id) = changed_doc_set {
-						self.evict_cached_doc_set(element_id);
-					}
-					if let Some(element_id) = removed_element {
-						self.evict_cached_doc_set(element_id);
-						graph.remove(ctx, element_id).await?;
-					}
+					self.evict_cached_doc_set(e_id);
+				}
+				RemoveResult::EntryRemoved {
+					e_id,
+				} => {
+					ctx.tx.set(&key, &ehd).await?;
+					self.evict_cached_doc_set(e_id);
+					graph.remove(ctx, e_id).await?;
 				}
 				RemoveResult::Unchanged => {}
 			}

@@ -2450,6 +2450,13 @@ impl Datastore {
 			if !has_more {
 				return Ok(());
 			}
+			// Defense-in-depth: every match arm above either commits (Ok(true))
+			// or cancels (Ok(false)/Err) the tx, so by here `closed()` should
+			// always be true. Catch any future regression where a `?` between
+			// the match and this point bypasses finalization. No-op today.
+			if !txn.closed() {
+				let _ = txn.cancel().await;
+			}
 		}
 	}
 
@@ -2494,7 +2501,7 @@ impl Datastore {
 				let _ = txn.cancel().await;
 				res?
 			};
-			let Some((tb, plan)) = prepared else {
+			let Some((_tb, plan)) = prepared else {
 				return Ok(());
 			};
 			if !plan.requires_apply() {
@@ -2530,39 +2537,21 @@ impl Datastore {
 				}
 			}
 			.await;
+			// `apply_diskann_compaction` normally owns the transaction's
+			// lifecycle (commits on success, cancels on apply failure while
+			// holding the graph write lock — closing the #7318 race). A few
+			// pre-apply paths inside `IndexOperation::apply_diskann_compaction`
+			// (missing table or catalog lookup errors) can return without
+			// finalizing the tx, so we add an idempotent safety net here:
+			// cancel only if the tx is still open. Cancel on an already-closed
+			// tx returns `TransactionFinished` and is harmlessly discarded.
+			if !txn.closed() {
+				let _ = txn.cancel().await;
+			}
 			match res {
-				Ok(true) => {
-					if let Err(e) = Self::ensure_not_cancelled(canceller) {
-						let _ = txn.cancel().await;
-						if let Err(evict) =
-							self.index_stores.remove_diskann_index(tb, ikb.clone()).await
-						{
-							warn!(target: TARGET, "Failed to evict DiskANN index after compaction cancellation: {evict}");
-						}
-						return Err(e);
-					}
-					if let Err(e) = txn.commit().await {
-						if let Err(evict) =
-							self.index_stores.remove_diskann_index(tb, ikb.clone()).await
-						{
-							warn!(target: TARGET, "Failed to evict DiskANN index after compaction commit error: {evict}");
-						}
-						return Err(e);
-					}
-				}
-				Ok(false) => {
-					let _ = txn.cancel().await;
-					return Ok(());
-				}
-				Err(e) => {
-					let _ = txn.cancel().await;
-					if let Err(evict) =
-						self.index_stores.remove_diskann_index(tb, ikb.clone()).await
-					{
-						warn!(target: TARGET, "Failed to evict DiskANN index after compaction error: {evict}");
-					}
-					return Err(e);
-				}
+				Ok(true) => {}
+				Ok(false) => return Ok(()),
+				Err(e) => return Err(e),
 			}
 			Self::ensure_not_cancelled(canceller)?;
 			if !has_more {
@@ -2687,6 +2676,13 @@ impl Datastore {
 			Self::ensure_not_cancelled(canceller)?;
 			if !has_more {
 				return Ok(());
+			}
+			// Defense-in-depth: every match arm above either commits (Ok(true))
+			// or cancels (Ok(false)/Err) the tx, so by here `closed()` should
+			// always be true. Catch any future regression where a `?` between
+			// the match and this point bypasses finalization. No-op today.
+			if !txn.closed() {
+				let _ = txn.cancel().await;
 			}
 		}
 	}

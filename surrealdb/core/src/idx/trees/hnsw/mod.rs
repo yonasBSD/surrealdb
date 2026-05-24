@@ -198,6 +198,40 @@ where
 		})
 	}
 
+	/// Returns `true` if the persisted state has drifted from the in-memory state
+	/// in a way that would cause [`check_state`](Self::check_state) to mutate.
+	///
+	/// Safe to call under a shared (read) lock — performs only a KV read of the
+	/// `hs` key plus a few field comparisons. Used as the steady-state fast path
+	/// so concurrent kNN searches do not serialise on the graph write lock.
+	async fn needs_state_reload(&self, ctx: &FrozenContext) -> Result<bool> {
+		let tx = ctx.tx();
+		let st: HnswState = tx.get(&self.ikb.new_hs_key(), None).await?.unwrap_or_default();
+		// Writable transactions may need to migrate legacy `Hl` layout even when
+		// versions match. Mirrors `force_migration` in `check_state`.
+		if tx.writeable() && st.layer0.chunks > 0 {
+			return Ok(true);
+		}
+		if st.layer0.version != self.state.layer0.version {
+			return Ok(true);
+		}
+		if st.layers.len() != self.state.layers.len() {
+			return Ok(true);
+		}
+		if st.layers.len() != self.layers.len() {
+			return Ok(true);
+		}
+		for (new_stl, stl) in st.layers.iter().zip(self.state.layers.iter()) {
+			if new_stl.version != stl.version {
+				return Ok(true);
+			}
+		}
+		if st.next_element_id != self.elements.next_element_id() {
+			return Ok(true);
+		}
+		Ok(false)
+	}
+
 	/// Loads and synchronizes the in-memory graph state from the key-value store.
 	///
 	/// Compares the stored layer versions with the current in-memory versions,

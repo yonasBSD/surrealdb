@@ -118,3 +118,14 @@ args = [
     "--release",
     "${@}",
 ]
+
+[tasks.profile]
+category = "LOCAL USAGE"
+description = "Build the SurrealDB database server with the `profiling` profile (release optimisations + symbols, no strip). Same default features as `cargo make release` — both inherit the root crate's `default` from Cargo.toml. Binary lands at target/profiling/surreal; use for `sample`, `perf`, flamegraphs, etc."
+command = "cargo"
+args = [
+    "build",
+    "--profile",
+    "profiling",
+    "${@}",
+]

@@ -841,16 +841,6 @@ impl Building {
 		}
 	}
 
-	#[cfg(not(target_family = "wasm"))]
-	/// Evicts the process-local DiskANN wrapper after a failed index-builder compaction write.
-	async fn evict_cached_diskann_index(&self) {
-		if let Err(err) =
-			self.ctx.get_index_stores().remove_diskann_index(self.tb, self.ikb.clone()).await
-		{
-			warn!("Failed to evict DiskANN index after index-builder compaction error: {err}");
-		}
-	}
-
 	pub(super) async fn check_prepare_remove_with_tx(
 		&self,
 		last_prepare_remove_check: &mut Instant,
@@ -1429,6 +1419,14 @@ impl Building {
 				tx.cancel().await?;
 				return Ok(());
 			}
+			// `apply_diskann_compaction` normally owns the transaction's
+			// lifecycle (commits on success, cancels on apply failure while
+			// holding the graph write lock — closing the #7318 race). A few
+			// pre-apply paths inside `IndexOperation::apply_diskann_compaction`
+			// (missing table or catalog lookup errors) can return without
+			// finalizing the tx, so we add an idempotent safety net here:
+			// cancel only if the tx is still open. Cancel on an already-closed
+			// tx returns `TransactionFinished` and is harmlessly discarded.
 			let res = IndexOperation::apply_diskann_compaction(
 				&ctx,
 				ctx.get_index_stores(),
@@ -1438,22 +1436,13 @@ impl Building {
 				plan,
 			)
 			.await;
+			if !tx.closed() {
+				let _ = tx.cancel().await;
+			}
 			match res {
-				Ok(true) => {
-					if let Err(err) = tx.commit().await {
-						self.evict_cached_diskann_index().await;
-						return Err(err);
-					}
-				}
-				Ok(false) => {
-					tx.cancel().await?;
-					return Ok(());
-				}
-				Err(err) => {
-					let _ = tx.cancel().await;
-					self.evict_cached_diskann_index().await;
-					return Err(err);
-				}
+				Ok(true) => {}
+				Ok(false) => return Ok(()),
+				Err(err) => return Err(err),
 			}
 
 			if !has_more {

@@ -6,11 +6,8 @@
 
 use std::sync::Arc;
 
-use dashmap::{DashMap, Entry};
-use parking_lot::RwLock;
+use quick_cache::Weighter;
 use quick_cache::sync::Cache;
-use quick_cache::{DefaultHashBuilder, Lifecycle, Weighter};
-use roaring::RoaringTreemap;
 
 use crate::catalog::{DatabaseId, IndexId, NamespaceId, TableId};
 use crate::idx::seqdocids::DocId;
@@ -49,69 +46,6 @@ enum DiskAnnCacheValue {
 	DocSet(Ids64),
 	DocId(CachedDocId),
 	State(DiskAnnState),
-}
-
-/// Tracks cached element ids per index so index removal can evict targeted entries without
-/// scanning every cache key.
-#[derive(Clone, Default)]
-struct IdsPerIndex(Arc<DashMap<IndexKey, RwLock<RoaringTreemap>>>);
-
-impl IdsPerIndex {
-	fn insert(&self, index: IndexKey, id: ElementId) {
-		self.0.entry(index).or_default().write().insert(id);
-	}
-
-	fn remove_index(&self, index: IndexKey) -> Option<RwLock<RoaringTreemap>> {
-		self.0.remove(&index).map(|entry| entry.1)
-	}
-
-	fn remove_id(&self, index: IndexKey, id: ElementId) {
-		if let Entry::Occupied(mut entry) = self.0.entry(index) {
-			let is_empty = {
-				let mut ids = entry.get_mut().write();
-				ids.remove(id);
-				ids.is_empty()
-			};
-			if is_empty {
-				entry.remove_entry();
-			}
-		}
-	}
-
-	fn evict_id(&self, key: ElementCacheKey) {
-		if let Entry::Occupied(mut entry) = self.0.entry((key.0, key.1, key.2, key.3)) {
-			entry.get_mut().write().remove(key.4);
-		}
-	}
-
-	#[cfg(test)]
-	fn len(&self, index: IndexKey) -> u64 {
-		self.0.get(&index).map(|ids| ids.read().len()).unwrap_or_default()
-	}
-}
-
-#[derive(Clone)]
-struct DiskAnnCacheLifecycle {
-	element_indexes: IdsPerIndex,
-	node_indexes: IdsPerIndex,
-	doc_set_indexes: IdsPerIndex,
-	doc_id_indexes: IdsPerIndex,
-}
-
-impl Lifecycle<DiskAnnCacheKey, DiskAnnCacheValue> for DiskAnnCacheLifecycle {
-	type RequestState = ();
-
-	fn begin_request(&self) -> Self::RequestState {}
-
-	fn on_evict(&self, _: &mut Self::RequestState, key: DiskAnnCacheKey, _: DiskAnnCacheValue) {
-		match key {
-			DiskAnnCacheKey::Element(key) => self.element_indexes.evict_id(key),
-			DiskAnnCacheKey::Node(key) => self.node_indexes.evict_id(key),
-			DiskAnnCacheKey::DocSet(key) => self.doc_set_indexes.evict_id(key),
-			DiskAnnCacheKey::DocId(key) => self.doc_id_indexes.evict_id(key),
-			DiskAnnCacheKey::State(_) => {}
-		}
-	}
 }
 
 #[derive(Clone)]
@@ -153,55 +87,23 @@ impl Weighter<DiskAnnCacheKey, DiskAnnCacheValue> for DiskAnnCacheWeighter {
 ///
 /// The cache is scoped by namespace, database, table, and index id. Element vectors (`De` keys),
 /// adjacency lists (`Dn` keys), graph state (`Ds` key), and document mappings share one weighted
-/// budget. Per-index membership sets let index removal evict exactly its hot graph data.
+/// budget keyed by the composite (`namespace`, `database`, `table`, `index`, `id`) tuples; index
+/// removal walks every shard with [`Cache::retain`] because per-key membership trackers cannot be
+/// kept reliably in sync with quick_cache's hot/cold/ghost eviction (see #7318).
 #[derive(Clone)]
 pub(crate) struct DiskAnnCache(Arc<Inner>);
 
 struct Inner {
 	/// Shared weighted budget for all DiskANN cache families.
-	cache: Cache<
-		DiskAnnCacheKey,
-		DiskAnnCacheValue,
-		DiskAnnCacheWeighter,
-		DefaultHashBuilder,
-		DiskAnnCacheLifecycle,
-	>,
-	/// Element IDs currently present in the element cache, grouped by index.
-	element_indexes: IdsPerIndex,
-	/// Element IDs currently present in the node cache, grouped by index.
-	node_indexes: IdsPerIndex,
-	/// Element IDs currently present in the doc-set cache, grouped by index.
-	doc_set_indexes: IdsPerIndex,
-	/// Document IDs currently present in the doc-id cache, grouped by index.
-	doc_id_indexes: IdsPerIndex,
+	cache: Cache<DiskAnnCacheKey, DiskAnnCacheValue, DiskAnnCacheWeighter>,
 }
 
 impl DiskAnnCache {
 	/// Creates a DiskANN ANN cache with one shared weight capacity (in bytes).
 	pub(crate) fn new(cache_size: u64) -> Self {
-		let element_indexes = IdsPerIndex::default();
-		let node_indexes = IdsPerIndex::default();
-		let doc_set_indexes = IdsPerIndex::default();
-		let doc_id_indexes = IdsPerIndex::default();
-		let lifecycle = DiskAnnCacheLifecycle {
-			element_indexes: element_indexes.clone(),
-			node_indexes: node_indexes.clone(),
-			doc_set_indexes: doc_set_indexes.clone(),
-			doc_id_indexes: doc_id_indexes.clone(),
-		};
 		let estimated_items = (cache_size / 256).max(1) as usize;
 		Self(Arc::new(Inner {
-			cache: Cache::with(
-				estimated_items,
-				cache_size,
-				DiskAnnCacheWeighter,
-				DefaultHashBuilder::default(),
-				lifecycle,
-			),
-			element_indexes,
-			node_indexes,
-			doc_set_indexes,
-			doc_id_indexes,
+			cache: Cache::with_weighter(estimated_items, cache_size, DiskAnnCacheWeighter),
 		}))
 	}
 
@@ -254,10 +156,7 @@ impl DiskAnnCache {
 		element_id: ElementId,
 		element: DiskAnnElement,
 	) -> Arc<DiskAnnElement> {
-		// Track membership before insertion so an immediate quick_cache eviction can clean up the
-		// same per-index set through the lifecycle hook.
 		let element = Arc::new(element);
-		self.0.element_indexes.insert(index, element_id);
 		self.0.cache.insert(
 			DiskAnnCacheKey::Element(Self::element_key(index, element_id)),
 			DiskAnnCacheValue::Element(Arc::clone(&element)),
@@ -267,7 +166,6 @@ impl DiskAnnCache {
 
 	/// Evicts one graph element from the cache.
 	pub(super) fn remove_element(&self, index: IndexKey, element_id: ElementId) {
-		self.0.element_indexes.remove_id(index, element_id);
 		self.0.cache.remove(&DiskAnnCacheKey::Element(Self::element_key(index, element_id)));
 	}
 
@@ -290,9 +188,7 @@ impl DiskAnnCache {
 		element_id: ElementId,
 		node: DiskAnnNode,
 	) -> Arc<DiskAnnNode> {
-		// Keep the per-index set in step with quick_cache for efficient index-level eviction.
 		let node = Arc::new(node);
-		self.0.node_indexes.insert(index, element_id);
 		self.0.cache.insert(
 			DiskAnnCacheKey::Node(Self::element_key(index, element_id)),
 			DiskAnnCacheValue::Node(Arc::clone(&node)),
@@ -302,7 +198,6 @@ impl DiskAnnCache {
 
 	#[cfg(test)]
 	fn remove_node(&self, index: IndexKey, element_id: ElementId) {
-		self.0.node_indexes.remove_id(index, element_id);
 		self.0.cache.remove(&DiskAnnCacheKey::Node(Self::element_key(index, element_id)));
 	}
 
@@ -316,7 +211,6 @@ impl DiskAnnCache {
 
 	/// Inserts the compact document IDs represented by one graph element.
 	pub(super) fn insert_doc_set(&self, index: IndexKey, element_id: ElementId, docs: Ids64) {
-		self.0.doc_set_indexes.insert(index, element_id);
 		self.0.cache.insert(
 			DiskAnnCacheKey::DocSet(Self::element_key(index, element_id)),
 			DiskAnnCacheValue::DocSet(docs),
@@ -325,7 +219,6 @@ impl DiskAnnCache {
 
 	/// Evicts the cached document set for one graph element.
 	pub(super) fn remove_doc_set(&self, index: IndexKey, element_id: ElementId) {
-		self.0.doc_set_indexes.remove_id(index, element_id);
 		self.0.cache.remove(&DiskAnnCacheKey::DocSet(Self::element_key(index, element_id)));
 	}
 
@@ -353,7 +246,6 @@ impl DiskAnnCache {
 		id: RecordIdKey,
 	) -> Arc<RecordIdKey> {
 		let id = Arc::new(id);
-		self.0.doc_id_indexes.insert(index, doc_id);
 		self.0.cache.insert(
 			DiskAnnCacheKey::DocId(Self::doc_id_key(index, doc_id)),
 			DiskAnnCacheValue::DocId(CachedDocId {
@@ -366,14 +258,20 @@ impl DiskAnnCache {
 
 	/// Evicts a cached compact document ID mapping.
 	pub(super) fn remove_doc_id(&self, index: IndexKey, doc_id: DocId) {
-		self.0.doc_id_indexes.remove_id(index, doc_id);
 		self.0.cache.remove(&DiskAnnCacheKey::DocId(Self::doc_id_key(index, doc_id)));
 	}
 
 	/// Evicts every cache family entry scoped to one removed DiskANN index.
 	///
-	/// Per-index membership sets avoid scanning the entire cache. Removal yields periodically so a
-	/// large cached graph does not monopolize the async executor.
+	/// `Cache::retain` walks every shard of the shared cache. The DiskANN cache is shared across
+	/// all indices in the process, so this is the only sound way to guarantee no stale adjacency
+	/// or vector entry survives a failed-compaction cleanup or an index drop. The cost is
+	/// proportional to the total resident cache, which is fine because this path runs only on
+	/// rare events (commit failure under #7318's race + `REMOVE INDEX` + index retirement).
+	///
+	/// This is the failure-side half of the
+	/// [cache coherency invariant](crate::idx::trees::diskann::provider) — writable-tx cache
+	/// write-throughs are sound only because this path clears them on apply/commit failure.
 	pub(crate) async fn remove_index(
 		&self,
 		namespace_id: NamespaceId,
@@ -382,72 +280,18 @@ impl DiskAnnCache {
 		index_id: IndexId,
 	) {
 		let index = Self::index_key(namespace_id, database_id, table_id, index_id);
-		self.0.cache.remove(&DiskAnnCacheKey::State(index));
-		if let Some(ids) = self.0.element_indexes.remove_index(index) {
-			// Collect ids before yielding so the parking_lot guard is never held across a
-			// cooperative yield.
-			let ids: Vec<_> = ids.read().iter().collect();
-			for (count, element_id) in ids.into_iter().enumerate() {
-				self.0
-					.cache
-					.remove(&DiskAnnCacheKey::Element(Self::element_key(index, element_id)));
-				if count % 1000 == 0 {
-					yield_now!()
-				}
-			}
-		}
-		if let Some(ids) = self.0.node_indexes.remove_index(index) {
-			// See the element path above: copy ids first, then remove from quick_cache in chunks.
-			let ids: Vec<_> = ids.read().iter().collect();
-			for (count, element_id) in ids.into_iter().enumerate() {
-				self.0.cache.remove(&DiskAnnCacheKey::Node(Self::element_key(index, element_id)));
-				if count % 1000 == 0 {
-					yield_now!()
-				}
-			}
-		}
-		if let Some(ids) = self.0.doc_set_indexes.remove_index(index) {
-			let ids: Vec<_> = ids.read().iter().collect();
-			for (count, element_id) in ids.into_iter().enumerate() {
-				self.0.cache.remove(&DiskAnnCacheKey::DocSet(Self::element_key(index, element_id)));
-				if count % 1000 == 0 {
-					yield_now!()
-				}
-			}
-		}
-		if let Some(ids) = self.0.doc_id_indexes.remove_index(index) {
-			let ids: Vec<_> = ids.read().iter().collect();
-			for (count, doc_id) in ids.into_iter().enumerate() {
-				self.0.cache.remove(&DiskAnnCacheKey::DocId(Self::doc_id_key(index, doc_id)));
-				if count % 1000 == 0 {
-					yield_now!()
-				}
-			}
-		}
+		self.0.cache.retain(|key, _| match key {
+			DiskAnnCacheKey::State(k) => *k != index,
+			DiskAnnCacheKey::Element(k) => (k.0, k.1, k.2, k.3) != index,
+			DiskAnnCacheKey::Node(k) => (k.0, k.1, k.2, k.3) != index,
+			DiskAnnCacheKey::DocSet(k) => (k.0, k.1, k.2, k.3) != index,
+			DiskAnnCacheKey::DocId(k) => (k.0, k.1, k.2, k.3) != index,
+		});
+		yield_now!();
 	}
 
 	#[cfg(test)]
-	fn element_len(&self, index: IndexKey) -> u64 {
-		self.0.element_indexes.len(index)
-	}
-
-	#[cfg(test)]
-	fn node_len(&self, index: IndexKey) -> u64 {
-		self.0.node_indexes.len(index)
-	}
-
-	#[cfg(test)]
-	fn doc_set_len(&self, index: IndexKey) -> u64 {
-		self.0.doc_set_indexes.len(index)
-	}
-
-	#[cfg(test)]
-	fn doc_id_len(&self, index: IndexKey) -> u64 {
-		self.0.doc_id_indexes.len(index)
-	}
-
-	#[cfg(test)]
-	fn weight(&self) -> u64 {
+	pub(super) fn weight(&self) -> u64 {
 		self.0.cache.weight()
 	}
 
@@ -552,10 +396,6 @@ mod tests {
 			&RecordIdKey::Number(17)
 		);
 		assert!(cache.get_doc_id(index, 11, Some(6)).is_none());
-		assert_eq!(cache.element_len(index), 1);
-		assert_eq!(cache.node_len(index), 1);
-		assert_eq!(cache.doc_set_len(index), 1);
-		assert_eq!(cache.doc_id_len(index), 1);
 
 		cache.remove_index(index.0, index.1, index.2, index.3).await;
 
@@ -564,10 +404,6 @@ mod tests {
 		assert!(cache.get_node(index, 7).is_none());
 		assert!(cache.get_doc_set(index, 7).is_none());
 		assert!(cache.get_doc_id(index, 11, Some(5)).is_none());
-		assert_eq!(cache.element_len(index), 0);
-		assert_eq!(cache.node_len(index), 0);
-		assert_eq!(cache.doc_set_len(index), 0);
-		assert_eq!(cache.doc_id_len(index), 0);
 	}
 
 	#[test]
@@ -603,9 +439,5 @@ mod tests {
 		assert!(cache.get_node(index, 7).is_none());
 		assert!(cache.get_doc_set(index, 7).is_none());
 		assert!(cache.get_doc_id(index, 42, Some(5)).is_none());
-		assert_eq!(cache.element_len(index), 0);
-		assert_eq!(cache.node_len(index), 0);
-		assert_eq!(cache.doc_set_len(index), 0);
-		assert_eq!(cache.doc_id_len(index), 0);
 	}
 }

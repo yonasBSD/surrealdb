@@ -462,19 +462,19 @@ version = "0.3.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.diskann]]
-version = "0.51.0"
+version = "0.52.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.diskann-utils]]
-version = "0.51.0"
+version = "0.52.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.diskann-vector]]
-version = "0.51.0"
+version = "0.52.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.diskann-wide]]
-version = "0.51.0"
+version = "0.52.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.doc-comment]]
@@ -1055,6 +1055,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.object]]
 version = "0.36.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.object]]
+version = "0.39.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.object_store]]

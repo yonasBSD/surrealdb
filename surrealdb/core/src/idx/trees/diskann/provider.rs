@@ -4,6 +4,25 @@
 //! distance/computer access through provider traits. This module maps those trait calls onto
 //! SurrealDB transactions, keeps the persisted `!de`/`!dn`/`!ds` keys authoritative, and batches
 //! cache misses so RocksDB-backed lookups avoid long chains of individual point reads.
+//!
+//! # Cache coherency invariant
+//!
+//! The shared [`DiskAnnCache`] is consulted by both committed and in-flight transactions, so a
+//! single rule keeps cache and KV from diverging:
+//!
+//! 1. **Read-only transactions** are the only path allowed to publish KV-sourced state into the
+//!    cache. The `read_state` / `read_elements` / `read_nodes` paths gate their cache writes on
+//!    `!context.tx.writeable()` for exactly this reason — a writable tx's `tx.get` returns its own
+//!    buffered writes, so caching that view would leak uncommitted state to other transactions.
+//! 2. **Writable transactions** may write through the cache *only* from within a
+//!    `DiskAnnIndex::apply_compaction` frame, because that frame holds the graph write lock across
+//!    the commit and clears the per-index cache via [`DiskAnnCache::remove_index`] on apply or
+//!    commit failure. The mutating call sites are `set_element`, `delete`, `set_neighbors`,
+//!    `append_vector`, and `write_state`.
+//!
+//! Adding a new cache write from a writable tx outside an `apply_compaction` frame, or relaxing
+//! the read-only-tx guard, reintroduces the race described in
+//! [issue #7318](https://github.com/surrealdb/surrealdb/issues/7318).
 
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -26,6 +45,7 @@ use diskann::{ANNError, ANNResult, default_post_processor};
 use diskann_utils::future::AssertSend;
 use diskann_vector::Half;
 use diskann_vector::distance::Metric;
+use tracing::warn;
 
 use crate::catalog::{DatabaseId, IndexId, NamespaceId, TableId};
 use crate::idx::IndexKeyBase;
@@ -182,13 +202,20 @@ impl DiskAnnProvider {
 	}
 
 	/// Reads persisted graph state, using the cache for the entry point and next element id.
+	///
+	/// The `writeable()` guard around `insert_state` enforces rule (1) of the module-level
+	/// [cache coherency invariant](self): only read-only transactions publish KV state into the
+	/// shared cache. Same rule the doc-id path enforces in `DiskAnnDocs::get_things_batch`
+	/// (`docs.rs`).
 	async fn read_state(&self, context: &DiskAnnProviderContext) -> Result<DiskAnnState> {
 		let index = self.cache_index();
 		if let Some(state) = self.cache.get_state(index) {
 			return Ok(state);
 		}
 		let state = context.tx.get(&context.ikb.new_ds_key(), None).await?.unwrap_or_default();
-		self.cache.insert_state(index, state.clone());
+		if !context.tx.writeable() {
+			self.cache.insert_state(index, state.clone());
+		}
 		Ok(state)
 	}
 
@@ -201,21 +228,6 @@ impl DiskAnnProvider {
 		context.tx.set(&context.ikb.new_ds_key(), state).await?;
 		self.cache.insert_state(self.cache_index(), state.clone());
 		Ok(())
-	}
-
-	/// Reads one element vector/status pair, populating the cache on a KV hit.
-	async fn read_element(
-		&self,
-		context: &DiskAnnProviderContext,
-		element_id: ElementId,
-	) -> Result<Option<Arc<DiskAnnElement>>> {
-		let index = self.cache_index();
-		if let Some(element) = self.cache.get_element(index, element_id) {
-			return Ok(Some(element));
-		}
-		let element: Option<DiskAnnElement> =
-			context.tx.get(&context.ikb.new_de_key(element_id), None).await?;
-		Ok(element.map(|element| self.cache.insert_element(index, element_id, element)))
 	}
 
 	/// Reads element vector/status pairs in input order.
@@ -241,9 +253,14 @@ impl DiskAnnProvider {
 		}
 		if !miss_keys.is_empty() {
 			let fetched: Vec<Option<DiskAnnElement>> = context.tx.getm(miss_keys, None).await?;
+			let cache_misses = !context.tx.writeable();
 			for ((pos, element_id), element) in miss_positions.into_iter().zip(fetched) {
 				if let Some(element) = element {
-					elements[pos] = Some(self.cache.insert_element(index, element_id, element));
+					elements[pos] = Some(if cache_misses {
+						self.cache.insert_element(index, element_id, element)
+					} else {
+						Arc::new(element)
+					});
 				}
 			}
 		}
@@ -273,9 +290,14 @@ impl DiskAnnProvider {
 		}
 		if !miss_keys.is_empty() {
 			let fetched: Vec<Option<DiskAnnNode>> = context.tx.getm(miss_keys, None).await?;
+			let cache_misses = !context.tx.writeable();
 			for ((pos, element_id), node) in miss_positions.into_iter().zip(fetched) {
 				if let Some(node) = node {
-					nodes[pos] = Some(self.cache.insert_node(index, element_id, node));
+					nodes[pos] = Some(if cache_misses {
+						self.cache.insert_node(index, element_id, node)
+					} else {
+						Arc::new(node)
+					});
 				}
 			}
 		}
@@ -343,6 +365,7 @@ impl DiskAnnProvider {
 			.open_vals_cursor(rng, crate::idx::planner::ScanDirection::Forward, 0, None)
 			.await
 			.map_err(|e| ANNError::log_index_error(e.to_string()))?;
+		let cache_misses = !context.tx.writeable();
 		loop {
 			let batch = cursor
 				.next_batch(crate::kvs::ScanLimit::Count(crate::kvs::NORMAL_BATCH_SIZE))
@@ -357,8 +380,31 @@ impl DiskAnnProvider {
 				let element = DiskAnnElement::kv_decode_value(value, ())
 					.map_err(|e| ANNError::log_index_error(e.to_string()))?;
 				let deleted = element.deleted;
-				self.cache.insert_element(self.cache_index(), key.element_id, element);
+				// Only publish non-tombstoned entries into the shared cache, and only from a
+				// read-only tx (writable txs may have buffered uncommitted writes; see
+				// `read_state`). Tombstones aren't useful for any subsequent reader.
+				if !deleted && cache_misses {
+					self.cache.insert_element(self.cache_index(), key.element_id, element);
+				}
 				if !deleted {
+					// On a writable tx (i.e. compaction or a record-write path), persist
+					// the discovered entry point so subsequent searches don't have to
+					// re-scan `!de:*` from the dangling stored value. On a read-only tx
+					// (KNN search) we can't write — the next compaction will fix it.
+					//
+					// Persistence is a pure hint: a transient failure here (e.g. a
+					// concurrent `delc` on the state key) shouldn't fail the whole
+					// search, since the discovered entry point is already correct in
+					// memory and the next compaction will rediscover it.
+					if context.tx.writeable()
+						&& let Err(e) = self.set_entry_point(context, Some(key.element_id)).await
+					{
+						warn!(
+							error = %e,
+							element_id = key.element_id,
+							"Failed to persist DiskANN entry-point hint; continuing with in-memory value",
+						);
+					}
 					return Ok(vec![key.element_id]);
 				}
 			}
@@ -416,43 +462,38 @@ impl DataProvider for DiskAnnProvider {
 	}
 }
 
-macro_rules! impl_set_element {
-	($ty:ty) => {
-		impl SetElement<&[$ty]> for DiskAnnProvider {
-			type SetError = ANNError;
+impl<T> SetElement<&[T]> for DiskAnnProvider
+where
+	T: DiskAnnVectorElement,
+{
+	type SetError = ANNError;
 
-			async fn set_element(
-				&self,
-				context: &Self::Context,
-				id: &Self::ExternalId,
-				element: &[$ty],
-			) -> Result<Self::Guard, Self::SetError> {
-				if element.len() != self.dim {
-					return Err(vector_len_mismatch(element.len(), self.dim));
-				}
-				let key = context.ikb.new_de_key(*id);
-				let element = DiskAnnElement {
-					vector: <$ty as DiskAnnVectorElement>::serialized_from_slice(element),
-					deleted: false,
-				};
-				context
-					.tx
-					.set(&key, &element)
-					.await
-					.map_err(|e| ANNError::log_index_error(e.to_string()))?;
-				// Graph insertion writes through this provider, so cache the same element value
-				// that was just persisted.
-				self.cache.insert_element(self.cache_index(), *id, element);
-				Ok(NoopGuard::new(*id))
-			}
+	async fn set_element(
+		&self,
+		context: &Self::Context,
+		id: &Self::ExternalId,
+		element: &[T],
+	) -> Result<Self::Guard, Self::SetError> {
+		if element.len() != self.dim {
+			return Err(vector_len_mismatch(element.len(), self.dim));
 		}
-	};
+		let key = context.ikb.new_de_key(*id);
+		let element = DiskAnnElement {
+			vector: T::serialized_from_slice(element),
+			deleted: false,
+		};
+		context
+			.tx
+			.set(&key, &element)
+			.await
+			.map_err(|e| ANNError::log_index_error(e.to_string()))?;
+		// Writable-tx cache write-through: only sound because the caller is inside an
+		// `apply_compaction` frame that clears the per-index cache on commit/apply failure.
+		// See the module-level `Cache coherency invariant` (rule 2).
+		self.cache.insert_element(self.cache_index(), *id, element);
+		Ok(NoopGuard::new(*id))
+	}
 }
-
-impl_set_element!(f32);
-impl_set_element!(Half);
-impl_set_element!(i8);
-impl_set_element!(u8);
 
 impl Delete for DiskAnnProvider {
 	async fn delete(
@@ -462,9 +503,11 @@ impl Delete for DiskAnnProvider {
 	) -> Result<(), Self::Error> {
 		let key = context.ikb.new_de_key(*gid);
 		let Some(element) = self
-			.read_element(context, *gid)
+			.read_elements(context, std::slice::from_ref(gid))
 			.await
 			.map_err(|e| ANNError::log_index_error(e.to_string()))?
+			.pop()
+			.flatten()
 		else {
 			return Ok(());
 		};
@@ -501,9 +544,11 @@ impl Delete for DiskAnnProvider {
 		id: Self::InternalId,
 	) -> Result<ElementStatus, Self::Error> {
 		let Some(element) = self
-			.read_element(context, id)
+			.read_elements(context, std::slice::from_ref(&id))
 			.await
 			.map_err(|e| ANNError::log_index_error(e.to_string()))?
+			.pop()
+			.flatten()
 		else {
 			return Err(ANNError::log_index_error(format!("DiskANN element {id} is missing")));
 		};
@@ -565,12 +610,14 @@ where
 	type GetError = ANNError;
 
 	async fn get_element(&mut self, id: ElementId) -> Result<&[T], ANNError> {
-		let Some(element) = self
+		// Delegated through the batched path so the cache-population invariant only lives in one
+		// place. `read_elements(&[id])` uses `getm` on a 1-element vec, which is a no-cost call.
+		let mut elements = self
 			.provider
-			.read_element(self.context, id)
+			.read_elements(self.context, std::slice::from_ref(&id))
 			.await
-			.map_err(|e| ANNError::log_index_error(e.to_string()))?
-		else {
+			.map_err(|e| ANNError::log_index_error(e.to_string()))?;
+		let Some(element) = elements.pop().flatten() else {
 			return Err(ANNError::log_index_error(format!("DiskANN element {id} is missing")));
 		};
 		T::copy_from_serialized(&element.vector, &mut self.buffer)?;
@@ -675,17 +722,18 @@ where
 			.read_nodes(self.context, &ids)
 			.await
 			.map_err(|e| ANNError::log_index_error(e.to_string()))?;
+		// `distances_unordered` does not depend on input order, so a single dedup pass via
+		// `HashSet::insert` is sufficient — we no longer need a parallel `Vec` of candidates.
 		let candidate_capacity = nodes.iter().flatten().map(|node| node.neighbors.len()).sum();
-		let mut candidates = Vec::with_capacity(candidate_capacity);
 		let mut seen = HashSet::with_capacity(candidate_capacity);
 		for node in nodes.iter().flatten() {
 			for &id in &node.neighbors {
-				if pred.eval(&id) && seen.insert(id) {
-					candidates.push(id);
+				if pred.eval(&id) {
+					seen.insert(id);
 				}
 			}
 		}
-		self.distances_unordered(candidates.into_iter(), computer, |distance, id| {
+		self.distances_unordered(seen.into_iter(), computer, |distance, id| {
 			if pred.eval_mut(&id) {
 				on_neighbors(distance, id);
 			}
@@ -904,7 +952,12 @@ mod tests {
 			.unwrap();
 
 		assert_eq!(seen, vec![(1, vec![1.0, 2.0]), (2, vec![3.0, 4.0])]);
-		assert!(provider.cache.get_element(provider.cache_index(), 1).is_some());
+		// Provider reads through a writable tx must not publish into the shared cache —
+		// `tx.get` returns the writer's own buffered (possibly uncommitted) writes, and the
+		// cache is process-wide, so leaking that view to other txs is the failure mode
+		// #7318 surfaced.
+		assert!(provider.cache.get_element(provider.cache_index(), 1).is_none());
+		assert!(provider.cache.get_element(provider.cache_index(), 2).is_none());
 		assert!(
 			accessor.on_elements_unordered(vec![3].into_iter(), |_values, _id| {}).await.is_err()
 		);

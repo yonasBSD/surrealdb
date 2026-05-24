@@ -53,9 +53,21 @@ use crate::key::index::dr::DiskAnnRecordPending;
 use crate::kvs::{KVValue, Key, Transaction, Val};
 use crate::val::{Number, RecordId, RecordIdKey, Value};
 
+/// Soft per-batch limits for [`DiskAnnIndex::prepare_compaction`]. When either cap fires,
+/// `has_more = true` is set on the [`DiskAnnCompactionPlan`] and the caller is expected to run
+/// another compaction iteration.
+///
+/// Note (#7318 review followup, C7): while `has_more = true`, [`apply_compaction`] keeps the
+/// `!dp` pending-state shards `NonEmpty` (`should_clear_pending_state = !has_more`). KNN
+/// lookups therefore scan the full `!dr` range on every query for the duration of the backlog
+/// — this is unavoidable today because `!dr` is keyed by `RecordIdKey` directly and there is
+/// no efficient per-shard scan. A proper fix would prefix `!dr` keys with the pending-state
+/// shard id (or maintain a parallel `!dr`-by-shard index) so that `prepare_compaction` can
+/// drain one shard at a time and advance only that shard's `!dp` after a successful commit.
+/// Until then, sustained write load saturates these limits and KNN search pays the
+/// full-range scan on every query.
 const DISKANN_COMPACTION_MAX_PENDING_KEYS: usize = 1024;
 const DISKANN_COMPACTION_MAX_PENDING_BYTES: usize = 16 * 1024 * 1024;
-const DISKANN_PENDING_STATE_UPDATE_RETRIES: usize = 32;
 
 struct CapturedPendingKey {
 	/// Exact pending key captured during the read phase.
@@ -390,6 +402,15 @@ impl DiskAnnGraph {
 	}
 }
 
+/// Cancels `tx` and discards any error from a tx that is already closed.
+///
+/// Used by [`DiskAnnIndex::apply_compaction`] on every stale-plan / apply-error path so the
+/// transaction-lifecycle policy lives in one place rather than scattered across five call
+/// sites.
+async fn cancel_silently(tx: &Transaction) {
+	let _ = tx.cancel().await;
+}
+
 /// Converts SurrealDB's distance enum to the metric supported by the DiskANN crate.
 fn distance_to_metric(distance: &Distance) -> Result<Metric> {
 	match distance {
@@ -540,29 +561,28 @@ impl DiskAnnIndex {
 	}
 
 	/// Marks the distributed pending-state guard as non-empty after writing a pending update.
+	///
+	/// Single-shot: within one transaction the `tx.get` snapshot and the `tx.putc` condition check
+	/// see the same value, so a retry on `TransactionConditionNotMet` would deterministically
+	/// reach the same outcome (sister function [`Self::clear_pending_state_if_current`] uses the
+	/// same single-shot shape for the inverse direction). The old code wrapped this in a
+	/// 32-iteration retry loop on the same tx, which couldn't help and would just spin to the
+	/// `bail!` at the end.
 	async fn mark_pending_non_empty(
 		tx: &Transaction,
 		ikb: &IndexKeyBase,
 		id: &RecordIdKey,
 	) -> Result<()> {
 		let key = ikb.new_dp_key(Self::pending_state_shard(id));
-		for _ in 0..DISKANN_PENDING_STATE_UPDATE_RETRIES {
-			let current: Option<DiskAnnPendingState> = tx.get(&key, None).await?;
-			if current.as_ref().is_some_and(|state| state.kind == DiskAnnPendingStateKind::NonEmpty)
-			{
-				return Ok(());
-			}
-			let next = DiskAnnPendingState {
-				kind: DiskAnnPendingStateKind::NonEmpty,
-				generation: current.as_ref().map_or(0, |state| state.generation).saturating_add(1),
-			};
-			match tx.putc(&key, &next, current.as_ref()).await {
-				Ok(()) => return Ok(()),
-				Err(e) if is_transaction_condition_not_met(&e) => continue,
-				Err(e) => return Err(e),
-			}
+		let current: Option<DiskAnnPendingState> = tx.get(&key, None).await?;
+		if current.as_ref().is_some_and(|state| state.kind == DiskAnnPendingStateKind::NonEmpty) {
+			return Ok(());
 		}
-		bail!("failed to update DiskANN pending state after concurrent writes")
+		let next = DiskAnnPendingState {
+			kind: DiskAnnPendingStateKind::NonEmpty,
+			generation: current.as_ref().map_or(0, |state| state.generation).saturating_add(1),
+		};
+		tx.putc(&key, &next, current.as_ref()).await
 	}
 
 	/// Conditionally advances `!dp` toward empty after compaction consumed its planned range.
@@ -721,6 +741,19 @@ impl DiskAnnIndex {
 	}
 
 	/// Applies a prepared compaction plan if its generation and captured keys are still current.
+	///
+	/// The transaction lifecycle is owned by this method:
+	///   * `Ok(true)` — mutations were applied and the transaction has been committed.
+	///   * `Ok(false)` — the plan was stale (generation drift or captured-key mismatch); the
+	///     transaction has been cancelled and no mutations are in KV or in the process-local cache.
+	///   * `Err(_)` — the apply or commit step failed; the transaction has been cancelled and, if
+	///     any graph mutations had been buffered, the per-index [`DiskAnnCache`] has been cleared
+	///     while the graph lock was still held so concurrent KNN searches cannot observe a cache
+	///     state that disagrees with KV.
+	///
+	/// This frame is what rule (2) of the
+	/// [cache coherency invariant](crate::idx::trees::diskann::provider) refers to: writable-tx
+	/// cache write-throughs in the provider are sound only because they happen inside it.
 	pub(in crate::idx) async fn apply_compaction(
 		&self,
 		ctx: &FrozenContext,
@@ -736,33 +769,77 @@ impl DiskAnnIndex {
 		let should_clear_pending_state = !has_more;
 		let tx = ctx.tx();
 		if captured_keys.is_empty() {
-			if should_clear_pending_state && Self::pending_range_empty(ctx, &tx, &self.ikb).await? {
-				return Self::clear_pending_state_if_current(&tx, &self.ikb, &pending_state).await;
+			// No graph mutations possible; the only KV writes here are to the !dp
+			// shards. Commit (or cancel) without touching the graph lock or cache.
+			if should_clear_pending_state
+				&& Self::pending_range_empty(ctx, &tx, &self.ikb).await?
+				&& Self::clear_pending_state_if_current(&tx, &self.ikb, &pending_state).await?
+			{
+				return tx.commit().await.map(|()| true);
 			}
+			cancel_silently(&tx).await;
 			return Ok(false);
 		}
 		if !bump_compaction_generation(&tx, &self.ikb.new_dg_key(), generation).await? {
+			cancel_silently(&tx).await;
 			return Ok(false);
 		}
 		for captured in &captured_keys {
 			match tx.delc(&captured.key, Some(&captured.value)).await {
 				Ok(()) => {}
-				Err(e) if is_transaction_condition_not_met(&e) => return Ok(false),
-				Err(e) => return Err(e),
+				Err(e) if is_transaction_condition_not_met(&e) => {
+					cancel_silently(&tx).await;
+					return Ok(false);
+				}
+				Err(e) => {
+					cancel_silently(&tx).await;
+					return Err(e);
+				}
 			}
 		}
+		// From here on we mutate the per-index [`DiskAnnCache`] through the
+		// provider write-through paths. The graph write lock is held across both
+		// the mutations and the eventual commit/cancel so a concurrent
+		// `knn_search` (which takes `graph.read()`) cannot observe a cache state
+		// that pre-empts KV.
 		let mut graph = self.graph.write().await;
-		let mut docs = DiskAnnDocs::new(&tx, self.ikb.clone()).await?;
-		let provider_context = graph.index.provider().context(Arc::clone(&tx));
-		let diskann_ctx = self.new_diskann_context(ctx, provider_context);
-		for pending in pending {
-			self.apply_pending_operation(&diskann_ctx, &mut docs, &mut graph, pending).await?;
+		let apply_result: Result<()> = async {
+			let mut docs = DiskAnnDocs::new(&tx, self.ikb.clone()).await?;
+			let provider_context = graph.index.provider().context(Arc::clone(&tx));
+			let diskann_ctx = self.new_diskann_context(ctx, provider_context);
+			for pending in pending {
+				self.apply_pending_operation(&diskann_ctx, &mut docs, &mut graph, pending).await?;
+			}
+			docs.finish(&tx).await?;
+			if should_clear_pending_state && Self::pending_range_empty(ctx, &tx, &self.ikb).await? {
+				Self::clear_pending_state_if_current(&tx, &self.ikb, &pending_state).await?;
+			}
+			Ok(())
 		}
-		docs.finish(&tx).await?;
-		if should_clear_pending_state && Self::pending_range_empty(ctx, &tx, &self.ikb).await? {
-			Self::clear_pending_state_if_current(&tx, &self.ikb, &pending_state).await?;
+		.await;
+		if let Err(e) = apply_result {
+			cancel_silently(&tx).await;
+			self.clear_local_cache().await;
+			return Err(e);
 		}
+		if let Err(e) = tx.commit().await {
+			self.clear_local_cache().await;
+			return Err(e);
+		}
+		// Lock is released as `graph` goes out of scope. By the time any
+		// concurrent reader can acquire `graph.read()` the cache and KV are
+		// consistent (commit succeeded) — or, on the error path above, the
+		// cache has been cleared (commit failed) before the lock was released.
 		Ok(true)
+	}
+
+	/// Drops every entry in the process-local [`DiskAnnCache`] that is scoped to
+	/// this index, keeping the [`DiskAnnIndex`] registration intact so the graph
+	/// `RwLock` continues to serialise compaction and KNN search.
+	async fn clear_local_cache(&self) {
+		self.cache
+			.remove_index(self.ikb.ns(), self.ikb.db(), self.table_id, self.ikb.index())
+			.await;
 	}
 
 	/// Applies one coalesced pending operation to document mappings and the DiskANN graph.
@@ -1179,8 +1256,9 @@ mod tests {
 			plan
 		};
 		let ctx = new_ctx(ds, TransactionType::Write).await;
+		// `apply_compaction` now commits the tx itself when it returns Ok(true)
+		// and cancels it on Ok(false) / Err, so the test must not double-commit.
 		let applied = index.apply_compaction(&ctx, plan).await?;
-		ctx.tx().commit().await?;
 		Ok(applied)
 	}
 
@@ -1487,8 +1565,8 @@ mod tests {
 
 		{
 			let ctx = new_ctx(&ds, TransactionType::Write).await;
+			// apply_compaction commits the tx internally on Ok(true).
 			assert!(index.apply_compaction(&ctx, plan).await?);
-			ctx.tx().commit().await?;
 		}
 
 		{
@@ -1556,8 +1634,8 @@ mod tests {
 			ctx.tx().commit().await?;
 		}
 
+		// apply_compaction commits the tx internally on Ok(true).
 		assert!(index.apply_compaction(&apply_ctx, plan).await?);
-		apply_ctx.tx().commit().await?;
 
 		{
 			let ctx = new_ctx(&ds, TransactionType::Read).await;
@@ -1602,8 +1680,8 @@ mod tests {
 		}
 		{
 			let ctx = new_ctx(&ds, TransactionType::Write).await;
+			// apply_compaction now cancels the tx itself when it returns Ok(false).
 			assert!(!index.apply_compaction(&ctx, plan).await?);
-			ctx.tx().cancel().await?;
 		}
 
 		{
@@ -1651,8 +1729,8 @@ mod tests {
 		}
 		{
 			let ctx = new_ctx(&ds, TransactionType::Write).await;
+			// apply_compaction commits the tx internally on Ok(true).
 			assert!(index.apply_compaction(&ctx, plan).await?);
-			ctx.tx().commit().await?;
 		}
 
 		{
@@ -1663,6 +1741,136 @@ mod tests {
 			assert!(ctx.tx().get::<_>(&ikb.new_dr_key(&second_id), None).await?.is_some());
 			ctx.tx().cancel().await?;
 		}
+		Ok(())
+	}
+
+	/// Regression for the #7318 class of bug: two compactors race on the same `!dr` plan,
+	/// the late one's commit conflicts on `!dg` after it has already mutated the shared
+	/// cache during the apply phase. `apply_compaction` must clear the per-index cache
+	/// before returning the error so subsequent KNN searches can't observe element ids
+	/// from the rolled-back tx.
+	#[tokio::test]
+	async fn diskann_failed_compaction_clears_cache_and_keeps_knn_working() -> Result<()> {
+		let ds = Datastore::new("memory").await?;
+		let ikb = ikb();
+		let cache = cache();
+		let index = DiskAnnIndex::new(
+			ikb.clone(),
+			TableId(4),
+			&params(VectorType::F32, Distance::Euclidean),
+			cache.clone(),
+		)
+		.await?;
+
+		// Seed a handful of records so the captured plan is non-trivial.
+		for i in 0..4_i64 {
+			let ctx = new_ctx(&ds, TransactionType::Write).await;
+			let v = [i as f32, 0.0, 0.0, 0.0];
+			index.index(&ctx, &RecordIdKey::Number(i), None, Some(f32_content(&v))).await?;
+			ctx.tx().commit().await?;
+		}
+
+		// Two identical plans, both capturing every `!dr` key.
+		let plan_a = {
+			let ctx = new_ctx(&ds, TransactionType::Read).await;
+			let plan = DiskAnnIndex::prepare_compaction(&ctx, &ikb).await?;
+			ctx.tx().cancel().await?;
+			plan
+		};
+		let plan_b = {
+			let ctx = new_ctx(&ds, TransactionType::Read).await;
+			let plan = DiskAnnIndex::prepare_compaction(&ctx, &ikb).await?;
+			ctx.tx().cancel().await?;
+			plan
+		};
+		assert!(plan_a.has_work());
+		assert!(plan_b.has_work());
+
+		// Open both apply contexts before either commits, so `ctx_b`'s snapshot sees the
+		// captured `!dr` keys and the pre-bump `!dg` even after `ctx_a` commits.
+		let ctx_a = new_ctx(&ds, TransactionType::Write).await;
+		let ctx_b = new_ctx(&ds, TransactionType::Write).await;
+
+		// Apply A first — succeeds and commits.
+		assert!(index.apply_compaction(&ctx_a, plan_a).await?);
+
+		// Apply B — passes the write-time checks (its snapshot still sees the captured
+		// values and the pre-A generation), mutates the cache during the apply phase,
+		// then must fail on commit because OCC catches the snapshot violation.
+		let res = index.apply_compaction(&ctx_b, plan_b).await;
+		assert!(res.is_err(), "expected commit failure, got {res:?}");
+
+		// Cache must be clean for this index: the post-failure `clear_local_cache` was
+		// triggered while the graph write lock was still held.
+		let cache_index = (ikb.ns(), ikb.db(), TableId(4), ikb.index());
+		assert!(cache.get_state(cache_index).is_none(), "state cache should be empty");
+		// And no element/node entries either — the retain-based cleanup is authoritative.
+		for id in 0..4 {
+			assert!(cache.get_element(cache_index, id).is_none(), "element {id} cached");
+			assert!(cache.get_node(cache_index, id).is_none(), "node {id} cached");
+		}
+
+		// KNN now goes to KV, populates the cache fresh, and returns the elements
+		// committed by A.
+		assert_eq!(knn_len_with_k(&index, &ds, &[2.0, 0.0, 0.0, 0.0], 4).await?, 4);
+		Ok(())
+	}
+
+	/// T3 — end-to-end compaction + KNN in `use_hashed_vector` mode. The existing
+	/// `docs.rs` tests cover the in-bucket disambiguation only on synthetic
+	/// pre-seeded buckets; this exercises the real compaction → graph build → search
+	/// path with hashed-vector storage enabled.
+	#[tokio::test]
+	async fn diskann_hashed_vector_compaction_and_knn() -> Result<()> {
+		let ds = Datastore::new("memory").await?;
+		let ikb = ikb();
+		let cache = cache();
+		let params = DiskAnnParams {
+			use_hashed_vector: true,
+			..params(VectorType::F32, Distance::Euclidean)
+		};
+		let index = DiskAnnIndex::new(ikb.clone(), TableId(4), &params, cache.clone()).await?;
+
+		let v0 = [1.0_f32, 0.0, 0.0, 0.0];
+		let v1 = [0.0_f32, 1.0, 0.0, 0.0];
+		let v2 = [0.0_f32, 0.0, 1.0, 0.0];
+
+		for (id, v) in [(0, &v0), (1, &v1), (2, &v2)] {
+			let ctx = new_ctx(&ds, TransactionType::Write).await;
+			index.index(&ctx, &RecordIdKey::Number(id), None, Some(f32_content(v))).await?;
+			ctx.tx().commit().await?;
+		}
+		assert!(compact_once(&index, &ds, &ikb).await?);
+
+		// KNN queries through the hashed path must still find each record.
+		assert_eq!(knn_len(&index, &ds, &v0).await?, 1);
+		assert_eq!(knn_len(&index, &ds, &v1).await?, 1);
+		assert_eq!(knn_len(&index, &ds, &v2).await?, 1);
+
+		// Two records sharing the *same* vector → one bucket entry, two docs. Remove
+		// one and the bucket entry survives with the other doc still searchable.
+		let ctx = new_ctx(&ds, TransactionType::Write).await;
+		index.index(&ctx, &RecordIdKey::Number(3), None, Some(f32_content(&v0))).await?;
+		ctx.tx().commit().await?;
+		assert!(compact_once(&index, &ds, &ikb).await?);
+		assert_eq!(knn_len(&index, &ds, &v0).await?, 1);
+
+		// Remove one of the shared docs; the other must remain searchable through the
+		// surviving bucket entry (exercises `RemoveResult::BucketShrunk`).
+		let ctx = new_ctx(&ds, TransactionType::Write).await;
+		index.index(&ctx, &RecordIdKey::Number(0), Some(f32_content(&v0)), None).await?;
+		ctx.tx().commit().await?;
+		assert!(compact_once(&index, &ds, &ikb).await?);
+		assert_eq!(knn_len(&index, &ds, &v0).await?, 1);
+
+		// Remove the last shared doc; bucket entry is removed, the graph element
+		// goes (exercises `RemoveResult::EntryRemoved` / `Empty`). KNN now returns
+		// the next nearest neighbour, not v0.
+		let ctx = new_ctx(&ds, TransactionType::Write).await;
+		index.index(&ctx, &RecordIdKey::Number(3), Some(f32_content(&v0)), None).await?;
+		ctx.tx().commit().await?;
+		assert!(compact_once(&index, &ds, &ikb).await?);
+		assert_eq!(knn_len(&index, &ds, &v1).await?, 1);
 		Ok(())
 	}
 }
