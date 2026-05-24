@@ -10,6 +10,9 @@ use chrono::{DateTime, Utc};
 pub use cnf::MemoryConfig;
 use surrealmx::{Database, DatabaseOptions, KeyIterator, ScanIterator, Transaction as Tx};
 use tokio::sync::RwLock;
+use tracing::info;
+
+const TARGET: &str = "surrealdb::core::kvs::mem";
 
 use super::api::{BoxFut, GetMultiResult, KeysResult, ScanLimit, ScanResult};
 #[cfg(not(target_family = "wasm"))]
@@ -25,6 +28,8 @@ use crate::kvs::{Key, Val};
 
 pub struct Datastore {
 	db: Database,
+	/// Whether user-defined timestamps (versioning) are enabled
+	versioned: bool,
 }
 
 pub struct Transaction {
@@ -34,11 +39,38 @@ pub struct Transaction {
 	write: bool,
 	/// The underlying datastore transaction
 	inner: RwLock<Tx>,
+	/// Copied from the datastore at transaction creation.
+	versioned: bool,
+}
+
+impl Transaction {
+	fn ensure_versioned(&self, version: Option<u64>) -> Result<()> {
+		if !self.versioned && version.is_some() {
+			return Err(Error::UnsupportedVersionedQueries);
+		}
+		Ok(())
+	}
 }
 
 impl Datastore {
 	/// Open a new database
 	pub(crate) async fn new(config: MemoryConfig) -> Result<Datastore> {
+		info!(
+			target: TARGET,
+			"Versioning enabled: {} with retention period: {}ns",
+			config.versioned,
+			config.retention_ns
+		);
+		#[cfg(not(target_family = "wasm"))]
+		match &config.persist_path {
+			Some(path) => {
+				info!(target: TARGET, "Persistence path: {path}");
+				info!(target: TARGET, "Append-only log mode: {}", config.aol_mode);
+				info!(target: TARGET, "Snapshot mode: {}", config.snapshot_mode);
+				info!(target: TARGET, "Sync mode: {}", config.sync_mode);
+			}
+			None => info!(target: TARGET, "Storage mode: in-memory only (no persist path)"),
+		}
 		// Create new configuration options
 		let opts = DatabaseOptions {
 			enable_gc: config.retention_ns > 0,
@@ -85,6 +117,7 @@ impl Datastore {
 		// Return the new datastore
 		Ok(Datastore {
 			db,
+			versioned: config.versioned,
 		})
 	}
 
@@ -103,6 +136,7 @@ impl Datastore {
 			done: AtomicBool::new(false),
 			write,
 			inner: RwLock::new(txn),
+			versioned: self.versioned,
 		}))
 	}
 }
@@ -164,6 +198,7 @@ impl Transactable for Transaction {
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(key = key.sprint()))]
 	fn exists(&self, key: Key, version: Option<u64>) -> BoxFut<'_, Result<bool>> {
 		Box::pin(async move {
+			self.ensure_versioned(version)?;
 			// Check to see if transaction is closed
 			if self.closed() {
 				return Err(Error::TransactionFinished);
@@ -184,6 +219,7 @@ impl Transactable for Transaction {
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(key = key.sprint()))]
 	fn get(&self, key: Key, version: Option<u64>) -> BoxFut<'_, Result<Option<Val>>> {
 		Box::pin(async move {
+			self.ensure_versioned(version)?;
 			// Check to see if transaction is closed
 			if self.closed() {
 				return Err(Error::TransactionFinished);
@@ -204,6 +240,7 @@ impl Transactable for Transaction {
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(keys = keys.sprint()))]
 	fn getm(&self, keys: Vec<Key>, version: Option<u64>) -> BoxFut<'_, Result<GetMultiResult>> {
 		Box::pin(async move {
+			self.ensure_versioned(version)?;
 			// Check to see if transaction is closed
 			if self.closed() {
 				return Err(Error::TransactionFinished);
@@ -421,6 +458,7 @@ impl Transactable for Transaction {
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(rng = rng.sprint()))]
 	fn count(&self, rng: Range<Key>, version: Option<u64>) -> BoxFut<'_, Result<usize>> {
 		Box::pin(async move {
+			self.ensure_versioned(version)?;
 			// Check to see if transaction is closed
 			if self.closed() {
 				return Err(Error::TransactionFinished);
@@ -456,6 +494,7 @@ impl Transactable for Transaction {
 		version: Option<u64>,
 	) -> BoxFut<'_, Result<KeysResult>> {
 		Box::pin(async move {
+			self.ensure_versioned(version)?;
 			// Check to see if transaction is closed
 			if self.closed() {
 				return Err(Error::TransactionFinished);
@@ -485,6 +524,7 @@ impl Transactable for Transaction {
 		version: Option<u64>,
 	) -> BoxFut<'_, Result<KeysResult>> {
 		Box::pin(async move {
+			self.ensure_versioned(version)?;
 			// Check to see if transaction is closed
 			if self.closed() {
 				return Err(Error::TransactionFinished);
@@ -514,6 +554,7 @@ impl Transactable for Transaction {
 		version: Option<u64>,
 	) -> BoxFut<'_, Result<ScanResult>> {
 		Box::pin(async move {
+			self.ensure_versioned(version)?;
 			// Check to see if transaction is closed
 			if self.closed() {
 				return Err(Error::TransactionFinished);
@@ -543,6 +584,7 @@ impl Transactable for Transaction {
 		version: Option<u64>,
 	) -> BoxFut<'_, Result<ScanResult>> {
 		Box::pin(async move {
+			self.ensure_versioned(version)?;
 			// Check to see if transaction is closed
 			if self.closed() {
 				return Err(Error::TransactionFinished);

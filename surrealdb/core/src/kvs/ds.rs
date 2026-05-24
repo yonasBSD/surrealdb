@@ -601,7 +601,13 @@ impl TransactionBuilderFactory for CommunityComposer {
 					// Create a new blocking threadpool
 					super::threadpool::initialise();
 
-					let config = config.with_key_value("datastore_persist", path);
+					// Persist path comes from the URL path; do not inject an empty
+					// string or `parse_key_with` logs a spurious DATASTORE_PERSIST warning.
+					let config = if path.is_empty() {
+						config
+					} else {
+						config.with_key_value("datastore_persist", path)
+					};
 					// Parse SurrealMX configuration from URL path and query parameters
 					let config = config.load();
 					// Initialise the storage engine

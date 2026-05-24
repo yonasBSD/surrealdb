@@ -151,6 +151,15 @@ pub struct Transaction {
 	scan_verify_checksums: bool,
 }
 
+impl Transaction {
+	fn ensure_versioned(&self, version: Option<u64>) -> Result<()> {
+		if !self.versioned && version.is_some() {
+			return Err(Error::UnsupportedVersionedQueries);
+		}
+		Ok(())
+	}
+}
+
 /// The rocksdb transaction and its pre-captured snapshot, bundled together so
 /// that the snapshot is always dropped before the transaction it borrows from.
 ///
@@ -1936,9 +1945,7 @@ impl Transactable for Transaction {
 	fn exists(&self, key: Key, version: Option<u64>) -> BoxFut<'_, Result<bool>> {
 		Box::pin(async move {
 			// Versioned queries require a versioned datastore
-			if !self.versioned && version.is_some() {
-				return Err(Error::UnsupportedVersionedQueries);
-			}
+			self.ensure_versioned(version)?;
 			// Check to see if transaction is closed
 			if self.closed() {
 				return Err(Error::TransactionFinished);
@@ -1965,9 +1972,7 @@ impl Transactable for Transaction {
 	fn get(&self, key: Key, version: Option<u64>) -> BoxFut<'_, Result<Option<Val>>> {
 		Box::pin(async move {
 			// Versioned queries require a versioned datastore
-			if !self.versioned && version.is_some() {
-				return Err(Error::UnsupportedVersionedQueries);
-			}
+			self.ensure_versioned(version)?;
 			// Check to see if transaction is closed
 			if self.closed() {
 				return Err(Error::TransactionFinished);
@@ -1993,9 +1998,7 @@ impl Transactable for Transaction {
 	fn getm(&self, keys: Vec<Key>, version: Option<u64>) -> BoxFut<'_, Result<GetMultiResult>> {
 		Box::pin(async move {
 			// Versioned queries require a versioned datastore
-			if !self.versioned && version.is_some() {
-				return Err(Error::UnsupportedVersionedQueries);
-			}
+			self.ensure_versioned(version)?;
 			// Check to see if transaction is closed
 			if self.closed() {
 				return Err(Error::TransactionFinished);
@@ -2204,9 +2207,7 @@ impl Transactable for Transaction {
 	fn count(&self, rng: Range<Key>, version: Option<u64>) -> BoxFut<'_, Result<usize>> {
 		Box::pin(async move {
 			// Versioned queries require a versioned datastore
-			if !self.versioned && version.is_some() {
-				return Err(Error::UnsupportedVersionedQueries);
-			}
+			self.ensure_versioned(version)?;
 			// Check to see if transaction is closed
 			if self.closed() {
 				return Err(Error::TransactionFinished);
@@ -2327,9 +2328,7 @@ impl Transactable for Transaction {
 	) -> BoxFut<'_, Result<KeysResult>> {
 		Box::pin(async move {
 			// Versioned queries require a versioned datastore
-			if !self.versioned && version.is_some() {
-				return Err(Error::UnsupportedVersionedQueries);
-			}
+			self.ensure_versioned(version)?;
 			// Check to see if transaction is closed
 			if self.closed() {
 				return Err(Error::TransactionFinished);
@@ -2366,9 +2365,7 @@ impl Transactable for Transaction {
 	) -> BoxFut<'_, Result<KeysResult>> {
 		Box::pin(async move {
 			// Versioned queries require a versioned datastore
-			if !self.versioned && version.is_some() {
-				return Err(Error::UnsupportedVersionedQueries);
-			}
+			self.ensure_versioned(version)?;
 			// Check to see if transaction is closed
 			if self.closed() {
 				return Err(Error::TransactionFinished);
@@ -2405,9 +2402,7 @@ impl Transactable for Transaction {
 	) -> BoxFut<'_, Result<ScanResult>> {
 		Box::pin(async move {
 			// Versioned queries require a versioned datastore
-			if !self.versioned && version.is_some() {
-				return Err(Error::UnsupportedVersionedQueries);
-			}
+			self.ensure_versioned(version)?;
 			// Check to see if transaction is closed
 			if self.closed() {
 				return Err(Error::TransactionFinished);
@@ -2444,9 +2439,7 @@ impl Transactable for Transaction {
 	) -> BoxFut<'_, Result<ScanResult>> {
 		Box::pin(async move {
 			// Versioned queries require a versioned datastore
-			if !self.versioned && version.is_some() {
-				return Err(Error::UnsupportedVersionedQueries);
-			}
+			self.ensure_versioned(version)?;
 			// Check to see if transaction is closed
 			if self.closed() {
 				return Err(Error::TransactionFinished);
@@ -2488,9 +2481,7 @@ impl Transactable for Transaction {
 		version: Option<u64>,
 	) -> BoxFut<'a, Result<Box<dyn ScanCursorKeys + 'a>>> {
 		Box::pin(async move {
-			if !self.versioned && version.is_some() {
-				return Err(Error::UnsupportedVersionedQueries);
-			}
+			self.ensure_versioned(version)?;
 			// Open protocol: increment `cursors_alive` (SeqCst), then claim
 			// the slot via `AliveGuard` so every subsequent exit — the
 			// `done == true` re-check, the future being dropped at the
@@ -2552,9 +2543,7 @@ impl Transactable for Transaction {
 		version: Option<u64>,
 	) -> BoxFut<'a, Result<Box<dyn ScanCursorVals + 'a>>> {
 		Box::pin(async move {
-			if !self.versioned && version.is_some() {
-				return Err(Error::UnsupportedVersionedQueries);
-			}
+			self.ensure_versioned(version)?;
 			// See `open_keys_cursor` for the open-protocol rationale and
 			// why the `AliveGuard` must be bound before the `lock().await`.
 			self.cursors_alive.fetch_add(1, Ordering::SeqCst);
