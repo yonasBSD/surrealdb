@@ -297,9 +297,6 @@ impl<'a> IndexAnalyzer<'a> {
 				{
 					continue;
 				}
-				if ix_def.cols.len() != 1 {
-					continue;
-				}
 
 				if let Some(With::Index(names)) = self.with_hints
 					&& !names.iter().any(|n| n.as_str() == ix_def.name.as_str())
@@ -311,12 +308,23 @@ impl<'a> IndexAnalyzer<'a> {
 					&& idiom_matches_containment(idiom, first_col)
 				{
 					let index_ref = IndexRef::new(Arc::clone(&self.indexes), idx);
+					let is_composite = ix_def.cols.len() > 1;
 					let paths: Vec<AccessPath> = values
 						.iter()
-						.map(|v| AccessPath::BTreeScan {
-							index_ref: index_ref.clone(),
-							access: BTreeAccess::Equality(v.clone()),
-							direction,
+						.map(|v| {
+							let access = if is_composite {
+								BTreeAccess::Compound {
+									prefix: vec![v.clone()],
+									range: None,
+								}
+							} else {
+								BTreeAccess::Equality(v.clone())
+							};
+							AccessPath::BTreeScan {
+								index_ref: index_ref.clone(),
+								access,
+								direction,
+							}
 						})
 						.collect();
 					return Some(AccessPath::Union(paths));

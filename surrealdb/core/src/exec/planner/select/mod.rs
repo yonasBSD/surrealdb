@@ -32,6 +32,7 @@ use super::util::{
 	is_count_all_eligible, is_indexed_count_eligible, order_is_scan_compatible,
 	resolve_condition_params, resolve_param_value, resolve_projection_field_idioms,
 	strip_fts_condition, strip_index_conditions, strip_knn_from_condition,
+	strip_union_index_conditions,
 };
 use crate::catalog::Index;
 use crate::catalog::providers::{DatabaseProvider, NamespaceProvider, TableProvider};
@@ -1718,6 +1719,34 @@ impl<'ctx> Planner<'ctx> {
 			paths
 		};
 
+		// Detect whether the union came from `try_containment_expansion`
+		// (vs. `try_in_expansion`) by inspecting whether the leading
+		// index column is an array-element flatten (`Part::All`).
+		// Containment unions can have overlapping branches — a single
+		// row whose array contains multiple matching values appears in
+		// multiple branches' prefix ranges — so the merge must dedupe
+		// by record ID. Scalar `IN`-expansion can't produce overlapping
+		// branches (each row's scalar value matches at most one branch).
+		//
+		// TODO: this is an implicit handshake with the analyser — a
+		// future code path that emits non-containment `Compound`
+		// branches against a `Part::All` column would silently flip
+		// dedupe on.  Promote `AccessPath::Union` to carry an explicit
+		// `dedupe: bool` (set in `try_containment_expansion`) so the
+		// contract is local to the analyser/operator pair.
+		let is_containment_union = paths.iter().any(|p| match p {
+			AccessPath::BTreeScan {
+				index_ref,
+				..
+			} => index_ref
+				.definition()
+				.cols
+				.first()
+				.map(|c| c.0.iter().any(|p| matches!(p, crate::expr::Part::All)))
+				.unwrap_or(false),
+			_ => false,
+		});
+
 		// When merge mode is active and a downstream LIMIT exists, pass
 		// it as a batch-ceiling hint to each sub-scan so the merge
 		// terminates quickly.
@@ -1726,6 +1755,22 @@ impl<'ctx> Planner<'ctx> {
 			scan_limit
 		} else {
 			None
+		};
+
+		// Strip CONTAINSANY / ANYINSIDE leaves whose literal value set
+		// is fully covered by the branches' prefix values.  If
+		// everything is covered, the residual Filter goes away and
+		// LIMIT can be pushed into the sub-scans (when merge is
+		// active).  CONTAINSALL / ALLINSIDE leaves are NOT stripped
+		// (intersection semantics; see `strip_union_index_conditions`
+		// rustdoc and issue #236).
+		let filter_action = if let Some(c) = cond {
+			match strip_union_index_conditions(c, &paths) {
+				None => FilterAction::FullyConsumed,
+				Some(residual) => FilterAction::Residual(residual),
+			}
+		} else {
+			FilterAction::FullyConsumed
 		};
 
 		let mut sub_operators: Vec<Arc<dyn ExecOperator>> = Vec::with_capacity(paths.len());
@@ -1749,7 +1794,13 @@ impl<'ctx> Planner<'ctx> {
 			union_scan = union_scan.with_merge_by_id(dir);
 		} else if let Some((path, dir)) = merge_by_index_key {
 			// Composite-index k-way merge by the indexed sort column.
-			union_scan = union_scan.with_merge_by_index_key(path, dir);
+			// Use the deduping variant when branches can overlap (see
+			// `is_containment_union` above).
+			if is_containment_union {
+				union_scan = union_scan.with_merge_by_index_key_dedup(path, dir);
+			} else {
+				union_scan = union_scan.with_merge_by_index_key(path, dir);
+			}
 		} else if downstream_topk {
 			// No merge available — but a bounded top-k sort is downstream.
 			// Skip eager per-sub-stream prefetch so the heap drives demand.
@@ -1758,9 +1809,17 @@ impl<'ctx> Planner<'ctx> {
 		if let Some(tc) = table_ctx {
 			union_scan = union_scan.with_resolved(tc);
 		}
+
+		// `limit_pushed` stays `false` for unions: the per-sub-scan
+		// `merge_batch_ceiling` only sizes the per-batch fetch, not the
+		// total row count.  Cancellation is driven by the outer `Limit`
+		// operator pulling N rows and dropping the stream — the
+		// streaming pipeline cancels the union and its sub-scans on
+		// drop.  Removing the outer `Limit` (as `limit_pushed: true`
+		// would do) drops LIMIT semantics entirely on this path.
 		Ok(PlannedSource {
 			operator: Arc::new(union_scan) as Arc<dyn ExecOperator>,
-			filter_action: FilterAction::UseOriginal,
+			filter_action,
 			limit_pushed: false,
 		})
 	}
@@ -2215,6 +2274,20 @@ impl<'ctx> Planner<'ctx> {
 		// does not satisfy ORDER BY.
 		if path.is_full_range_scan()
 			&& let Some(union_path) = analyzer.try_or_union(analysis_cond, direction)
+		{
+			return Ok(Some((union_path, direction)));
+		}
+		// Same logic for containment expansion (CONTAINSANY / ANYINSIDE
+		// against an array-element index): the full-range scan would
+		// walk every indexed entry — typically one per array element
+		// per row — and filter post-hoc. A Union of per-value Compound
+		// prefix scans reads only the matching prefix ranges, which is
+		// the win we're after for crud-bench-style workloads. The k-way
+		// merge with `MergeMode::ByIndexKeyDedup` preserves the trailing
+		// ORDER BY column's sort order and dedupes rows that match
+		// multiple branches.
+		if path.is_full_range_scan()
+			&& let Some(union_path) = analyzer.try_containment_expansion(analysis_cond, direction)
 		{
 			return Ok(Some((union_path, direction)));
 		}

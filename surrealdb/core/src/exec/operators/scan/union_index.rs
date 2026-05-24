@@ -35,6 +35,7 @@ use crate::val::{RecordId, TableName, Value};
 
 /// How [`UnionIndexScan`] combines per-branch sub-streams.
 #[derive(Debug, Clone)]
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum MergeMode {
 	/// K-way merge by record ID. Used when each sub-stream is already
 	/// sorted by record ID (e.g. single-column equality index scans) and
@@ -51,6 +52,17 @@ pub(crate) enum MergeMode {
 		path: FieldPath,
 		direction: SortDirection,
 	},
+	/// Like `ByIndexKey` but with record-ID deduplication via a
+	/// `HashSet<RecordId>`.  Used when branches can overlap on the same
+	/// record — for example, `field CONTAINSANY [a, b]` on an
+	/// array-element index, where a row whose `field` array contains
+	/// both `a` and `b` sits in both branches' prefix ranges.  The
+	/// non-dedup `ByIndexKey` variant assumes prefix-disjoint branches
+	/// and would emit such a row twice.
+	ByIndexKeyDedup {
+		path: FieldPath,
+		direction: SortDirection,
+	},
 }
 
 impl MergeMode {
@@ -58,6 +70,10 @@ impl MergeMode {
 		match self {
 			MergeMode::ById(d)
 			| MergeMode::ByIndexKey {
+				direction: d,
+				..
+			}
+			| MergeMode::ByIndexKeyDedup {
 				direction: d,
 				..
 			} => *d,
@@ -109,7 +125,23 @@ fn extract_merge_key(mode: &MergeMode, value: &Value) -> Option<MergeKey> {
 		MergeMode::ByIndexKey {
 			path,
 			..
+		}
+		| MergeMode::ByIndexKeyDedup {
+			path,
+			..
 		} => Some(MergeKey::Field(path.extract(value))),
+	}
+}
+
+/// Extract the record ID from a row, if present.  Used by the dedup
+/// path when the merge mode is `ByIndexKeyDedup`.
+fn extract_rid(value: &Value) -> Option<RecordId> {
+	match value {
+		Value::Object(obj) => match obj.get("id") {
+			Some(Value::RecordId(rid)) => Some(rid.clone()),
+			_ => None,
+		},
+		_ => None,
 	}
 }
 
@@ -205,6 +237,23 @@ impl UnionIndexScan {
 		self
 	}
 
+	/// Like `with_merge_by_index_key`, but deduplicates rows by record ID
+	/// during the merge.  Required when branches can overlap on the same
+	/// record (e.g. `field CONTAINSANY [a, b]` on an array-element index
+	/// — a row whose array contains both values appears in both
+	/// branches' prefix ranges).
+	pub(crate) fn with_merge_by_index_key_dedup(
+		mut self,
+		path: FieldPath,
+		direction: SortDirection,
+	) -> Self {
+		self.merge = Some(MergeMode::ByIndexKeyDedup {
+			path,
+			direction,
+		});
+		self
+	}
+
 	/// Mark the scan as feeding a bounded top-k sort. Disables eager
 	/// per-sub-stream prefetch (see [`Self::downstream_topk`]).
 	pub(crate) fn with_downstream_topk(mut self) -> Self {
@@ -231,6 +280,15 @@ impl ExecOperator for UnionIndexScan {
 				direction,
 			}) => {
 				attrs.push(("merge_by_index_key".to_string(), format!("{path} {direction:?}")));
+			}
+			Some(MergeMode::ByIndexKeyDedup {
+				path,
+				direction,
+			}) => {
+				attrs.push((
+					"merge_by_index_key_dedup".to_string(),
+					format!("{path} {direction:?}"),
+				));
 			}
 			None => {}
 		}
@@ -269,6 +327,10 @@ impl ExecOperator for UnionIndexScan {
 				numeric: false,
 			}]),
 			Some(MergeMode::ByIndexKey {
+				path,
+				direction,
+			})
+			| Some(MergeMode::ByIndexKeyDedup {
 				path,
 				direction,
 			}) => OutputOrdering::Sorted(vec![SortProperty {
@@ -413,11 +475,25 @@ impl ExecOperator for UnionIndexScan {
 					}
 				}
 
-				// Track the last yielded record ID for deduplication
-				// (only meaningful in `ById` mode — branches in
-				// `ByIndexKey` mode are prefix-disjoint, so a record
-				// cannot appear twice).
+				// Track the last yielded record ID for `ById`-mode
+				// deduplication (record IDs are monotonic across the
+				// merged stream).  `ByIndexKey` branches are
+				// prefix-disjoint by construction, so no dedupe is
+				// needed.  `ByIndexKeyDedup` branches *can* overlap on
+				// the same record (CONTAINSANY style); for that mode we
+				// also keep a full `HashSet` of yielded rids.
+				//
+				// Memory note: `seen_rids` grows unbounded with the
+				// result size for `ByIndexKeyDedup` (and the
+				// `seen` set in the sequential path below has the
+				// same property — pre-existing behaviour, not a
+				// regression from `ByIndexKeyDedup`).  Worth
+				// revisiting if this operator surfaces memory
+				// pressure on very large unbounded containment
+				// result sets.
 				let mut last_rid: Option<RecordId> = None;
+				let needs_rid_dedup = matches!(merge_mode, MergeMode::ByIndexKeyDedup { .. });
+				let mut seen_rids: HashSet<RecordId> = HashSet::new();
 
 				loop {
 					// Check for cancellation
@@ -486,6 +562,17 @@ impl ExecOperator for UnionIndexScan {
 						last_rid = Some(rid.clone());
 					}
 
+					// In `ByIndexKeyDedup` mode a record can also appear
+					// in multiple branches but they are sorted by field
+					// value, not by rid, so non-consecutive duplicates
+					// are possible.  Use a full `HashSet` to drop them.
+					if needs_rid_dedup
+						&& let Some(rid) = extract_rid(&value)
+						&& !seen_rids.insert(rid)
+					{
+						continue;
+					}
+
 					// Apply permission pipeline
 					let mut batch = vec![value];
 					let cont = pipeline.process_batch(&mut batch, &ctx).await?;
@@ -509,14 +596,12 @@ impl ExecOperator for UnionIndexScan {
 						}
 
 						let batch: ValueBatch = batch_result?;
-						let mut deduped: Vec<Value> = batch.values.into_iter()
-							.filter(|v| {
-								if let Value::Object(obj) = v
-									&& let Some(Value::RecordId(rid)) = obj.get("id")
-								{
-									return seen.insert(rid.clone());
-								}
-								true // non-object values pass through
+						let mut deduped: Vec<Value> = batch
+							.values
+							.into_iter()
+							.filter(|v| match extract_rid(v) {
+								Some(rid) => seen.insert(rid),
+								None => true, // non-object values pass through
 							})
 							.collect();
 

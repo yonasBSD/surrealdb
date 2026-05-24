@@ -9,6 +9,8 @@
 //! have their own planning pass and their predicates do not contribute to
 //! the outer scan's analysis.
 
+use std::collections::HashSet;
+
 use super::literals::try_literal_to_value;
 use crate::catalog::Distance;
 use crate::exec::index::analysis::idiom_matches_containment;
@@ -214,6 +216,122 @@ pub(crate) fn strip_index_conditions(
 		_ => false,
 	})
 	.map(Cond)
+}
+
+/// Strip conditions covered by a union of BTree access paths from a WHERE
+/// clause.
+///
+/// Recognises `field CONTAINSANY [v0, v1, ...]` (idiom on left) and the
+/// symmetric `[v0, v1, ...] ANYINSIDE field` (idiom on right) when every
+/// literal value appears as the leading equality/prefix value of some
+/// branch.  The branches must all share the same index and all use that
+/// index's leading array-element column (via `idiom_matches_containment`).
+///
+/// `CONTAINSALL` / `ALLINSIDE` leaves are deliberately **not** considered
+/// covered: their semantics require every value to match the *same* row,
+/// but the union returns rows matching *any* value.  A residual `Filter`
+/// is left in place above the `UnionIndexScan` to enforce the
+/// intersection.  Tracking issue #236 covers a future
+/// intersection-operator follow-up.
+pub(crate) fn strip_union_index_conditions(
+	cond: &Cond,
+	paths: &[crate::exec::index::access_path::AccessPath],
+) -> Option<Cond> {
+	use crate::exec::index::access_path::{AccessPath, BTreeAccess};
+	use crate::val::Value;
+
+	// Collect (index_first_column, set_of_branch_values) from the paths.
+	// All branches must agree on the index and its first column.  A
+	// `HashSet<&Value>` keeps `union_covers_leaf`'s per-literal lookup
+	// at O(1) average — important when a query mixes a small union
+	// (≤ MAX_IN_EXPANSION_SIZE branches) with a large array literal on
+	// some other AND-leaf that the matcher still has to check.
+	let mut first_col: Option<&Idiom> = None;
+	let mut branch_values: HashSet<&Value> = HashSet::with_capacity(paths.len());
+	for path in paths {
+		let AccessPath::BTreeScan {
+			index_ref,
+			access,
+			..
+		} = path
+		else {
+			return Some(cond.clone());
+		};
+		let col = index_ref.definition().cols.first()?;
+		match first_col {
+			None => first_col = Some(col),
+			Some(prev) if prev == col => {}
+			Some(_) => return Some(cond.clone()),
+		}
+		match access {
+			BTreeAccess::Equality(v) => {
+				branch_values.insert(v);
+			}
+			BTreeAccess::Compound {
+				prefix,
+				range: None,
+			} if prefix.len() == 1 => {
+				branch_values.insert(&prefix[0]);
+			}
+			_ => return Some(cond.clone()),
+		}
+	}
+	let Some(col) = first_col else {
+		return Some(cond.clone());
+	};
+
+	strip_and_simplify(cond.0.clone(), |e| match e {
+		Expr::Binary {
+			left,
+			op,
+			right,
+		} => union_covers_leaf(col, &branch_values, left, op, right),
+		_ => false,
+	})
+	.map(Cond)
+}
+
+/// Returns `true` when a `CONTAINSANY` (idiom-left) or `ANYINSIDE`
+/// (idiom-right) leaf is fully covered by the set of branch values.
+fn union_covers_leaf(
+	col: &Idiom,
+	branch_values: &HashSet<&crate::val::Value>,
+	left: &Expr,
+	op: &BinaryOperator,
+	right: &Expr,
+) -> bool {
+	use crate::exec::index::analysis::idiom_matches_containment;
+	use crate::val::Value;
+
+	let (idiom, lit) = match op {
+		BinaryOperator::ContainAny => match (left, right) {
+			(Expr::Idiom(i), Expr::Literal(l)) => (i, l),
+			_ => return false,
+		},
+		BinaryOperator::AnyInside => match (left, right) {
+			(Expr::Literal(l), Expr::Idiom(i)) => (i, l),
+			_ => return false,
+		},
+		// CONTAINSALL / ALLINSIDE need intersection; the union does
+		// not cover them.  See `strip_union_index_conditions` rustdoc.
+		_ => return false,
+	};
+	if !idiom_matches_containment(idiom, col) {
+		return false;
+	}
+	let Some(Value::Array(arr)) = try_literal_to_value(lit) else {
+		return false;
+	};
+	// `field CONTAINSANY []` / `[] ANYINSIDE field` evaluates to FALSE
+	// (no values to match), so the leaf must stay in the residual
+	// filter to reject all rows.  `arr.0.iter().all(...)` would be
+	// vacuously true on the empty array, silently dropping the
+	// always-false constraint.
+	if arr.0.is_empty() {
+		return false;
+	}
+	// Every literal value must appear in some branch's prefix.
+	arr.0.iter().all(|v| branch_values.contains(v))
 }
 
 /// Decides whether a single binary comparison leaf is covered by a chosen

@@ -60,7 +60,7 @@ value = "[{ id: student:1 }, { id: student:3 }]"
 value = "NONE"
 
 [[test.results]]
-value = '''"SelectProject [ctx: Db] [projections: id] {rows: 2}\n    Filter [ctx: Db] [predicate: marks.*.subject CONTAINSANY ['tamil', 'french']] {rows: 2}\n        UnionIndexScan [ctx: Db] [table: student, branches: 2] {rows: 2}\n            IndexScan [ctx: Db] [index: subject_idx, access: = 'tamil', direction: Forward] {rows: 2}\n            IndexScan [ctx: Db] [index: subject_idx, access: = 'french', direction: Forward] {rows: 0}\n\nTotal rows: 2"'''
+value = '''"SelectProject [ctx: Db] [projections: id] {rows: 2}\n    UnionIndexScan [ctx: Db] [table: student, branches: 2] {rows: 2}\n        IndexScan [ctx: Db] [index: subject_idx, access: = 'tamil', direction: Forward] {rows: 2}\n        IndexScan [ctx: Db] [index: subject_idx, access: = 'french', direction: Forward] {rows: 0}\n\nTotal rows: 2"'''
 
 [[test.results]]
 value = "[{ id: student:1 }, { id: student:3 }]"
