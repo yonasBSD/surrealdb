@@ -11,6 +11,7 @@
 
 use super::literals::try_literal_to_value;
 use crate::catalog::Distance;
+use crate::exec::index::analysis::idiom_matches_containment;
 use crate::expr::operator::NearestNeighbor;
 use crate::expr::visit::{MutVisitor, Visit, VisitMut, Visitor};
 use crate::expr::{BinaryOperator, Cond, Expr, Idiom, Literal};
@@ -283,6 +284,16 @@ impl IndexConditionMatcher<'_> {
 		let is_equality =
 			matches!(effective_op, BinaryOperator::Equal | BinaryOperator::ExactEqual);
 
+		// `field CONTAINS scalar` (idiom on left) and `scalar INSIDE field`
+		// (idiom on right) are covered when the matching index column is an
+		// array-element flatten (`.*`/`[*]`) and the scalar matches the
+		// access's prefix/equality value. Mirrors the analyser's
+		// `try_match_containment` so a containment leaf is stripped from the
+		// residual, which in turn enables `strip_index_conditions` to report
+		// `FullyConsumed` and the SELECT planner to push LIMIT into the scan.
+		let is_containment = (matches!(effective_op, BinaryOperator::Contain) && idiom_on_left)
+			|| (matches!(effective_op, BinaryOperator::Inside) && !idiom_on_left);
+
 		match self.access {
 			BTreeAccess::Compound {
 				prefix,
@@ -295,6 +306,17 @@ impl IndexConditionMatcher<'_> {
 							return true;
 						}
 					}
+				}
+				// CONTAINS / INSIDE leaf on the leading array-element column:
+				// the analyser made it the Compound prefix's first value, so
+				// the scan range already filters to matching rows.
+				if is_containment
+					&& let Some(col) = self.cols.first()
+					&& let Some(val) = prefix.first()
+					&& idiom_matches_containment(idiom, col)
+					&& value == *val
+				{
+					return true;
 				}
 				// Check range condition on the column after the prefix.
 				if let Some((range_op, range_val)) = range
@@ -319,11 +341,18 @@ impl IndexConditionMatcher<'_> {
 				false
 			}
 			BTreeAccess::Equality(val) => {
-				if let Some(col) = self.cols.first() {
-					is_equality && idiom == col && value == *val
-				} else {
-					false
+				let Some(col) = self.cols.first() else {
+					return false;
+				};
+				if is_equality && idiom == col && value == *val {
+					return true;
 				}
+				// CONTAINS / INSIDE on the single-column array-element index:
+				// strip the leaf for the same reason as the Compound case.
+				if is_containment && idiom_matches_containment(idiom, col) && value == *val {
+					return true;
+				}
+				false
 			}
 			BTreeAccess::Range {
 				from,

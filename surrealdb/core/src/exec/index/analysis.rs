@@ -986,11 +986,17 @@ impl<'a> IndexAnalyzer<'a> {
 		}
 	}
 
-	/// Try to match a containment expression to an array index.
+	/// Try to match a containment expression to an array-element index.
 	///
 	/// Handles single-value containment:
-	/// - `field CONTAINS scalar` -> Equality lookup on `field[*]` index
-	/// - `scalar INSIDE field`   -> Equality lookup on `field[*]` index
+	/// - `field CONTAINS scalar` -> lookup on a `field[*]` (or `field.*`) index
+	/// - `scalar INSIDE field`   -> lookup on a `field[*]` (or `field.*`) index
+	///
+	/// For single-column indexes the access is `Equality(scalar)`; for compound
+	/// indexes whose leading column is the matched array-element flatten, the
+	/// access is `Compound { prefix: [scalar], range: None }` so the iterator
+	/// walks the leading-prefix range and trailing columns remain available
+	/// for ORDER BY pushdown via `index_covers_ordering`.
 	fn try_match_containment(
 		&self,
 		left: &Expr,
@@ -1029,15 +1035,24 @@ impl<'a> IndexAnalyzer<'a> {
 			if !matches!(ix_def.index, Index::Idx | Index::Uniq) {
 				continue;
 			}
-			if ix_def.cols.len() != 1 {
-				continue;
-			}
 			if let Some(first_col) = ix_def.cols.first()
 				&& idiom_matches_containment(idiom, first_col)
 			{
+				// Compound indexes need a prefix scan rather than a point
+				// lookup, because the on-disk key includes all columns. The
+				// trailing columns can then be used by `index_covers_ordering`
+				// to satisfy ORDER BY without a post-iteration sort. Mirrors
+				// the equality rewrite in `try_match_comparison`.
+				let access = if ix_def.cols.len() > 1 {
+					BTreeAccess::Compound {
+						prefix: vec![value.clone()],
+						range: None,
+					}
+				} else {
+					BTreeAccess::Equality(value.clone())
+				};
 				let index_ref = IndexRef::new(Arc::clone(&self.indexes), idx);
-				candidates
-					.push(IndexCandidate::new(index_ref, BTreeAccess::Equality(value.clone())));
+				candidates.push(IndexCandidate::new(index_ref, access));
 			}
 		}
 	}
@@ -1455,7 +1470,7 @@ fn idiom_matches(expr_idiom: &Idiom, index_col: &Idiom) -> bool {
 ///
 /// Only matches when the index column actually contains `Part::All` --
 /// regular scalar indexes are not valid for containment lookups.
-fn idiom_matches_containment(expr_idiom: &Idiom, index_col: &Idiom) -> bool {
+pub(crate) fn idiom_matches_containment(expr_idiom: &Idiom, index_col: &Idiom) -> bool {
 	use crate::expr::Part;
 
 	if !index_col.0.iter().any(|p| matches!(p, Part::All)) {
