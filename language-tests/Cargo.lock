@@ -13,12 +13,11 @@ dependencies = [
 
 [[package]]
 name = "affinitypool"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1246999cbde492ecd2cf27c5b43bd46ca6cbd35f343f65a8a24d0e3d75ff255"
+checksum = "bbd9252b943b2a2ead7bb30ad9b62e6c442688113ceed5fa2c9628e28275e705"
 dependencies = [
- "arc-swap",
- "crossbeam",
+ "async-task",
  "libc",
  "num_cpus",
  "parking_lot",
@@ -252,6 +251,12 @@ dependencies = [
  "quote",
  "syn 2.0.117",
 ]
+
+[[package]]
+name = "async-task"
+version = "4.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b75356056920673b02621b35afd0f7dda9306d03c79a30f5c56c44cf256e3de"
 
 [[package]]
 name = "async-trait"
@@ -868,28 +873,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 
 [[package]]
-name = "crossbeam"
-version = "0.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1137cd7e7fc0fb5d3c5a8678be38ec56e819125d8d7907411fe24ccb943faca8"
-dependencies = [
- "crossbeam-channel",
- "crossbeam-deque",
- "crossbeam-epoch",
- "crossbeam-queue",
- "crossbeam-utils",
-]
-
-[[package]]
-name = "crossbeam-channel"
-version = "0.5.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82b8f8f868b36967f9606790d1903570de9ceaf870a7bf9fbbd3016d636a2cb2"
-dependencies = [
- "crossbeam-utils",
-]
-
-[[package]]
 name = "crossbeam-deque"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1082,9 +1065,9 @@ dependencies = [
 
 [[package]]
 name = "diskann"
-version = "0.51.0"
+version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fcf3192951e5f655f920eb4f12630484c5ea82b7a5ba48ce520ffeb9dfd09fdf"
+checksum = "14f755600588b562720091e462e48440ea32bfe519465470765533bc86c05f39"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1102,9 +1085,9 @@ dependencies = [
 
 [[package]]
 name = "diskann-utils"
-version = "0.51.0"
+version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "438e13c0a900b79103d51ceda2ac6479ed873e206712dbbbdd31853505a64cc1"
+checksum = "8ee26b0559c0b249fb5e26859c7b5607886c2bd0055def1b102e8b912830fba8"
 dependencies = [
  "bytemuck",
  "cfg-if",
@@ -1119,9 +1102,9 @@ dependencies = [
 
 [[package]]
 name = "diskann-vector"
-version = "0.51.0"
+version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54325a752b6d0f2ff3da446883edda3dd181938938d7c7767a6344985fbeb935"
+checksum = "f029366de6314c9e8a294012b0d8f53986c7c8a63a9e09fc18ca39a42ac38a6f"
 dependencies = [
  "cfg-if",
  "diskann-wide",
@@ -1130,9 +1113,9 @@ dependencies = [
 
 [[package]]
 name = "diskann-wide"
-version = "0.51.0"
+version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80a5f129f93b168829fe15ac766f1190369265d12cf0338ea3bfa8387c50e661"
+checksum = "0ae2fe23f8f0fecc81b561a4ff06f7da6fc0e5da355d41b8abcd440ed6f41a0f"
 dependencies = [
  "cfg-if",
  "half",
@@ -1341,9 +1324,9 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "ferntree"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c61e94ab9b1d56c01922863b022039ef2cbb57e9dbf7bf237df5ae1e91b97676"
+checksum = "a1c631d458d3a990f4281cbf6e3d92f7b47ff3935e03841a62aa1100085f11f4"
 dependencies = [
  "bytes",
  "crossbeam-epoch",
@@ -2464,9 +2447,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.185"
+version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52ff2c0fe9bc6cb6b14a0592c2ff4fa9ceb83eea9db979b0487cd054946a2b8f"
+checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libloading"
@@ -4671,9 +4654,9 @@ dependencies = [
 
 [[package]]
 name = "surrealmx"
-version = "0.20.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc91af30db8f7c730025ddc4e487e4bf4aee1c1abbd683bd2076b97ef5e7c8af"
+checksum = "b13327a21d61feb345e74f2cab34c911605d9e3459c79800800843bf3c6b5d4d"
 dependencies = [
  "arc-swap",
  "bincode",

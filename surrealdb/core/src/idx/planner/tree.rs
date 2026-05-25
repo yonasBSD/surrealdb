@@ -8,7 +8,7 @@ use reblessive::tree::Stk;
 use surrealdb_types::ToSql;
 
 use crate::catalog::providers::TableProvider;
-use crate::catalog::{self, DatabaseId, Index, IndexDefinition, IndexId, NamespaceId};
+use crate::catalog::{self, DatabaseId, Index, IndexDefinition, IndexId, NamespaceId, Permission};
 use crate::expr::operator::NearestNeighbor;
 use crate::expr::order::{OrderList, Ordering};
 use crate::expr::visit::MutVisitor;
@@ -88,6 +88,12 @@ struct TreeBuilder<'a> {
 	leaf_nodes_with_index_count: usize,
 	all_and: Option<bool>,
 	all_and_groups: HashMap<GroupRef, bool>,
+	/// Set when planning encounters an idiom that resolves to a field whose
+	/// SELECT permission is not `Full`. Used to disable index fast paths
+	/// (in particular the count-only `Iterate Index Count` and dedicated
+	/// `Index::Count` indexes) that would otherwise leak the cardinality of
+	/// values the current user cannot read.
+	cond_touches_restricted_field: bool,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
@@ -128,6 +134,7 @@ impl<'a> TreeBuilder<'a> {
 			all_and_groups: Default::default(),
 			leaf_nodes_count: 0,
 			leaf_nodes_with_index_count: 0,
+			cond_touches_restricted_field: false,
 		}
 	}
 
@@ -181,6 +188,15 @@ impl<'a> TreeBuilder<'a> {
 	}
 
 	async fn eval_count(&mut self, table: &TableName) -> Result<()> {
+		// SECURITY: a dedicated `Index::Count` index materialises the count
+		// of rows that match its stored condition. If the user's WHERE clause
+		// (which must equal the index's stored condition for the index to be
+		// chosen here) references a field with restrictive SELECT permissions,
+		// returning the materialised count would leak the cardinality of
+		// values the user is not allowed to read.
+		if self.cond_touches_restricted_field {
+			return Ok(());
+		}
 		if let Some(f) = self.ctx.fields
 			&& f.is_count_all_only()
 			&& let Some(g) = self.ctx.group
@@ -345,6 +361,13 @@ impl<'a> TreeBuilder<'a> {
 	async fn resolve_idiom(&mut self, i: &Idiom) -> Result<Node> {
 		let tx = self.ctx.ctx.tx();
 		let schema = self.lazy_load_schema_resolver(&tx, self.table).await?;
+		// SECURITY: record when this idiom is governed by a field with a
+		// non-`Full` SELECT permission so the planner can reject index fast
+		// paths whose stored condition is the user's WHERE clause (e.g. a
+		// dedicated `Index::Count` index).
+		if self.ctx.is_perm && Self::idiom_touches_restricted_field(i, schema.fields.as_ref()) {
+			self.cond_touches_restricted_field = true;
+		}
 		let i = Arc::new(i.clone());
 		// Try to detect if it matches an index
 		let n = {
@@ -377,6 +400,18 @@ impl<'a> TreeBuilder<'a> {
 				continue;
 			}
 			if let Some(idiom_index) = ix.cols.iter().position(|p| p.eq(i)) {
+				// SECURITY: when permissions are being enforced, refuse to use
+				// an index whose columns reference a field with a restrictive
+				// SELECT permission. Otherwise the index-only `Iterate Index
+				// Count` / `Iterate Index Keys` fast paths would short-circuit
+				// the document-level field reduction and let a record user
+				// learn the existence or cardinality of values they are not
+				// allowed to read.
+				if self.ctx.is_perm
+					&& !Self::index_columns_select_full(&ix.cols, schema.fields.as_ref())
+				{
+					continue;
+				}
 				let ixr = schema.new_reference(idx);
 				// Check if the WITH clause allows the index to be used
 				if self.check_allowed_by_with_indexes(&ixr) {
@@ -391,6 +426,33 @@ impl<'a> TreeBuilder<'a> {
 			self.idioms_indexes.insert(t.to_owned(), HashMap::from([(i, irs.clone())]));
 		}
 		irs
+	}
+
+	/// Returns false when any column of `cols` is governed by a field
+	/// definition with a non-`Full` SELECT permission. An ancestor field
+	/// definition (a field whose name is a prefix of the indexed column) also
+	/// governs the column, since reducing the ancestor implicitly reduces all
+	/// of its descendants.
+	fn index_columns_select_full(cols: &[Idiom], fields: &[catalog::FieldDefinition]) -> bool {
+		for col in cols {
+			if Self::idiom_touches_restricted_field(col, fields) {
+				return false;
+			}
+		}
+		true
+	}
+
+	/// Returns true when the idiom (or any of its ancestor field paths) is
+	/// governed by a field definition with a non-`Full` SELECT permission.
+	fn idiom_touches_restricted_field(idiom: &Idiom, fields: &[catalog::FieldDefinition]) -> bool {
+		for field in fields {
+			if idiom.starts_with(field.name.0.as_slice())
+				&& !matches!(field.select_permission, Permission::Full)
+			{
+				return true;
+			}
+		}
+		false
 	}
 
 	/// Check if the index is allowed by the WITH clause

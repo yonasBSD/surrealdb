@@ -694,8 +694,17 @@ impl<'ctx> Planner<'ctx> {
 		// Indexed COUNT fast-path (COUNT with WHERE + matching COUNT index)
 		// Skip when WITH NOINDEX is specified — the user explicitly forbids
 		// index-assisted execution.
+		//
+		// SECURITY: also skip when the WHERE clause references a field whose
+		// SELECT permission is not `Full`. The indexed-count fast paths
+		// (`IndexCountScan` with either a dedicated `Index::Count` or a
+		// covering B-tree access) count index entries directly, bypassing
+		// the document-level field reduction that hides restricted values.
+		// Without this guard, a record user could learn the cardinality of
+		// field values they are not permitted to SELECT.
 		if is_indexed_count_eligible(&fields, &group, &cond, &split, &order, &fetch, &omit, &what)
 			&& !matches!(with, Some(crate::expr::with::With::NoIndex))
+			&& !self.cond_touches_restricted_select_field(&what, &cond).await
 		{
 			// Try COUNT index first, then B-tree index for key-only counting.
 			let has_count_idx = self.has_matching_count_index(&what, &cond).await;
@@ -2106,6 +2115,72 @@ impl<'ctx> Planner<'ctx> {
 		})
 	}
 
+	/// Returns true when permissions are being enforced for this plan AND
+	/// the WHERE clause references a field whose SELECT permission on the
+	/// target table is not `Full`.
+	///
+	/// The indexed COUNT fast paths (`IndexCountScan` over a dedicated
+	/// `Index::Count` or a covering B-tree index) count index entries
+	/// without going through the scan pipeline that applies field-level
+	/// SELECT permissions. If the predicate references a restricted field,
+	/// returning the materialised count leaks the cardinality of values the
+	/// current user is not permitted to read.
+	async fn cond_touches_restricted_select_field(
+		&self,
+		what: &[Expr],
+		cond: &Option<Cond>,
+	) -> bool {
+		let Some(cond) = cond else {
+			return false;
+		};
+		let table_name = match what.first() {
+			Some(Expr::Table(t)) => t,
+			_ => return false,
+		};
+		let (Some(ns_name), Some(db_name)) = (self.ns.as_deref(), self.db.as_deref()) else {
+			// No catalog access at plan time — conservatively assume
+			// permissions could apply.
+			return true;
+		};
+		if !self.should_check_perms_for_view(ns_name, db_name) {
+			return false;
+		}
+		let Some(txn) = self.txn.as_ref() else {
+			return true;
+		};
+		let Some((ns_id, db_id)) = self.ns_db_ids().await else {
+			return true;
+		};
+		let fields = match txn.all_tb_fields(ns_id, db_id, table_name, None).await {
+			Ok(fs) => fs,
+			Err(e) => {
+				tracing::warn!(
+					table = %table_name,
+					error = %e,
+					"plan-time field list failed in cond_touches_restricted_select_field; \
+					 conservatively disabling indexed COUNT fast path",
+				);
+				return true;
+			}
+		};
+		// Collect the field paths that are not unconditionally SELECT-able.
+		let restricted_prefixes: Vec<crate::expr::Idiom> = fields
+			.iter()
+			.filter(|f| !matches!(f.select_permission, crate::catalog::Permission::Full))
+			.map(|f| f.name.clone())
+			.collect();
+		if restricted_prefixes.is_empty() {
+			return false;
+		}
+		let mut checker = RestrictedIdiomChecker {
+			restricted_prefixes: &restricted_prefixes,
+			found: false,
+		};
+		use crate::expr::visit::Visitor;
+		let _ = checker.visit_expr(&cond.0);
+		checker.found
+	}
+
 	/// Resolve a B-tree index access path covering the WHERE condition for
 	/// key-only counting.  Returns `Some((IndexRef, BTreeAccess))` when the
 	/// index analysis finds a B-tree index that fully covers the predicate
@@ -2301,6 +2376,38 @@ impl<'ctx> Planner<'ctx> {
 		// ORDER BY at all.
 
 		Ok(Some((path, direction)))
+	}
+}
+
+/// Visitor that walks a `Cond` expression looking for any idiom governed by
+/// a field path with restrictive SELECT permissions. Stops descending into
+/// nested SELECT subqueries — those operate against their own tables and
+/// will perform their own permission resolution.
+struct RestrictedIdiomChecker<'a> {
+	restricted_prefixes: &'a [Idiom],
+	found: bool,
+}
+
+impl crate::expr::visit::Visitor for RestrictedIdiomChecker<'_> {
+	type Error = std::convert::Infallible;
+
+	fn visit_idiom(&mut self, idiom: &Idiom) -> Result<(), Self::Error> {
+		if self.found {
+			return Ok(());
+		}
+		for prefix in self.restricted_prefixes {
+			if idiom.starts_with(prefix.0.as_slice()) {
+				self.found = true;
+				return Ok(());
+			}
+		}
+		Ok(())
+	}
+
+	fn visit_select(&mut self, _: &crate::expr::SelectStatement) -> Result<(), Self::Error> {
+		// Subqueries are evaluated against their own tables and apply their
+		// own permission resolution at execute time.
+		Ok(())
 	}
 }
 
