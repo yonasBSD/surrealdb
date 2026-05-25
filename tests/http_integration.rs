@@ -2112,6 +2112,122 @@ mod http_integration {
 		Ok(())
 	}
 
+	// Regression: `/key/{table}` POST body must be an inert SurrealQL value
+	// (literal/object/array/`$param`). Earlier the body was passed straight to
+	// `Datastore::execute`, letting an authenticated caller smuggle arbitrary
+	// SurrealQL — including multi-statement scripts or a single executable
+	// form like `CREATE other:1` or `fn::evil()` — through `/key` and bypass
+	// deployments that intentionally enable only the Key route.
+	#[test(tokio::test)]
+	async fn key_endpoint_rejects_executable_body() -> Result<(), Box<dyn std::error::Error>> {
+		let (addr, _server) = common::start_server_with_guests().await.unwrap();
+
+		let mut headers = reqwest::header::HeaderMap::new();
+		let ns = Ulid::new().to_string();
+		let db = Ulid::new().to_string();
+		headers.insert("surreal-ns", ns.parse()?);
+		headers.insert("surreal-db", db.parse()?);
+		headers.insert(header::ACCEPT, "application/json".parse()?);
+		let client = reqwest::Client::builder()
+			.connect_timeout(Duration::from_millis(10))
+			.default_headers(headers)
+			.build()?;
+
+		ensure_namespace_and_database(&client, &addr, &ns, &db).await?;
+
+		// Helper: assert /sql shows the side-effect table has no rows. The
+		// table is expected to be absent entirely (which surfaces as an error
+		// row from `SELECT`); accept that, but reject any result that
+		// actually lists rows.
+		let assert_pwned_empty =
+			async |client: &reqwest::Client| -> Result<(), Box<dyn std::error::Error>> {
+				let res = client
+					.post(format!("http://{addr}/sql"))
+					.basic_auth(USER, Some(PASS))
+					.body("SELECT * FROM pwned")
+					.send()
+					.await?;
+				assert_eq!(res.status(), 200);
+				let body: serde_json::Value = serde_json::from_str(&res.text().await?).unwrap();
+				let result = &body[0]["result"];
+				if let Some(rows) = result.as_array() {
+					assert!(
+						rows.is_empty(),
+						"side-effect table `pwned` should be empty, got: {body}"
+					);
+				}
+				Ok(())
+			};
+
+		// 1. Multi-statement body (the original PoC) is rejected and produces no side effect.
+		{
+			let url = &format!("http://{addr}/key/victim_multi");
+			let res = client
+				.post(url)
+				.basic_auth(USER, Some(PASS))
+				.body("CREATE pwned:1 SET via = 'key_body'; { name: 'legit_payload' }")
+				.send()
+				.await?;
+			assert_ne!(res.status(), 200, "multi-statement body should be rejected");
+			assert_pwned_empty(&client).await?;
+		}
+
+		// 2. A single executable statement (CREATE) is rejected: this is the case that
+		//    `num_statements() == 1` alone would not catch.
+		{
+			let url = &format!("http://{addr}/key/victim_create");
+			let res = client
+				.post(url)
+				.basic_auth(USER, Some(PASS))
+				.body("CREATE pwned:2 SET via = 'key_body_create'")
+				.send()
+				.await?;
+			assert_ne!(res.status(), 200, "single CREATE body should be rejected");
+			assert_pwned_empty(&client).await?;
+		}
+
+		// 3. A single function-call body is rejected even though the function itself is
+		//    side-effect-free; the policy bans the executable shape.
+		{
+			let url = &format!("http://{addr}/key/victim_fn");
+			let res =
+				client.post(url).basic_auth(USER, Some(PASS)).body("time::now()").send().await?;
+			assert_ne!(res.status(), 200, "function-call body should be rejected");
+		}
+
+		// 4. A normal value body still works — the tightened parser must not regress legitimate
+		//    REST usage.
+		{
+			let url = &format!("http://{addr}/key/legit");
+			let res = client
+				.post(url)
+				.basic_auth(USER, Some(PASS))
+				.body(r#"{"name": "ok"}"#)
+				.send()
+				.await?;
+			assert_eq!(res.status(), 200, "value body should be accepted: {}", res.text().await?);
+		}
+
+		// 5. Object with `$param` references from the URL query still works.
+		{
+			let url = &format!("http://{addr}/key/legit_params?age=42");
+			let res = client
+				.post(url)
+				.basic_auth(USER, Some(PASS))
+				.body(r#"{ age: $age }"#)
+				.send()
+				.await?;
+			assert_eq!(
+				res.status(),
+				200,
+				"object-with-param body should be accepted: {}",
+				res.text().await?
+			);
+		}
+
+		Ok(())
+	}
+
 	#[test(tokio::test)]
 	async fn signup_mal() -> Result<(), Box<dyn std::error::Error>> {
 		let (addr, _server) = common::start_server_with_defaults().await.unwrap();

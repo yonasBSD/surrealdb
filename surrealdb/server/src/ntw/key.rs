@@ -75,19 +75,21 @@ async fn execute_and_return(
 	expr: Option<String>,
 ) -> Result<Output, anyhow::Error> {
 	let vars = if let Some(expr) = expr {
-		// SECURITY: only allow a single SurrealQL value expression in the body.
-		// Earlier this path called `Datastore::execute(&expr, ..)` directly on
-		// the raw body, so an authenticated caller could put semicolon-
-		// separated statements in a POST/PUT/PATCH /key body and run arbitrary
-		// SurrealQL ahead of the intended CREATE/UPDATE/UPSERT — bypassing
-		// deployments that intentionally enable only the Key route. Parse the
-		// body first; reject anything that isn't exactly one expression.
+		// SECURITY: only allow a single inert SurrealQL value in the body
+		// (literal/object/array/`$param`, recursively). Earlier this path
+		// called `Datastore::execute(&expr, ..)` directly on the raw body,
+		// so an authenticated caller could put semicolon-separated
+		// statements — or a single executable form like a function call or
+		// a `(CREATE ...)` sub-expression — in a POST/PUT/PATCH /key body
+		// and run arbitrary SurrealQL ahead of the intended
+		// CREATE/UPDATE/UPSERT, bypassing deployments that intentionally
+		// enable only the Key route. Parse the body first and reject
+		// anything that isn't value-shaped.
 		let ast = syn::parse(&expr)
 			.context("Invalid /key request body: expected a single SurrealQL value")?;
-		if ast.num_statements() != 1 {
+		if !ast.is_value_expression() {
 			return Err(anyhow::anyhow!(
-				"Invalid /key request body: expected a single SurrealQL value, got {} statements",
-				ast.num_statements()
+				"Invalid /key request body: expected a single SurrealQL value (literal, object, array, or $param), not a statement or function call"
 			));
 		}
 		let mut value = db.execute(&expr, session, Some(vars.clone())).await?;
