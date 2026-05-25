@@ -1784,8 +1784,25 @@ impl<'ctx> Planner<'ctx> {
 		// active).  CONTAINSALL / ALLINSIDE leaves are NOT stripped
 		// (intersection semantics; see `strip_union_index_conditions`
 		// rustdoc and issue #236).
+		//
+		// SECURITY: stripping is also disabled when the WHERE clause
+		// references a field whose SELECT permission is not `Full`.
+		// `UnionIndexScan` sub-operators run a `ScanPipeline` with no
+		// predicate (the union dedupes/merges and only the outer Filter
+		// re-applies the WHERE). Field-level permissions then wipe the
+		// restricted value from each document before it would have been
+		// matched — but a stripped leaf is never re-evaluated, so the
+		// index entries themselves become a membership oracle for the
+		// hidden value. Leaving the leaf in the residual filter forces
+		// the post-permission recheck and closes that channel.
 		let filter_action = if let Some(c) = cond {
-			match strip_union_index_conditions(c, &paths) {
+			let strip_safe = !self.cond_touches_restricted_select_field_for_table(&table, c).await;
+			let stripped = if strip_safe {
+				strip_union_index_conditions(c, &paths)
+			} else {
+				Some(c.clone())
+			};
+			match stripped {
 				None => FilterAction::FullyConsumed,
 				Some(residual) => FilterAction::Residual(residual),
 			}
@@ -2130,6 +2147,15 @@ impl<'ctx> Planner<'ctx> {
 	/// the WHERE clause references a field whose SELECT permission on the
 	/// target table is not `Full`.
 	///
+	/// Thin convenience wrapper for the indexed COUNT fast-path call site,
+	/// which already has `(&[Expr], &Option<Cond>)` on hand: it extracts
+	/// the target `TableName` from `what`, short-circuits on `None`
+	/// conditions or non-table sources, then delegates to
+	/// [`Self::cond_touches_restricted_select_field_for_table`]. Other
+	/// call sites (e.g. the `UnionIndexScan` planner) that already hold a
+	/// resolved `TableName` and `Cond` should call the `_for_table`
+	/// helper directly.
+	///
 	/// The indexed COUNT fast paths (`IndexCountScan` over a dedicated
 	/// `Index::Count` or a covering B-tree index) count index entries
 	/// without going through the scan pipeline that applies field-level
@@ -2148,6 +2174,21 @@ impl<'ctx> Planner<'ctx> {
 			Some(Expr::Table(t)) => t,
 			_ => return false,
 		};
+		self.cond_touches_restricted_select_field_for_table(table_name, cond).await
+	}
+
+	/// Core of [`Self::cond_touches_restricted_select_field`] that operates
+	/// on an already-resolved table name and condition. Also used by the
+	/// `UnionIndexScan` planner to decide whether
+	/// `strip_union_index_conditions` is safe — the union sub-operators
+	/// don't re-evaluate the WHERE leaf after field-level permissions, so
+	/// stripping a leaf on a restricted field would turn the index entries
+	/// themselves into a membership oracle.
+	async fn cond_touches_restricted_select_field_for_table(
+		&self,
+		table_name: &TableName,
+		cond: &Cond,
+	) -> bool {
 		let (Some(ns_name), Some(db_name)) = (self.ns.as_deref(), self.db.as_deref()) else {
 			// No catalog access at plan time — conservatively assume
 			// permissions could apply.
@@ -2168,8 +2209,9 @@ impl<'ctx> Planner<'ctx> {
 				tracing::warn!(
 					table = %table_name,
 					error = %e,
-					"plan-time field list failed in cond_touches_restricted_select_field; \
-					 conservatively disabling indexed COUNT fast path",
+					"plan-time field list failed in \
+					 cond_touches_restricted_select_field_for_table; \
+					 conservatively disabling index-strip fast paths",
 				);
 				return true;
 			}
