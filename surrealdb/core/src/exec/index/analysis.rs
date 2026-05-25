@@ -136,13 +136,19 @@ impl<'a> IndexAnalyzer<'a> {
 		}
 
 		// A single surviving branch is a degenerate union — return it
-		// directly rather than wrapping in `AccessPath::Union(vec![..])`
+		// directly rather than wrapping in `AccessPath::Union(...)`
 		// (the planner's union dispatch expects ≥ 2 sub-paths).
 		if branch_paths.len() == 1 {
 			return branch_paths.into_iter().next();
 		}
 
-		Some(AccessPath::Union(branch_paths))
+		// OR branches are independent predicates that may both hold
+		// on the same row, so the union can emit the same record
+		// from multiple branches — dedupe required.
+		Some(AccessPath::Union {
+			paths: branch_paths,
+			dedupe: true,
+		})
 	}
 
 	/// Maximum number of array elements to expand for `field IN [...]`.
@@ -256,7 +262,13 @@ impl<'a> IndexAnalyzer<'a> {
 						})
 						.collect()
 				};
-				return Some(AccessPath::Union(paths));
+				// Scalar `IN`-expansion: each row's field value equals
+				// at most one literal, so branches are record-disjoint
+				// — no dedupe needed.
+				return Some(AccessPath::Union {
+					paths,
+					dedupe: false,
+				});
 			}
 		}
 
@@ -327,7 +339,15 @@ impl<'a> IndexAnalyzer<'a> {
 							}
 						})
 						.collect();
-					return Some(AccessPath::Union(paths));
+					// CONTAINS-on-array: a row whose indexed array
+					// contains multiple branch values sits in
+					// multiple branches' prefix ranges.  Dedupe
+					// required to avoid emitting the row twice
+					// through the merge.
+					return Some(AccessPath::Union {
+						paths,
+						dedupe: true,
+					});
 				}
 			}
 		}
@@ -2095,7 +2115,13 @@ mod tests {
 				.try_in_expansion(Some(&cond), crate::idx::planner::ScanDirection::Forward)
 				.expect("IN expansion");
 			match path {
-				AccessPath::Union(paths) => assert_eq!(paths.len(), 3),
+				AccessPath::Union {
+					paths,
+					dedupe,
+				} => {
+					assert_eq!(paths.len(), 3);
+					assert!(!dedupe, "scalar IN-expansion branches are record-disjoint");
+				}
 				other => panic!("expected Union, got {other:?}"),
 			}
 		}
@@ -2119,7 +2145,13 @@ mod tests {
 				.try_in_expansion(Some(&cond), crate::idx::planner::ScanDirection::Forward)
 				.expect("32-element IN expands");
 			match path {
-				AccessPath::Union(paths) => assert_eq!(paths.len(), 32),
+				AccessPath::Union {
+					paths,
+					dedupe,
+				} => {
+					assert_eq!(paths.len(), 32);
+					assert!(!dedupe);
+				}
 				other => panic!("expected Union, got {other:?}"),
 			}
 		}
@@ -2140,7 +2172,13 @@ mod tests {
 				.try_or_union(Some(&cond), crate::idx::planner::ScanDirection::Forward)
 				.expect("union");
 			match path {
-				AccessPath::Union(paths) => assert_eq!(paths.len(), 2),
+				AccessPath::Union {
+					paths,
+					dedupe,
+				} => {
+					assert_eq!(paths.len(), 2);
+					assert!(dedupe, "OR branches may both hold on the same row");
+				}
 				other => panic!("expected Union, got {other:?}"),
 			}
 		}
@@ -2176,7 +2214,9 @@ mod tests {
 					assert_eq!(index_ref.name.as_str(), "ix_b");
 					assert!(matches!(access, BTreeAccess::Equality(_)));
 				}
-				AccessPath::Union(_) => {
+				AccessPath::Union {
+					..
+				} => {
 					panic!("empty branch should have been dropped, leaving a single path")
 				}
 				other => panic!("expected BTreeScan(ix_b), got {other:?}"),

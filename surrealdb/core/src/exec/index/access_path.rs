@@ -111,11 +111,28 @@ pub enum AccessPath {
 		ef: u32,
 	},
 
-	/// Union of multiple index scans for OR conditions.
+	/// Union of multiple index scans (OR-union, scalar IN-expansion,
+	/// or array-containment expansion).
 	///
-	/// Each sub-path handles one branch of the OR; results are
-	/// deduplicated by record ID at execution time.
-	Union(Vec<AccessPath>),
+	/// `dedupe` records whether the analyser's construction can emit
+	/// the same record from more than one branch:
+	///
+	/// - **`true`** — OR-union (independent predicates may both hold on the same row) and
+	///   CONTAINSANY/ANYINSIDE on an array-element index (a row whose indexed array contains
+	///   multiple branch values is in multiple branches' prefix ranges).
+	/// - **`false`** — scalar `IN`-expansion. Each row's field value matches at most one literal,
+	///   so branches are record-disjoint by construction.
+	///
+	/// `plan_union_index_source` reads this flag to choose between
+	/// `MergeMode::ByIndexKey` (no dedupe; cheaper) and
+	/// `MergeMode::ByIndexKeyDedup` (HashSet of record ids) when an
+	/// ordered k-way merge is active.  Sequential and `ById` merge
+	/// modes dedupe unconditionally; the flag is purely the explicit
+	/// contract between the analyser and the union operator.
+	Union {
+		paths: Vec<AccessPath>,
+		dedupe: bool,
+	},
 }
 
 impl AccessPath {

@@ -1333,11 +1333,15 @@ impl<'ctx> Planner<'ctx> {
 							)
 							.await;
 					}
-					AccessPath::Union(paths) => {
+					AccessPath::Union {
+						paths,
+						dedupe,
+					} => {
 						return self
 							.plan_union_index_source(
 								table,
 								paths,
+								dedupe,
 								order,
 								scan_limit,
 								cond,
@@ -1667,14 +1671,21 @@ impl<'ctx> Planner<'ctx> {
 	}
 
 	/// Build a `UnionIndexScan` for [`AccessPath::Union`] — one
-	/// sub-operator per OR branch. When every sub-path is an equality
-	/// B-tree scan and ORDER BY is `id ASC/DESC` only, enables k-way
-	/// merge-by-id so the Sort operator can be eliminated.
+	/// sub-operator per OR branch (or per IN-expansion / containment
+	/// branch).  When every sub-path is an equality B-tree scan and
+	/// ORDER BY is `id ASC/DESC` only, enables k-way merge-by-id so the
+	/// Sort operator can be eliminated.
+	///
+	/// `dedupe` records whether branches can overlap on the same record
+	/// — see [`AccessPath::Union`] for the contract. Drives the
+	/// `ByIndexKey` vs `ByIndexKeyDedup` merge-mode selection when an
+	/// ordered k-way merge is active.
 	#[allow(clippy::too_many_arguments)]
 	async fn plan_union_index_source(
 		&self,
 		table: crate::val::TableName,
 		paths: Vec<AccessPath>,
+		dedupe: bool,
 		order: Option<&crate::expr::order::Ordering>,
 		scan_limit: Option<Arc<dyn crate::exec::PhysicalExpr>>,
 		cond: Option<&Cond>,
@@ -1739,33 +1750,11 @@ impl<'ctx> Planner<'ctx> {
 			paths
 		};
 
-		// Detect whether the union came from `try_containment_expansion`
-		// (vs. `try_in_expansion`) by inspecting whether the leading
-		// index column is an array-element flatten (`Part::All`).
-		// Containment unions can have overlapping branches — a single
-		// row whose array contains multiple matching values appears in
-		// multiple branches' prefix ranges — so the merge must dedupe
-		// by record ID. Scalar `IN`-expansion can't produce overlapping
-		// branches (each row's scalar value matches at most one branch).
-		//
-		// TODO: this is an implicit handshake with the analyser — a
-		// future code path that emits non-containment `Compound`
-		// branches against a `Part::All` column would silently flip
-		// dedupe on.  Promote `AccessPath::Union` to carry an explicit
-		// `dedupe: bool` (set in `try_containment_expansion`) so the
-		// contract is local to the analyser/operator pair.
-		let is_containment_union = paths.iter().any(|p| match p {
-			AccessPath::BTreeScan {
-				index_ref,
-				..
-			} => index_ref
-				.definition()
-				.cols
-				.first()
-				.map(|c| c.0.iter().any(|p| matches!(p, crate::expr::Part::All)))
-				.unwrap_or(false),
-			_ => false,
-		});
+		// `dedupe` is the explicit contract set by the analyser: `true`
+		// for OR-union and CONTAINS-on-array (branches can overlap on
+		// the same record), `false` for scalar `IN`-expansion (each
+		// row's field equals at most one literal). Drives the merge
+		// variant choice below.
 
 		// When merge mode is active and a downstream LIMIT exists, pass
 		// it as a batch-ceiling hint to each sub-scan so the merge
@@ -1831,9 +1820,9 @@ impl<'ctx> Planner<'ctx> {
 			union_scan = union_scan.with_merge_by_id(dir);
 		} else if let Some((path, dir)) = merge_by_index_key {
 			// Composite-index k-way merge by the indexed sort column.
-			// Use the deduping variant when branches can overlap (see
-			// `is_containment_union` above).
-			if is_containment_union {
+			// Use the deduping variant when the analyser flagged
+			// branches as overlap-prone (see `AccessPath::Union::dedupe`).
+			if dedupe {
 				union_scan = union_scan.with_merge_by_index_key_dedup(path, dir);
 			} else {
 				union_scan = union_scan.with_merge_by_index_key(path, dir);

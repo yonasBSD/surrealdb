@@ -712,7 +712,15 @@ async fn resolve_table_scan_stream(
 
 		// Multi-index union for OR conditions — delegate to UnionIndexScan.
 		// Permission handling is done by DynamicScan's ScanPipeline above.
-		Some(AccessPath::Union(paths)) => {
+		// The `dedupe` flag is informational here: this fallback path uses
+		// the operator's default no-merge sequential mode, which already
+		// dedupes by record id via a HashSet. The flag would matter if a
+		// future `MergeMode::ByIndexKey{,Dedup}` were wired into this
+		// fallback — see [`AccessPath::Union`].
+		Some(AccessPath::Union {
+			paths,
+			dedupe: _,
+		}) => {
 			let mut sub_operators: Vec<Arc<dyn ExecOperator>> = Vec::with_capacity(paths.len());
 			for path in paths {
 				sub_operators.push(create_index_operator(&path, &cfg, resolved_cond.as_ref()));
@@ -813,7 +821,10 @@ fn create_index_operator(
 		// TableScan and nested Union should not appear as sub-paths.
 		// Fall back to a table scan operator which will produce all
 		// records (safe but sub-optimal).
-		AccessPath::TableScan | AccessPath::Union(_) => Arc::new(super::TableScan::new(
+		AccessPath::TableScan
+		| AccessPath::Union {
+			..
+		} => Arc::new(super::TableScan::new(
 			cfg.table_name.clone(),
 			cfg.direction,
 			None,
