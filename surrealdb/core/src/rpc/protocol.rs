@@ -443,6 +443,16 @@ pub trait RpcProtocol {
 				}
 			}
 		} else {
+			// SECURITY: SDKs commonly call `use` before `signin`, so we
+			// set the session context even when the caller cannot
+			// authorize the implicit `DEFINE NAMESPACE` /
+			// `DEFINE DATABASE`-equivalent creation. The auto-creation
+			// itself is gated on that authorization; downstream
+			// operations against a non-existent namespace surface a
+			// clean `NsNotFound` rather than a silently auto-created
+			// resource that the session was never allowed to create.
+			// See `SECURITY_GUIDE.md` section 3.
+			//
 			// Update the selected namespace
 			match ns {
 				PublicValue::None => (),
@@ -453,7 +463,16 @@ pub trait RpcProtocol {
 						.transaction(TransactionType::Write, LockType::Optimistic)
 						.await
 						.map_err(types_error_from_anyhow)?;
-					run!(tx, tx.get_or_add_ns(None, &ns).await).map_err(types_error_from_anyhow)?;
+					let create = kvs
+						.should_materialize_ns_on_use(&tx, session.au.as_ref(), &ns)
+						.await
+						.map_err(types_error_from_anyhow)?;
+					if create {
+						run!(tx, tx.get_or_add_ns(None, &ns).await)
+							.map_err(types_error_from_anyhow)?;
+					} else {
+						let _ = tx.cancel().await;
+					}
 					session.ns = Some(ns)
 				}
 				unexpected => {
@@ -477,13 +496,21 @@ pub trait RpcProtocol {
 							"Cannot set database without first selecting a namespace".to_string(),
 						));
 					};
-					let tx = self
-						.kvs()
+					let kvs = self.kvs();
+					let tx = kvs
 						.transaction(TransactionType::Write, LockType::Optimistic)
 						.await
 						.map_err(types_error_from_anyhow)?;
-					run!(tx, tx.ensure_ns_db(None, &ns, &db).await)
+					let create = kvs
+						.should_materialize_db_on_use(&tx, session.au.as_ref(), &ns, &db)
+						.await
 						.map_err(types_error_from_anyhow)?;
+					if create {
+						run!(tx, tx.ensure_ns_db(None, &ns, &db).await)
+							.map_err(types_error_from_anyhow)?;
+					} else {
+						let _ = tx.cancel().await;
+					}
 					session.db = Some(db)
 				}
 				unexpected => {

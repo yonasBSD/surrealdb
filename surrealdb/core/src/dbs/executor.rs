@@ -14,7 +14,9 @@ use tracing::instrument;
 use wasm_bindgen_futures::spawn_local as spawn;
 use web_time::Instant;
 
-use crate::catalog::providers::{CatalogProvider, NamespaceProvider, RootProvider};
+use crate::catalog::providers::{
+	CatalogProvider, DatabaseProvider, NamespaceProvider, RootProvider,
+};
 use crate::ctx::reason::Reason;
 use crate::ctx::{Context, FrozenContext};
 use crate::dbs::response::QueryResult;
@@ -526,20 +528,29 @@ impl Executor {
 		let exec_ctx = match required_level {
 			crate::exec::context::ContextLevel::Root => ExecutionContext::Root(root_ctx),
 			crate::exec::context::ContextLevel::Namespace => {
-				// Get namespace definition
+				// Get namespace definition. SECURITY: `USE` no longer
+				// implicitly creates namespaces for sessions without
+				// `DEFINE NAMESPACE`-equivalent authorization, so the
+				// planner must not paper over a missing target by writing
+				// a fresh namespace into the catalog on the read path
+				// (which would also fail on a read-only transaction).
+				// `expect_ns_by_name` surfaces a clean `NsNotFound`
+				// instead.
 				let ns_name = self.opt.ns()?;
-				let ns_def = txn.get_or_add_ns(None, ns_name).await?;
+				let ns_def = txn.expect_ns_by_name(ns_name).await?;
 				ExecutionContext::Namespace(NamespaceContext {
 					root: root_ctx,
 					ns: ns_def,
 				})
 			}
 			crate::exec::context::ContextLevel::Database => {
-				// Get namespace and database definitions
+				// Get namespace and database definitions. See the
+				// `Namespace` arm above for why this no longer
+				// auto-creates the target through the planner.
 				let ns_name = self.opt.ns()?;
 				let db_name = self.opt.db()?;
-				let ns_def = txn.get_or_add_ns(None, ns_name).await?;
-				let db_def = txn.get_or_add_db_upwards(None, ns_name, db_name, true).await?;
+				let ns_def = txn.expect_ns_by_name(ns_name).await?;
+				let db_def = txn.expect_db_by_name(ns_name, db_name).await?;
 				ExecutionContext::Database(DatabaseContext {
 					ns_ctx: NamespaceContext {
 						root: root_ctx,
@@ -684,11 +695,75 @@ impl Executor {
 					}
 				};
 
+				// SECURITY: implicit creation of a namespace or database via
+				// `USE` requires the same authorization as the explicit
+				// `DEFINE NAMESPACE` / `DEFINE DATABASE` statements
+				// (SECURITY_GUIDE section 3). Re-selecting an existing
+				// namespace or database is unrestricted; downstream
+				// operations against a non-existent resource surface
+				// `NsNotFound` / `DbNotFound` naturally rather than a
+				// silently auto-created resource the session was never
+				// allowed to create.
+				let create_ns = if let Some(ns_name) = use_ns.as_deref() {
+					if txn.get_ns_by_name(ns_name, None).await?.is_some()
+						|| (!self.ctx.auth_enabled() && self.opt.auth.is_anon())
+					{
+						true
+					} else {
+						self.opt
+							.auth
+							.is_allowed(Action::Edit, &ResourceKind::Namespace.on_root())
+							.is_ok()
+					}
+				} else {
+					false
+				};
+				let create_db = if let Some(db_name) = use_db.as_deref() {
+					let target_ns = use_ns.as_deref().or(self.opt.ns.as_deref());
+					if let Some(ns_name) = target_ns {
+						if txn.get_db_by_name(ns_name, db_name, None).await?.is_some()
+							|| (!self.ctx.auth_enabled() && self.opt.auth.is_anon())
+						{
+							true
+						} else if txn.get_ns_by_name(ns_name, None).await?.is_none()
+							&& self
+								.opt
+								.auth
+								.is_allowed(Action::Edit, &ResourceKind::Namespace.on_root())
+								.is_err()
+						{
+							// SECURITY: `ensure_ns_db` is
+							// `get_or_add_db_upwards(..., upwards = true)`
+							// and silently `get_or_add_ns`-es a missing
+							// parent (see `kvs/tx.rs::get_or_add_db_upwards`).
+							// Without this gate, a namespace-level Editor —
+							// including one on a stale token whose
+							// namespace has since been dropped — could
+							// recreate the parent namespace as a side
+							// effect of `USE NS dropped DB anything` or
+							// `USE DB anything` against a stale
+							// session-level ns.
+							false
+						} else {
+							self.opt
+								.auth
+								.is_allowed(Action::Edit, &ResourceKind::Database.on_ns(ns_name))
+								.is_ok()
+						}
+					} else {
+						false
+					}
+				} else {
+					false
+				};
+
 				let ctx = ctx_mut!();
 
 				// Apply new namespace
 				if let Some(ns) = use_ns {
-					txn.get_or_add_ns(Some(ctx), &ns).await?;
+					if create_ns {
+						txn.get_or_add_ns(Some(ctx), &ns).await?;
+					}
 
 					let mut session = ctx.value("session").unwrap_or(&Value::None).clone();
 					self.opt.set_ns(Some(ns.as_str().into()));
@@ -704,7 +779,9 @@ impl Executor {
 						)));
 					};
 
-					txn.ensure_ns_db(Some(ctx), ns, &db).await?;
+					if create_db {
+						txn.ensure_ns_db(Some(ctx), ns, &db).await?;
+					}
 
 					let mut session = ctx.value("session").unwrap_or(&Value::None).clone();
 					self.opt.set_db(Some(db.as_str().into()));

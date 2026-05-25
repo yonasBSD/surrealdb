@@ -3351,6 +3351,67 @@ impl Datastore {
 		}
 	}
 
+	/// SECURITY: `USE NS` implicitly creates the namespace when it does
+	/// not exist. `DEFINE NAMESPACE` requires `Edit` on `Namespace`@`Root`,
+	/// so the same authorization must gate the materialization step in
+	/// `USE`. Returns `true` if the caller may proceed with
+	/// `get_or_add_ns` — either because the namespace already exists
+	/// (in which case the call is a no-op lookup) or because the caller
+	/// has the necessary authorization. Returns `false` when the
+	/// namespace does not exist *and* the caller lacks permission;
+	/// callers that still want to set the session context for a later
+	/// authenticated step (the typical pre-signin RPC `USE` pattern)
+	/// can do so without triggering creation. See `SECURITY_GUIDE.md`
+	/// section 3.
+	pub(crate) async fn should_materialize_ns_on_use(
+		&self,
+		tx: &Transaction,
+		auth: &Auth,
+		ns: &str,
+	) -> Result<bool> {
+		if tx.get_ns_by_name(ns, None).await?.is_some() {
+			return Ok(true);
+		}
+		if !self.auth_enabled && auth.is_anon() {
+			return Ok(true);
+		}
+		Ok(auth.is_allowed(Action::Edit, &ResourceKind::Namespace.on_root()).is_ok())
+	}
+
+	/// SECURITY: counterpart to [`Self::should_materialize_ns_on_use`]
+	/// for the database half of `USE`. Implicit creation requires the
+	/// same authorization as `DEFINE DATABASE` (`Edit` on `Database`@`Ns`),
+	/// AND the parent namespace must already exist or the caller must
+	/// also be authorized to create it — `ensure_ns_db` is
+	/// `get_or_add_db_upwards(..., upwards = true)` and will silently
+	/// `get_or_add_ns` the parent when it is missing
+	/// (`kvs/tx.rs::get_or_add_db_upwards`). Without the second check a
+	/// namespace-level Editor on a stale token (the namespace was
+	/// dropped after the token was issued) could recreate the parent
+	/// namespace as a side effect of `USE NS dropped DB anything`.
+	pub(crate) async fn should_materialize_db_on_use(
+		&self,
+		tx: &Transaction,
+		auth: &Auth,
+		ns: &str,
+		db: &str,
+	) -> Result<bool> {
+		if tx.get_db_by_name(ns, db, None).await?.is_some() {
+			return Ok(true);
+		}
+		if !self.auth_enabled && auth.is_anon() {
+			return Ok(true);
+		}
+		// Block the upwards-create side effect: if the parent namespace
+		// is missing and the caller can't create namespaces, refuse.
+		if tx.get_ns_by_name(ns, None).await?.is_none()
+			&& auth.is_allowed(Action::Edit, &ResourceKind::Namespace.on_root()).is_err()
+		{
+			return Ok(false);
+		}
+		Ok(auth.is_allowed(Action::Edit, &ResourceKind::Database.on_ns(ns)).is_ok())
+	}
+
 	pub async fn process_use(
 		&self,
 		ctx: Option<&Context>,
@@ -3368,22 +3429,54 @@ impl Datastore {
 		};
 
 		let query_result = QueryResultBuilder::started_now();
+		// SECURITY: `process_use` may be called before the caller has
+		// authenticated (e.g. SDKs that call `use` before `signin`). To
+		// preserve that pattern without re-opening the bypass that this
+		// guard closes, we set the session context but only commit
+		// implicit `DEFINE NAMESPACE` / `DEFINE DATABASE`-equivalent
+		// creation when the caller has authorization for it. Callers
+		// without permission end up with a session that targets a
+		// resource that may not exist; downstream operations surface a
+		// clean `NsNotFound` / `DbNotFound` rather than a silently
+		// auto-created namespace they should not have been able to
+		// create. See `SECURITY_GUIDE.md` section 3.
+		let map_internal = |err: anyhow::Error| TypesError::internal(err.to_string());
 		match (namespace, database) {
 			(Some(ns), Some(db)) => {
 				let tx = new_tx().await?;
-				tx.ensure_ns_db(ctx, &ns, &db)
+				let create_ns = self
+					.should_materialize_ns_on_use(&tx, &session.au, &ns)
 					.await
-					.map_err(|err| TypesError::internal(err.to_string()))?;
-				commit_tx(tx).await?;
+					.map_err(map_internal)?;
+				let create_db = create_ns
+					&& self
+						.should_materialize_db_on_use(&tx, &session.au, &ns, &db)
+						.await
+						.map_err(map_internal)?;
+				if create_db {
+					tx.ensure_ns_db(ctx, &ns, &db).await.map_err(map_internal)?;
+					commit_tx(tx).await?;
+				} else if create_ns {
+					tx.get_or_add_ns(ctx, &ns).await.map_err(map_internal)?;
+					commit_tx(tx).await?;
+				} else {
+					let _ = tx.cancel().await;
+				}
 				session.ns = Some(ns);
 				session.db = Some(db);
 			}
 			(Some(ns), None) => {
 				let tx = new_tx().await?;
-				tx.get_or_add_ns(ctx, &ns)
+				let create_ns = self
+					.should_materialize_ns_on_use(&tx, &session.au, &ns)
 					.await
-					.map_err(|err| TypesError::internal(err.to_string()))?;
-				commit_tx(tx).await?;
+					.map_err(map_internal)?;
+				if create_ns {
+					tx.get_or_add_ns(ctx, &ns).await.map_err(map_internal)?;
+					commit_tx(tx).await?;
+				} else {
+					let _ = tx.cancel().await;
+				}
 				session.ns = Some(ns);
 			}
 			(None, Some(db)) => {
@@ -3394,10 +3487,16 @@ impl Datastore {
 					));
 				};
 				let tx = new_tx().await?;
-				tx.ensure_ns_db(ctx, &ns, &db)
+				let create_db = self
+					.should_materialize_db_on_use(&tx, &session.au, &ns, &db)
 					.await
-					.map_err(|err| TypesError::internal(err.to_string()))?;
-				commit_tx(tx).await?;
+					.map_err(map_internal)?;
+				if create_db {
+					tx.ensure_ns_db(ctx, &ns, &db).await.map_err(map_internal)?;
+					commit_tx(tx).await?;
+				} else {
+					let _ = tx.cancel().await;
+				}
 				session.db = Some(db);
 			}
 			(None, None) => {
