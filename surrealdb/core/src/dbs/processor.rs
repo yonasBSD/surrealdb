@@ -196,9 +196,18 @@ impl Collectable {
 		// vertex table stored in doc_ctx (e.g. edge tables during cascade delete).
 		// Rebuild the context so downstream processing (events, views, lives,
 		// changefeeds, field validation) uses the correct table definition.
+		//
+		// SECURITY: when the surrounding statement carries a VERSION clause
+		// (`opt.version = Some(_)`), fetch the table definition AT that
+		// version. The table's SELECT permissions are taken from the
+		// resulting `TableDefinition`, so reading the current-catalog
+		// definition would apply the present-day permission clause to a
+		// historical query — bypassing any row-level WHERE that was in
+		// force when the version was captured.
 		if ft != doc_ctx.tb()?.name {
-			let tb =
-				txn.get_or_add_tb(None, &doc_ctx.ns().name, &doc_ctx.db().name, &ft, None).await?;
+			let tb = txn
+				.get_or_add_tb(None, &doc_ctx.ns().name, &doc_ctx.db().name, &ft, opt.version)
+				.await?;
 			let parent = NsDbCtx {
 				ns: Arc::clone(doc_ctx.ns()),
 				db: Arc::clone(doc_ctx.db()),

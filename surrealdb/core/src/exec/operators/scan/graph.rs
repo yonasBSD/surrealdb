@@ -9,14 +9,15 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 
-use super::common::{evaluate_bound_key, extract_record_ids_into, resolve_record_batch};
+use super::common::{
+	evaluate_bound_key, extract_record_ids_into, resolve_record_batch, resolve_version_stamp,
+};
 use crate::catalog::{DatabaseId, NamespaceId};
 use crate::exec::parts::LookupDirection;
 use crate::exec::permission::{PhysicalPermission, should_check_perms};
 use crate::exec::{
-	AccessMode, ContextLevel, ControlFlowExt, EvalContext, ExecOperator, ExecutionContext,
-	FlowResult, OperatorMetrics, PhysicalExpr, ValueBatch, ValueBatchStream, buffer_stream,
-	monitor_stream,
+	AccessMode, ContextLevel, ControlFlowExt, ExecOperator, ExecutionContext, FlowResult,
+	OperatorMetrics, PhysicalExpr, ValueBatch, ValueBatchStream, buffer_stream, monitor_stream,
 };
 use crate::expr::{ControlFlow, Dir};
 use crate::iam::Action;
@@ -226,18 +227,7 @@ impl ExecOperator for GraphEdgeScan {
 				PhysicalPermission,
 			> = std::collections::HashMap::new();
 
-			let version: Option<u64> = match &version_expr {
-				Some(expr) => {
-					let eval_ctx = EvalContext::from_exec_ctx(&ctx);
-					let v = expr.evaluate(eval_ctx).await?;
-					Some(
-						v.cast_to::<crate::val::Datetime>()
-							.map_err(|e| anyhow::anyhow!("{e}"))?
-							.to_version_stamp(txn.timestamp_impl().as_ref())?,
-					)
-				}
-				None => ctx.version_stamp(),
-			};
+			let version: Option<u64> = resolve_version_stamp(&ctx, version_expr.as_ref()).await?;
 
 			// Determine the directions to scan
 			// Note: For Both, we scan In first then Out to match legacy executor behavior

@@ -164,8 +164,11 @@ impl Document {
 	/// only the first key in the graph edge range. If no edges are found, the DELETE
 	/// statement is skipped entirely, avoiding unnecessary overhead.
 	///
-	/// This function runs with permissions disabled to ensure cascading deletes can
-	/// complete regardless of user permissions on the connected records.
+	/// The cascade runs with the caller's permissions so that an edge table's
+	/// `PERMISSIONS FOR delete` clause cannot be bypassed by deleting one of its
+	/// endpoint vertices. Edges the caller is not allowed to delete are left in
+	/// place, matching the outcome of a direct `DELETE edge:id` denied by the
+	/// same clause.
 	async fn purge_edges(
 		&self,
 		stk: &mut Stk,
@@ -202,8 +205,13 @@ impl Document {
 				]))],
 				..Default::default()
 			};
-			// Execute the delete statement
-			stm.compute(stk, ctx, &opt.clone().with_perms(false), None).await?;
+			// Execute the delete statement. We deliberately do NOT disable
+			// permissions here: an edge table's `PERMISSIONS FOR delete`
+			// clause must still apply even when the cascade is triggered by
+			// deleting one of the endpoint vertices, otherwise an actor with
+			// vertex-delete permission could erase edges they are not
+			// allowed to remove directly.
+			stm.compute(stk, ctx, opt, None).await?;
 		}
 		// Carry on
 		Ok(())

@@ -72,6 +72,47 @@ pub(crate) async fn evaluate_bound_key(
 	Ok(value_to_record_id_key(val))
 }
 
+/// Resolve the VERSION timestamp for a scan operator.
+///
+/// `version_expr` on a scan operator is the SELECT statement's VERSION
+/// clause (propagated by the planner). The planner also wraps every
+/// VERSION-bearing SELECT in a [`crate::exec::operators::version_scope::VersionScope`]
+/// that evaluates the expression once in the *unversioned* outer
+/// context and sets the resulting timestamp on
+/// [`ExecutionContext::version_stamp`] before delegating to the inner
+/// operator tree.
+///
+/// This helper prefers that already-resolved stamp and only falls back
+/// to evaluating `version_expr` when no enclosing `VersionScope` was
+/// inserted. Re-evaluating the expression inside the scan would run
+/// under the just-set `version_stamp`, which can change how nested
+/// lookups resolve. The motivating case: a `DEFINE PARAM $hist VALUE
+/// time::now() PERMISSIONS FULL` followed by `SELECT … VERSION $hist`.
+/// The param's storage revision is strictly after the `time::now()`
+/// snapshot it stores, so `txn.get_db_param(..., version_stamp=$hist)`
+/// from the re-evaluation can't find the param at that version, falls
+/// back to `Value::None`, and the subsequent cast to `Datetime` fails
+/// even though `VersionScope`'s unversioned evaluation already produced
+/// the right timestamp.
+pub(crate) async fn resolve_version_stamp(
+	ctx: &ExecutionContext,
+	version_expr: Option<&Arc<dyn PhysicalExpr>>,
+) -> Result<Option<u64>, ControlFlow> {
+	if let Some(stamp) = ctx.version_stamp() {
+		return Ok(Some(stamp));
+	}
+	let Some(expr) = version_expr else {
+		return Ok(None);
+	};
+	let eval_ctx = EvalContext::from_exec_ctx(ctx);
+	let v = expr.evaluate(eval_ctx).await?;
+	let stamp = v
+		.cast_to::<crate::val::Datetime>()
+		.map_err(|e| anyhow::anyhow!("{e}"))?
+		.to_version_stamp(ctx.txn().timestamp_impl().as_ref())?;
+	Ok(Some(stamp))
+}
+
 /// Resolve a batch of [`RecordId`]s into output values, applying each
 /// record's table-level SELECT permission.
 ///

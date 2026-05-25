@@ -10,6 +10,7 @@ use std::sync::Arc;
 use futures::StreamExt;
 use tracing::instrument;
 
+use super::common::resolve_version_stamp;
 use super::pipeline::{
 	ScanPipeline, build_field_state, filter_and_process_batch, kv_scan_stream, range_end_key,
 	range_start_key,
@@ -196,19 +197,10 @@ impl ExecOperator for RecordIdScan {
 				}
 			};
 
-			// 2. Evaluate VERSION expression to a timestamp
-			let version: Option<u64> = match &version_expr {
-				Some(expr) => {
-					let eval_ctx = EvalContext::from_exec_ctx(&ctx);
-					let v = expr.evaluate(eval_ctx).await?;
-					Some(
-						v.cast_to::<crate::val::Datetime>()
-							.map_err(|e| anyhow::anyhow!("{e}"))?
-							.to_version_stamp(ctx.txn().timestamp_impl().as_ref())?,
-					)
-				}
-				None => ctx.version_stamp(),
-			};
+			// 2. Resolve VERSION timestamp; see [`resolve_version_stamp`]
+			//    for why we prefer the stamp already set by the enclosing
+			//    `VersionScope` over re-evaluating `version_expr` here.
+			let version: Option<u64> = resolve_version_stamp(&ctx, version_expr.as_ref()).await?;
 
 			// 3. Delegate to the shared lookup helper
 			let results = execute_record_lookup(

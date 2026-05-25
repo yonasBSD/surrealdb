@@ -426,6 +426,18 @@ impl<'ctx> Planner<'ctx> {
 			(LookupKind::Graph(d1), LookupKind::Graph(d2)) if d1 == d2 => d1,
 			_ => return Ok(None),
 		};
+		// SECURITY: time-travel queries (`VERSION <ts>`) must enforce the
+		// edge table's SELECT permissions as they stood at the requested
+		// version, not the current catalog. The eligibility check below
+		// inspects the *current* `Permission::Full` state, so a query that
+		// targets a historical version where the edge had a row-level WHERE
+		// could be admitted to the fast path -- which then skips the edge
+		// record entirely and bypasses that WHERE. Always take the slow
+		// path when a VERSION expression is present so the historical
+		// permission gate is honoured.
+		if self.version.is_some() {
+			return Ok(None);
+		}
 		// Bidirectional (`<->`) traversal has the slow path scan the edge's
 		// own adjacency in *both* directions on the second hop, so each
 		// edge contributes both endpoint vertices to the result -- the

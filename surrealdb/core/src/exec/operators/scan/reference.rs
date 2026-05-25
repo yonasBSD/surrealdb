@@ -9,13 +9,14 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 
-use super::common::{evaluate_bound_key, extract_record_ids_into, resolve_record_batch};
+use super::common::{
+	evaluate_bound_key, extract_record_ids_into, resolve_record_batch, resolve_version_stamp,
+};
 use crate::catalog::{DatabaseId, NamespaceId};
 use crate::exec::permission::{PhysicalPermission, should_check_perms};
 use crate::exec::{
-	AccessMode, ContextLevel, ControlFlowExt, EvalContext, ExecOperator, ExecutionContext,
-	FlowResult, OperatorMetrics, PhysicalExpr, ValueBatch, ValueBatchStream, buffer_stream,
-	monitor_stream,
+	AccessMode, ContextLevel, ControlFlowExt, ExecOperator, ExecutionContext, FlowResult,
+	OperatorMetrics, PhysicalExpr, ValueBatch, ValueBatchStream, buffer_stream, monitor_stream,
 };
 use crate::expr::ControlFlow;
 use crate::iam::Action;
@@ -175,18 +176,10 @@ impl ExecOperator for ReferenceScan {
 				PhysicalPermission,
 			> = std::collections::HashMap::new();
 
-			let version: Option<u64> = match &version_expr {
-				Some(expr) => {
-					let eval_ctx = EvalContext::from_exec_ctx(&ctx);
-					let v = expr.evaluate(eval_ctx).await?;
-					Some(
-						v.cast_to::<crate::val::Datetime>()
-							.map_err(|e| anyhow::anyhow!("{e}"))?
-							.to_version_stamp(txn.timestamp_impl().as_ref())?,
-					)
-				}
-				None => ctx.version_stamp(),
-			};
+			// Resolve VERSION timestamp; see [`resolve_version_stamp`] for
+			// why we prefer the stamp already set by the enclosing
+			// `VersionScope` over re-evaluating `version_expr` here.
+			let version: Option<u64> = resolve_version_stamp(&ctx, version_expr.as_ref()).await?;
 
 			// Read from the child operator stream and extract RecordIds
 			futures::pin_mut!(input_stream);

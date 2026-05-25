@@ -750,6 +750,16 @@ impl<'ctx> Planner<'ctx> {
 		}
 
 		// Fast path: SELECT [*|fields] FROM <literal RecordId>
+		//
+		// This fast path plans projections through `self.plan_projections`
+		// on the outer planner, which has no `version` field set. Idiom-side
+		// optimisations that depend on the enclosing VERSION (notably
+		// [`try_fast_path_pair`], which intentionally declines the
+		// TargetVertex collapse for versioned queries to avoid bypassing
+		// historical edge SELECT permissions) would silently miss the
+		// version flag here. Fall through to the main pipeline when a
+		// VERSION expression is present so idiom planning runs on a
+		// version-aware inner planner.
 		if what.len() == 1
 			&& matches!(&what[0], Expr::Literal(Literal::RecordId(_)))
 			&& cond.is_none()
@@ -758,6 +768,7 @@ impl<'ctx> Planner<'ctx> {
 			&& split.is_none()
 			&& fetch.is_none()
 			&& with.is_none()
+			&& version.is_none()
 		{
 			let needed_fields = Self::extract_needed_fields(
 				&fields,
