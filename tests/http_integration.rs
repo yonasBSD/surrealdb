@@ -1157,8 +1157,8 @@ mod http_integration {
 				.send()
 				.await?;
 			assert_eq!(res.status(), 200);
-			let res = res.bytes().await?.to_vec();
-			let _: ciborium::Value = ciborium::from_reader(res.as_slice()).unwrap();
+			let bytes = res.bytes().await?;
+			let _: ciborium::Value = ciborium::from_reader(&*bytes).unwrap();
 		}
 
 		// Creating a record with Accept Surrealdb encoding is allowed
@@ -1171,8 +1171,17 @@ mod http_integration {
 				.send()
 				.await?;
 			assert_eq!(res.status(), 200);
-
-			// TODO: parse the result
+			let bytes = res.bytes().await?;
+			let value: surrealdb_types::Value =
+				surrealdb_core::rpc::format::flatbuffers::decode(&bytes)
+					.expect("flatbuffers SQL response should decode to Value");
+			let array = value.into_array().unwrap();
+			assert_eq!(array.len(), 1);
+			let result = array.into_iter().next().unwrap().into_object().unwrap();
+			assert_eq!(
+				result.get("status"),
+				Some(&surrealdb_types::Value::String("OK".to_string()))
+			);
 		}
 
 		// Creating a record with an unsupported Accept header, returns a 415
