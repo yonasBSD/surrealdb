@@ -310,7 +310,9 @@ fn extract_table_and_rid_key(
 		Value::Uuid(id) => Some(id.into()),
 		// There is a record id defined
 		Value::RecordId(id) => {
-			// TODO: Perhaps check if the table in the RID matches the table we're inserting into.
+			// The RID's table is intentionally discarded in favour of the `INTO`
+			// clause: this is what lets `INSERT INTO other (SELECT * FROM test)`
+			// migrate records from `test:*` to `other:*` while preserving keys.
 			Some(id.key)
 		}
 		// There is no record id field

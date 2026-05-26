@@ -370,7 +370,6 @@ impl Parser<'_> {
 	}
 
 	fn expr_is_range(expr: &Expr) -> bool {
-		//TODO(EXPR): Prefix and Postfix range
 		match expr {
 			Expr::Binary {
 				op,
