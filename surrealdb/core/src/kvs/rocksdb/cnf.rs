@@ -158,23 +158,6 @@ fn default_max_auto_readahead_size() -> usize {
 	(256 * KIB) as usize
 }
 
-/// Scale the inline scan threshold with system memory. Scans at or
-/// below this threshold run directly on the async executor thread;
-/// larger scans are offloaded to the blocking thread-pool. On
-/// constrained CPU budgets a smaller threshold prevents long scans
-/// from monopolising a tokio worker.
-/// < 1 GiB: 512 KiB, < 4 GiB: 1 MiB, otherwise 4 MiB.
-fn default_inline_scan_threshold() -> u32 {
-	let mem = *TOTAL_SYSTEM_MEMORY;
-	if mem < GIB {
-		(512 * KIB) as u32
-	} else if mem < 4 * GIB {
-		MIB as u32
-	} else {
-		(4 * MIB) as u32
-	}
-}
-
 /// Scale the maximum number of files RocksDB can keep open
 /// simultaneously with system memory. Each open SST pins table
 /// reader state (index, filter, prefix metadata) in memory, so on
@@ -325,6 +308,18 @@ fn default_periodic_compaction_seconds() -> u64 {
 /// Set to `0` to wait indefinitely.
 fn default_shutdown_wait_for_compact_seconds() -> u64 {
 	30
+}
+
+/// Default tokio worker count used to size the inline-blocking permit
+/// cap when the embedder hasn't injected a value.
+///
+/// Mirrors the server crate's `cnf::RUNTIME_WORKER_THREADS` lazy at
+/// `surrealdb/server/src/cnf/mod.rs` (`max(4, num_cpus::get())`) so the
+/// cap converges on the same value the server uses to size its tokio
+/// runtime in the default-deployment case (no `SURREAL_RUNTIME_WORKER_THREADS`).
+/// Keep the two definitions in lockstep — if one moves, move the other.
+fn default_runtime_worker_threads() -> usize {
+	std::cmp::max(4, num_cpus::get())
 }
 
 /// Configuration for the RocksDB storage engine, parsed from query parameters.
@@ -538,17 +533,6 @@ pub struct RocksDbConfig {
 	/// (default: 0.1).
 	pub memtable_prefix_bloom_ratio: f64,
 
-	/// Scans whose estimated byte size is at or below this threshold execute
-	/// inline on the async executor thread; above this threshold they are offloaded
-	/// to the blocking threadpool so they do not stall other async tasks. This
-	/// applies uniformly to all `ScanLimit` variants: `Bytes(b)` compares `b`
-	/// directly, while `Count(c)` and `BytesOrCount(b, c)` convert the entry count
-	/// to an approximate byte size using the caller-supplied per-entry size. The
-	/// unbounded `count()` path is always offloaded via `affinitypool::spawn_local`
-	/// regardless of this value
-	/// (default: dynamic from 512 KiB to 4 MiB depending on system memory)
-	pub inline_scan_threshold: u32,
-
 	/// Whether to verify per-block CRC32C checksums when iterating during
 	/// scans and counts. Verification runs on first read of a block (cold
 	/// path); cached blocks are not re-checksummed. Disabling trades
@@ -574,6 +558,35 @@ pub struct RocksDbConfig {
 	/// `0` to wait indefinitely
 	/// (default: 30).
 	pub shutdown_wait_for_compact_seconds: u64,
+
+	/// Tokio runtime worker thread count used to size the inline-blocking
+	/// `InlineGuard` permit cap.
+	///
+	/// Read from the shared `runtime_worker_threads` `ConfigMap` key,
+	/// which the server populates via
+	/// `Datastore::builder().with_runtime_worker_threads(...)` from its
+	/// `cnf::RUNTIME_WORKER_THREADS` static — itself sourced from
+	/// `SURREAL_RUNTIME_WORKER_THREADS` with a `max(4, num_cpus::get())`
+	/// fallback. `ConfigMap::from_env()` also lowercases the env var
+	/// into the same key, so an explicit env override still wins.
+	///
+	/// Embedded callers building a custom tokio runtime can match it
+	/// by populating the same key on the `ConfigMap` they pass to
+	/// `Datastore::builder().with_config(...)` or by chaining
+	/// `with_runtime_worker_threads(...)`. When neither is provided
+	/// the field falls back to [`default_runtime_worker_threads`] so
+	/// the inline fast path stays enabled by default.
+	pub runtime_worker_threads: usize,
+
+	/// Tokio workers kept available for async work no matter how many
+	/// transactions are stuck in a synchronous storage call. Subtracted
+	/// from `runtime_worker_threads` to size the inline-blocking permit
+	/// cap. The cap is `workers - reserve`, saturating at 0. Larger
+	/// values reserve more headroom for async progress under cold-cache
+	/// load but cap inline throughput sooner on sustained CRUD
+	/// workloads
+	/// (default: `2`).
+	pub runtime_reserve: usize,
 }
 
 impl Default for RocksDbConfig {
@@ -631,10 +644,11 @@ impl Default for RocksDbConfig {
 			prefix_extractor_enabled: true,
 			whole_key_filtering: true,
 			memtable_prefix_bloom_ratio: 0.1,
-			inline_scan_threshold: default_inline_scan_threshold(),
 			scan_verify_checksums: true,
 			compact_on_shutdown: false,
 			shutdown_wait_for_compact_seconds: default_shutdown_wait_for_compact_seconds(),
+			runtime_worker_threads: default_runtime_worker_threads(),
+			runtime_reserve: 2,
 		}
 	}
 }
@@ -729,7 +743,17 @@ impl Config for RocksDbConfig {
 			.parse_key(
 				"rocksdb_shutdown_wait_for_compact_seconds",
 				&mut self.shutdown_wait_for_compact_seconds,
-			);
+			)
+			.parse_key("rocksdb_runtime_reserve", &mut self.runtime_reserve)
+			// Shared key with the server crate's tokio runtime sizing.
+			// The server injects its resolved `cnf::RUNTIME_WORKER_THREADS`
+			// via `Datastore::builder().with_runtime_worker_threads(...)`,
+			// and `ConfigMap::from_env()` also lowercases
+			// `SURREAL_RUNTIME_WORKER_THREADS` into the same key, so an
+			// explicit env override still wins. When neither is present
+			// the field retains its `default_runtime_worker_threads()`
+			// default and the inline cap is computed from that.
+			.parse_key("runtime_worker_threads", &mut self.runtime_worker_threads);
 
 		if map.has_key("datastore_sync") {
 			map.parse_key("datastore_sync", &mut self.sync_mode);
@@ -866,5 +890,32 @@ mod test {
 		assert!(config.versioned);
 		assert_eq!(config.retention, Duration::from_secs(30 * 24 * 60 * 60));
 		assert_eq!(config.sync_mode, SyncMode::Every);
+	}
+
+	#[test]
+	fn test_rocksdb_config_runtime_worker_threads_default() {
+		// With no env override and no explicit injection, the field must
+		// land on a non-zero default that keeps the inline-blocking fast
+		// path enabled. The default mirrors the server's tokio runtime
+		// sizing (`max(4, num_cpus::get())`), so it is always >= 4.
+		let config = ConfigMap::empty().load::<RocksDbConfig>();
+		assert!(
+			config.runtime_worker_threads >= 4,
+			"expected default runtime_worker_threads >= 4, got {}",
+			config.runtime_worker_threads,
+		);
+	}
+
+	#[test]
+	fn test_rocksdb_config_runtime_worker_threads_override() {
+		// An explicit value injected via the shared `runtime_worker_threads`
+		// ConfigMap key (the same key `ConfigMap::from_env()` populates
+		// from `SURREAL_RUNTIME_WORKER_THREADS`, and the key the builder's
+		// `with_runtime_worker_threads` writes into) must win over the
+		// default.
+		let config = ConfigMap::empty()
+			.with_key_value("runtime_worker_threads", "1")
+			.load::<RocksDbConfig>();
+		assert_eq!(config.runtime_worker_threads, 1);
 	}
 }

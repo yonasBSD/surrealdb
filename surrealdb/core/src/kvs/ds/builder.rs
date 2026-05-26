@@ -91,6 +91,22 @@ impl Builder {
 		self
 	}
 
+	/// Inject the tokio runtime's worker thread count into the config map
+	/// under the shared `runtime_worker_threads` key.
+	///
+	/// The RocksDB engine reads this key to size the inline-blocking
+	/// `InlineGuard` permit cap from the actual runtime width, keeping the
+	/// cap in lockstep with the executor that runs the storage ops.
+	/// Embedders building a custom tokio runtime should call this with the
+	/// `worker_threads` value they passed to `tokio::runtime::Builder`.
+	/// When unset, the engine falls back to a `max(4, num_cpus::get())`
+	/// default.
+	pub fn with_runtime_worker_threads(mut self, count: usize) -> Self {
+		self.config = std::mem::take(&mut self.config)
+			.with_key_value("runtime_worker_threads", count.to_string());
+		self
+	}
+
 	/// Sets the capabilities for the datastore.
 	pub fn with_capabilities(mut self, cap: Capabilities) -> Self {
 		self.capabilities = cap;

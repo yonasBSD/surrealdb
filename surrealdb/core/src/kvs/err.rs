@@ -123,10 +123,14 @@ impl From<surrealkv::Error> for Error {
 #[cfg(feature = "kv-rocksdb")]
 impl From<rocksdb::Error> for Error {
 	fn from(e: rocksdb::Error) -> Error {
+		// Strip trailing colon/whitespace; rocksdb's Status::Busy renders as "Resource busy: " with
+		// an empty tail.
+		let msg =
+			e.to_string().trim_end_matches(|c: char| c == ':' || c.is_whitespace()).to_string();
 		match e.kind() {
-			rocksdb::ErrorKind::Busy => Error::TransactionConflict(e.to_string()),
-			rocksdb::ErrorKind::TryAgain => Error::TransactionConflict(e.to_string()),
-			_ => Error::Transaction(e.to_string()),
+			rocksdb::ErrorKind::Busy => Error::TransactionConflict(msg),
+			rocksdb::ErrorKind::TryAgain => Error::TransactionConflict(msg),
+			_ => Error::Transaction(msg),
 		}
 	}
 }

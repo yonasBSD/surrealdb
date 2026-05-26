@@ -171,7 +171,15 @@ pub static GQL_SUBSCRIPTION_CHANNEL_CAPACITY: LazyLock<usize> =
 	lazy_env_parse!("SURREAL_GQL_SUBSCRIPTION_CHANNEL_CAPACITY", usize, 1024);
 
 /// The number of runtime worker threads to start (default: the number of CPU
-/// cores, minimum 4)
+/// cores, minimum 4).
+///
+/// `dbs::init` injects this resolved value into the datastore config via
+/// `Datastore::builder().with_runtime_worker_threads(...)`, so the rocksdb
+/// inline-blocking permit cap is sized from the actual runtime worker
+/// count. The same default lives in
+/// `surrealdb_core::kvs::rocksdb::cnf::default_runtime_worker_threads` as
+/// a safety net for embedded callers that don't go through the server.
+/// Keep the two definitions in lockstep — if one moves, move the other.
 pub static RUNTIME_WORKER_THREADS: LazyLock<usize> =
 	lazy_env_parse!("SURREAL_RUNTIME_WORKER_THREADS", usize, || {
 		std::cmp::max(4, num_cpus::get())

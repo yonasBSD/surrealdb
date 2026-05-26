@@ -802,6 +802,11 @@ pub async fn init<C: TransactionBuilderFactory + BucketStoreProvider>(
 	// Parse and setup the desired kv datastore
 	let builder = Datastore::builder()
 		.with_config(config)
+		// Mirror the tokio runtime worker count the server built itself
+		// with (see `cnf::RUNTIME_WORKER_THREADS`) into the datastore
+		// config so the RocksDB engine sizes its inline-blocking permit
+		// cap from the actual executor width.
+		.with_runtime_worker_threads(*crate::cnf::RUNTIME_WORKER_THREADS)
 		.with_query_timeout(query_timeout)
 		.with_transaction_timeout(transaction_timeout)
 		.with_auth(!unauthenticated)

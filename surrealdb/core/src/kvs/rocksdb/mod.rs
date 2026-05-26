@@ -10,6 +10,7 @@ mod commit_coordinator;
 mod comparator;
 mod disk_space_manager;
 mod garbage_collector;
+mod inline_guard;
 mod memory_manager;
 mod prefix_extractor;
 mod range_shard;
@@ -28,6 +29,7 @@ pub use cnf::RocksDbConfig;
 use commit_coordinator::CommitCoordinator;
 use disk_space_manager::{DiskSpaceManager, DiskSpaceState, TransactionState};
 use garbage_collector::GarbageCollector;
+use inline_guard::InlineGuard;
 use memory_manager::MemoryManager;
 use range_shard::{COUNT_PARALLEL_MAX_SHARDS, shard_range};
 use rocksdb::{
@@ -77,8 +79,6 @@ pub struct Datastore {
 	/// column family. Propagated to each transaction so range scans can
 	/// pick the correct prefix-seek mode without consulting global state.
 	prefix_extractor_enabled: bool,
-	/// threshold of estimated size above which we run a scan in separate thread.
-	inline_scan_threshold: u32,
 	/// Whether scan/count `ReadOptions` set `verify_checksums(true)`.
 	/// When false, CRC32C verification is skipped on cold block reads.
 	scan_verify_checksums: bool,
@@ -90,6 +90,12 @@ pub struct Datastore {
 	/// Timeout (seconds) for the post-flush `wait_for_compact` step
 	/// during shutdown. `0` waits indefinitely.
 	shutdown_wait_for_compact_seconds: u64,
+	/// Per-datastore starvation guard: bounds how many tokio workers
+	/// may run a synchronous RocksDB call inline at any moment, sized
+	/// from the configured tokio runtime worker count. Cloned (as an
+	/// `Arc`) into every `Transaction` so the dispatch helpers can
+	/// probe / divert without going through global state.
+	inline_guard: Arc<InlineGuard>,
 }
 
 pub struct Transaction {
@@ -145,10 +151,14 @@ pub struct Transaction {
 	/// column family. Controls whether `apply_prefix_mode` sets
 	/// `prefix_same_as_start` / `total_order_seek` on scan `ReadOptions`.
 	prefix_extractor_enabled: bool,
-	/// threshold of estimated size above which we run a scan in separate thread.
-	inline_scan_threshold: u32,
 	/// Whether scan/count `ReadOptions` set `verify_checksums(true)`.
 	scan_verify_checksums: bool,
+	/// Per-datastore starvation guard (cloned from the parent
+	/// `Datastore`). All dispatch helpers — `run_blocking`, the cursor
+	/// batch pump, commit's fsync — route through this so the
+	/// inline-vs-offload decision and metric counters are shared across
+	/// every transaction on this datastore.
+	inline_guard: Arc<InlineGuard>,
 }
 
 impl Transaction {
@@ -487,6 +497,18 @@ impl Datastore {
 		}
 		// Register the memory manager with the global allocator tracker
 		memory_manager.register_with_allocator_tracker();
+		// Build the per-datastore starvation guard. The embedder
+		// (server / SDK consumer) injects the worker count of the
+		// tokio runtime it built via
+		// `Datastore::builder().with_runtime_worker_threads(...)`, so
+		// the inline cap follows the executor that will run the
+		// storage ops. When the embedder hasn't injected a value the
+		// field retains `default_runtime_worker_threads()`
+		// (`max(4, num_cpus::get())`, matching the server's tokio
+		// runtime sizing default), keeping the inline fast path
+		// enabled out of the box.
+		let inline_guard =
+			Arc::new(InlineGuard::new(config.runtime_worker_threads, config.runtime_reserve));
 		// Return the datastore
 		Ok(Datastore {
 			db,
@@ -497,10 +519,10 @@ impl Datastore {
 			commit_coordinator,
 			garbage_collector,
 			prefix_extractor_enabled: config.prefix_extractor_enabled,
-			inline_scan_threshold: config.inline_scan_threshold,
 			scan_verify_checksums: config.scan_verify_checksums,
 			compact_on_shutdown: config.compact_on_shutdown,
 			shutdown_wait_for_compact_seconds: config.shutdown_wait_for_compact_seconds,
+			inline_guard,
 		})
 	}
 
@@ -515,6 +537,16 @@ impl Datastore {
 	const COMPACTION_PENDING: &str = "rocksdb.compaction_pending";
 	const NUM_RUNNING_COMPACTIONS: &str = "rocksdb.num_running_compactions";
 	const NUM_RUNNING_FLUSHES: &str = "rocksdb.num_running_flushes";
+	/// Per-datastore counter: storage calls that ran inline on a tokio
+	/// worker. Counts each `get`/`getm`/`set`/`put`/`putc`/`del`/`delc`/
+	/// `exists`/`cancel`/`commit` invocation that successfully acquired
+	/// an inline-blocking permit on this datastore's `InlineGuard`.
+	const INLINE_BLOCKING_GRANTED: &str = "rocksdb.inline_blocking_granted";
+	/// Per-datastore counter: storage calls diverted to the affinity pool
+	/// because this datastore's inline-blocking cap was hit. A rising
+	/// delta indicates the runtime would have been at risk of starvation
+	/// without the guard.
+	const INLINE_BLOCKING_DIVERTED: &str = "rocksdb.inline_blocking_diverted";
 
 	/// Registers metrics for the RocksDB datastore.
 	///
@@ -570,12 +602,29 @@ impl Datastore {
 					name: Self::NUM_RUNNING_FLUSHES,
 					description: "Number of memtable flushes currently running.",
 				},
+				Metric {
+					name: Self::INLINE_BLOCKING_GRANTED,
+					description: "Per-datastore count of storage calls that ran inline on a tokio worker (inline-blocking permit granted).",
+				},
+				Metric {
+					name: Self::INLINE_BLOCKING_DIVERTED,
+					description: "Per-datastore count of storage calls diverted to the affinity pool because the inline-blocking cap was hit.",
+				},
 			],
 		}
 	}
 
 	/// Collects a specific u64 metric by name from the RocksDB datastore.
 	pub(crate) fn collect_u64_metric(&self, metric: &str) -> Option<u64> {
+		// Inline-blocking counters live on the per-datastore `InlineGuard`,
+		// not on a RocksDB property. Resolve them before falling through to
+		// the property lookup so the per-flavour registry exposes both
+		// shapes uniformly.
+		match metric {
+			Self::INLINE_BLOCKING_GRANTED => return Some(self.inline_guard.granted()),
+			Self::INLINE_BLOCKING_DIVERTED => return Some(self.inline_guard.diverted()),
+			_ => {}
+		}
 		let metric = match metric {
 			Self::BLOCK_CACHE_USAGE => Some(properties::BLOCK_CACHE_USAGE),
 			Self::BLOCK_CACHE_PINNED_USAGE => Some(properties::BLOCK_CACHE_PINNED_USAGE),
@@ -810,8 +859,8 @@ impl Datastore {
 			commit_coordinator: self.commit_coordinator.clone(),
 			db: self.db.clone(),
 			prefix_extractor_enabled: self.prefix_extractor_enabled,
-			inline_scan_threshold: self.inline_scan_threshold,
 			scan_verify_checksums: self.scan_verify_checksums,
+			inline_guard: Arc::clone(&self.inline_guard),
 		}))
 	}
 }
@@ -990,53 +1039,26 @@ impl Transaction {
 		ro
 	}
 
-	/// Whether a scan with the given limit should be offloaded to the blocking
-	/// threadpool rather than executed inline on the async executor thread.
+	/// Run a blocking RocksDB op under the inner transaction lock.
 	///
-	/// Small bounded scans run inline to avoid the cross-thread wakeup latency
-	/// of the blocking pool. Larger scans are offloaded so they do not stall
-	/// other async tasks on the executor.
+	/// Acquires the inner mutex, then runs the closure through the
+	/// process-wide inline-blocking permit: granted → inline on the calling
+	/// tokio worker (cache-hit fast path, no thread hop); refused →
+	/// dispatched to the affinity pool so `RUNTIME_RESERVE` tokio workers
+	/// stay free for async work.
 	///
-	/// The decision is made in bytes: `ScanLimit::Bytes(b)` is compared
-	/// directly against the threshold, while `ScanLimit::Count(c)` converts
-	/// the entry count to an approximate byte size using the caller-supplied
-	/// per-entry estimate.
-	///
-	/// For `ScanLimit::BytesOrCount(b, c)`, iteration stops when *either* the
-	/// byte budget `b` or the entry cap `c` is hit. The count-based estimate
-	/// `c * bytes_per_entry` can understate worst-case I/O when real entries
-	/// are larger than the heuristic. If `b` alone exceeds the inline
-	/// threshold, we treat `b` as the authoritative upper bound so large byte
-	/// budgets are not misclassified as small inline scans when `c` is small
-	/// (e.g. scanner batches with a SQL `LIMIT`).
-	/// Pass `ESTIMATED_BYTES_PER_KEY` for key-only scans (`keys`/`keysr`) and
-	/// `ESTIMATED_BYTES_PER_KV` for key+value scans (`scan`/`scanr`), where the
-	/// estimate is combined key+value bytes per entry (not value-only).
-	///
-	/// `skip` is included in the byte estimate because the skip loop in
-	/// `consume_keys`/`consume_vals` advances the underlying iterator
-	/// entry-by-entry before any result is collected. A large skip combined
-	/// with a small limit would otherwise be classified as inline and block
-	/// the async executor for the entire skip traversal.
-	fn should_offload(threshold: u32, limit: ScanLimit, skip: u32, bytes_per_entry: u32) -> bool {
-		// Estimate the byte cost of the skip prefix that the iterator
-		// must traverse before returning any result.
-		let skip_bytes = skip.saturating_mul(bytes_per_entry);
-		// Calculate the estimated bytes based on the configured inline limit.
-		let limit_bytes = match limit {
-			ScanLimit::Count(c) => c.saturating_mul(bytes_per_entry),
-			ScanLimit::Bytes(b) => b,
-			ScanLimit::BytesOrCount(b, c) => {
-				let count_estimate = c.saturating_mul(bytes_per_entry);
-				if b > threshold {
-					b
-				} else {
-					b.min(count_estimate)
-				}
-			}
-		};
-		// Check if the combined skip+limit estimate is greater than the threshold
-		skip_bytes.saturating_add(limit_bytes) > threshold
+	/// This is the canonical dispatch shape for every *bounded* RocksDB
+	/// op — point reads/writes, scans/keys (read-only and writable),
+	/// cancel, commit's fsync. Unbounded ops (`count`, `compact`) and the
+	/// sharded read-only `count` fan-out bypass this helper and go to the
+	/// pool unconditionally.
+	async fn run_blocking<'a, F, R>(&'a self, op: F) -> Result<R>
+	where
+		F: FnOnce(MutexGuard<'a, Option<TransactionInner>>) -> Result<R> + Send + 'a,
+		R: Send + 'a,
+	{
+		let guard = self.inner.lock().await;
+		self.inline_guard.try_inline_or_offload(move || op(guard)).await
 	}
 
 	/// Synchronous implementation of `count` taking an already-acquired lock
@@ -1752,11 +1774,12 @@ fn fill_vals_inner<D: rocksdb::DBAccess>(
 /// is the `done` check, which lets us bail cleanly if `commit`/`cancel`
 /// raced ahead of us.
 ///
-/// Dispatches inline or to `affinitypool::spawn_local` depending on
-/// `should_offload`. The pending skip stored on the cursor state is
-/// folded into the byte estimate so a `START 5000 LIMIT 100`-style
-/// open's first batch — which still iterates the 5000-row skip prefix
-/// inline — is offloaded if its total work exceeds the threshold.
+/// Dispatches via `try_inline_or_offload`: inline on the calling tokio
+/// worker when a permit is granted, otherwise to
+/// `affinitypool::spawn_local`. The first batch of a cursor with a
+/// non-zero pending `skip` iterates the skip prefix synchronously inside
+/// the closure (see `fill_keys_into_state`), so the permit guards the
+/// worker against being pinned by both the skip walk and the batch fill.
 /// After the first batch, `state.skip` is 0 and subsequent batches use
 /// only `limit`.
 pub(in crate::kvs::rocksdb) async fn cursor_next_keys<'s>(
@@ -1774,20 +1797,12 @@ pub(in crate::kvs::rocksdb) async fn cursor_next_keys<'s>(
 	// themselves persist via Vec's capacity.
 	cursor.state.key_buf.clear();
 	cursor.state.key_spans.clear();
-	let inline_scan_threshold = cursor.tx.inline_scan_threshold;
-	let pending_skip = cursor.state.skip;
 	let state: &mut ScanStateKeys = &mut cursor.state;
-	let key_bytes = if Transaction::should_offload(
-		inline_scan_threshold,
-		limit,
-		pending_skip,
-		ESTIMATED_BYTES_PER_KEY,
-	) {
-		affinitypool::spawn_local(move || -> Result<u64> { fill_keys_into_state(state, limit) })
-			.await?
-	} else {
-		fill_keys_into_state(state, limit)?
-	};
+	let key_bytes = cursor
+		.tx
+		.inline_guard
+		.try_inline_or_offload(move || -> Result<u64> { fill_keys_into_state(state, limit) })
+		.await?;
 	// Borrow the freshly-populated buffers back out as the batch. Zero
 	// allocations here — the batch is just a `&[u8]` + `&[KeySpan]` over
 	// the cursor's own storage.
@@ -1810,22 +1825,12 @@ pub(in crate::kvs::rocksdb) async fn cursor_next_vals<'s>(
 	cursor.state.key_buf.clear();
 	cursor.state.val_buf.clear();
 	cursor.state.spans.clear();
-	let inline_scan_threshold = cursor.tx.inline_scan_threshold;
-	let pending_skip = cursor.state.skip;
 	let state: &mut ScanStateVals = &mut cursor.state;
-	let (key_bytes, value_bytes) = if Transaction::should_offload(
-		inline_scan_threshold,
-		limit,
-		pending_skip,
-		ESTIMATED_BYTES_PER_KV,
-	) {
-		affinitypool::spawn_local(move || -> Result<(u64, u64)> {
-			fill_vals_into_state(state, limit)
-		})
-		.await?
-	} else {
-		fill_vals_into_state(state, limit)?
-	};
+	let (key_bytes, value_bytes) = cursor
+		.tx
+		.inline_guard
+		.try_inline_or_offload(move || -> Result<(u64, u64)> { fill_vals_into_state(state, limit) })
+		.await?;
 	// Borrow the freshly-populated buffers back out as the batch. Zero
 	// allocations here.
 	Ok(ValsBatch::from_parts(
@@ -1871,15 +1876,14 @@ impl Transactable for Transaction {
 			// above, so no new cursor can open. See `scan_cursor.rs` for
 			// the SeqCst ordering rationale.
 			drain_cursors(self).await;
-			// Lock the inner transaction
-			let inner = self.inner.lock().await;
-			// Get the inner transaction
-			let inner =
-				inner.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-			// Cancel this transaction
-			inner.tx.rollback()?;
-			// Continue
-			Ok(())
+			self.run_blocking(move |guard| {
+				let inner = guard
+					.as_ref()
+					.ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+				inner.tx.rollback()?;
+				Ok(())
+			})
+			.await
 		})
 	}
 
@@ -1925,8 +1929,13 @@ impl Transactable for Transaction {
 				let ts = HlcTimeStamp::next();
 				inner.set_commit_timestamp(ts.0);
 			}
-			// Always commit the RocksDB transaction on the caller thread for parallel commits
-			(*inner).commit()?;
+			// RocksDB commit may invoke `fsync` when sync writes are
+			// enabled, so it is the highest-latency synchronous call in
+			// the transaction lifecycle and must respect the
+			// runtime-headroom guard. The helper probes the inline-blocking
+			// permit: granted → run on the calling tokio worker; refused →
+			// dispatched to the affinity pool.
+			self.inline_guard.try_inline_or_offload(move || (*inner).commit()).await?;
 			// If we have a coordinator, wait for the grouped fsync
 			if let Some(coordinator) = &self.commit_coordinator {
 				coordinator.wait_for_sync().await?;
@@ -1950,20 +1959,19 @@ impl Transactable for Transaction {
 			if self.closed() {
 				return Err(Error::TransactionFinished);
 			}
-			// Lock the inner transaction
-			let guard = self.inner.lock().await;
-			// Get the inner transaction
-			let inner =
-				guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-			// Get the key
-			let res = if version.is_some() {
-				inner.tx.get_pinned_opt(key, &self.versioned_read_options(version, inner))
-			} else {
-				inner.tx.get_pinned_opt(key, &self.read_options)
-			}?
-			.is_some();
-			// Return result
-			Ok(res)
+			self.run_blocking(move |guard| {
+				let inner = guard
+					.as_ref()
+					.ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+				let res = if version.is_some() {
+					inner.tx.get_pinned_opt(key, &self.versioned_read_options(version, inner))
+				} else {
+					inner.tx.get_pinned_opt(key, &self.read_options)
+				}?
+				.is_some();
+				Ok(res)
+			})
+			.await
 		})
 	}
 
@@ -1977,23 +1985,28 @@ impl Transactable for Transaction {
 			if self.closed() {
 				return Err(Error::TransactionFinished);
 			}
-			// Lock the transaction inner
-			let guard = self.inner.lock().await;
-			// Get the inner transaction
-			let inner =
-				guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-			// Get the key
-			let res = if version.is_some() {
-				inner.tx.get_opt(key, &self.versioned_read_options(version, inner))
-			} else {
-				inner.tx.get_opt(key, &self.read_options)
-			}?;
-			// Return result
-			Ok(res)
+			self.run_blocking(move |guard| {
+				let inner = guard
+					.as_ref()
+					.ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+				let res = if version.is_some() {
+					inner.tx.get_opt(key, &self.versioned_read_options(version, inner))
+				} else {
+					inner.tx.get_opt(key, &self.read_options)
+				}?;
+				Ok(res)
+			})
+			.await
 		})
 	}
 
 	/// Fetch many keys from the datastore.
+	///
+	/// Bounded by `keys.len()`, so the call flows through the same
+	/// inline-blocking permit path as `get`. Granted → inline on the
+	/// calling tokio worker; refused → dispatched to the affinity pool.
+	/// Larger key lists naturally bias toward the divert branch as the
+	/// global concurrent inline budget is consumed.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(keys = keys.sprint()))]
 	fn getm(&self, keys: Vec<Key>, version: Option<u64>) -> BoxFut<'_, Result<GetMultiResult>> {
 		Box::pin(async move {
@@ -2003,38 +2016,38 @@ impl Transactable for Transaction {
 			if self.closed() {
 				return Err(Error::TransactionFinished);
 			}
-			// Lock the transaction inner
-			let guard = self.inner.lock().await;
-			// Get the transaction inner
-			let inner =
-				guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-			// Get the keys
-			let res = if version.is_some() {
-				inner.tx.multi_get_opt(keys, &self.versioned_read_options(version, inner))
-			} else {
-				inner.tx.multi_get_opt(keys, &self.read_options)
-			};
-			// Convert result, accumulating the hit count and value bytes during
-			// the same pass so callers do not need to re-walk the result.
-			let mut records = 0u64;
-			let mut value_bytes = 0u64;
-			let values = res
-				.into_iter()
-				.map(|r| match r {
-					Ok(Some(v)) => {
-						records += 1;
-						value_bytes += v.len() as u64;
-						Ok(Some(v))
-					}
-					Ok(None) => Ok(None),
-					Err(e) => Err(e.into()),
+			self.run_blocking(move |guard| {
+				let inner = guard
+					.as_ref()
+					.ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+				let res = if version.is_some() {
+					inner.tx.multi_get_opt(keys, &self.versioned_read_options(version, inner))
+				} else {
+					inner.tx.multi_get_opt(keys, &self.read_options)
+				};
+				// Convert result, accumulating the hit count and value bytes during
+				// the same pass so callers do not need to re-walk the result.
+				let mut records = 0u64;
+				let mut value_bytes = 0u64;
+				let values = res
+					.into_iter()
+					.map(|r| match r {
+						Ok(Some(v)) => {
+							records += 1;
+							value_bytes += v.len() as u64;
+							Ok(Some(v))
+						}
+						Ok(None) => Ok(None),
+						Err(e) => Err(e.into()),
+					})
+					.collect::<Result<Vec<Option<Val>>>>()?;
+				Ok(GetMultiResult {
+					values,
+					records,
+					value_bytes,
 				})
-				.collect::<Result<Vec<Option<Val>>>>()?;
-			Ok(GetMultiResult {
-				values,
-				records,
-				value_bytes,
 			})
+			.await
 		})
 	}
 
@@ -2054,17 +2067,15 @@ impl Transactable for Transaction {
 			if self.is_restricted(false) {
 				return Err(Error::ReadAndDeleteOnly);
 			}
-			// Lock the transaction inner
-			let guard = self.inner.lock().await;
-			// Get the transaction inner
-			let inner =
-				guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-			// Set the key
-			inner.tx.put(key, val)?;
-			// Mark this transaction as containing a write operation
-			self.store_writes();
-			// Return result
-			Ok(())
+			self.run_blocking(move |guard| {
+				let inner = guard
+					.as_ref()
+					.ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+				inner.tx.put(key, val)?;
+				self.store_writes();
+				Ok(())
+			})
+			.await
 		})
 	}
 
@@ -2084,20 +2095,18 @@ impl Transactable for Transaction {
 			if self.is_restricted(false) {
 				return Err(Error::ReadAndDeleteOnly);
 			}
-			// Lock the transaction inner
-			let guard = self.inner.lock().await;
-			// Get the transaction inner
-			let inner =
-				guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-			// Set the key if empty
-			match inner.tx.get_pinned_opt(&key, &self.read_options)? {
-				None => inner.tx.put(key, val)?,
-				_ => return Err(Error::TransactionKeyAlreadyExists),
-			};
-			// Mark this transaction as containing a write operation
-			self.store_writes();
-			// Return result
-			Ok(())
+			self.run_blocking(move |guard| {
+				let inner = guard
+					.as_ref()
+					.ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+				match inner.tx.get_pinned_opt(&key, &self.read_options)? {
+					None => inner.tx.put(key, val)?,
+					_ => return Err(Error::TransactionKeyAlreadyExists),
+				};
+				self.store_writes();
+				Ok(())
+			})
+			.await
 		})
 	}
 
@@ -2117,21 +2126,19 @@ impl Transactable for Transaction {
 			if self.is_restricted(false) {
 				return Err(Error::ReadAndDeleteOnly);
 			}
-			// Lock the transaction inner
-			let guard = self.inner.lock().await;
-			// Get the transaction inner
-			let inner =
-				guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-			// Set the key if empty
-			match (inner.tx.get_pinned_opt(&key, &self.read_options)?, chk) {
-				(Some(v), Some(w)) if v.eq(&w) => inner.tx.put(key, val)?,
-				(None, None) => inner.tx.put(key, val)?,
-				_ => return Err(Error::TransactionConditionNotMet),
-			};
-			// Mark this transaction as containing a write operation
-			self.store_writes();
-			// Return result
-			Ok(())
+			self.run_blocking(move |guard| {
+				let inner = guard
+					.as_ref()
+					.ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+				match (inner.tx.get_pinned_opt(&key, &self.read_options)?, chk) {
+					(Some(v), Some(w)) if v.eq(&w) => inner.tx.put(key, val)?,
+					(None, None) => inner.tx.put(key, val)?,
+					_ => return Err(Error::TransactionConditionNotMet),
+				};
+				self.store_writes();
+				Ok(())
+			})
+			.await
 		})
 	}
 
@@ -2147,17 +2154,15 @@ impl Transactable for Transaction {
 			if !self.writeable() {
 				return Err(Error::TransactionReadonly);
 			}
-			// Lock the transaction inner
-			let guard = self.inner.lock().await;
-			// Get the transaction inner
-			let inner =
-				guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-			// Remove the key
-			inner.tx.delete(key)?;
-			// Mark this transaction as containing a delete operation
-			self.store_deletes();
-			// Return result
-			Ok(())
+			self.run_blocking(move |guard| {
+				let inner = guard
+					.as_ref()
+					.ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+				inner.tx.delete(key)?;
+				self.store_deletes();
+				Ok(())
+			})
+			.await
 		})
 	}
 
@@ -2173,21 +2178,19 @@ impl Transactable for Transaction {
 			if !self.writeable() {
 				return Err(Error::TransactionReadonly);
 			}
-			// Lock the transaction inner
-			let guard = self.inner.lock().await;
-			// Get the transaction inner
-			let inner =
-				guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-			// Delete the key if valid
-			match (inner.tx.get_pinned_opt(&key, &self.read_options)?, chk) {
-				(Some(v), Some(w)) if v.eq(&w) => inner.tx.delete(key)?,
-				(None, None) => inner.tx.delete(key)?,
-				_ => return Err(Error::TransactionConditionNotMet),
-			};
-			// Mark this transaction as containing a delete operation
-			self.store_deletes();
-			// Return result
-			Ok(())
+			self.run_blocking(move |guard| {
+				let inner = guard
+					.as_ref()
+					.ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+				match (inner.tx.get_pinned_opt(&key, &self.read_options)?, chk) {
+					(Some(v), Some(w)) if v.eq(&w) => inner.tx.delete(key)?,
+					(None, None) => inner.tx.delete(key)?,
+					_ => return Err(Error::TransactionConditionNotMet),
+				};
+				self.store_deletes();
+				Ok(())
+			})
+			.await
 		})
 	}
 
@@ -2306,18 +2309,14 @@ impl Transactable for Transaction {
 
 	/// Retrieve a range of keys.
 	///
-	/// Read-only transactions use the byte-estimate threshold: small bounded
-	/// scans run inline (to skip the cross-thread wakeup), large ones offload.
-	/// `keys_blocking` releases the inner lock before iterating on read-only
-	/// txs, so the inline branch only briefly blocks the calling worker while
-	/// building the iterator.
-	///
-	/// Writable transactions always offload. The iterator must run on
-	/// `inner.tx` (`BaseDeltaIterator`) so pending writes are visible, which
-	/// means the inner-lock guard is held for the full iteration window — if
-	/// that ran inline on the tokio executor, the worker would be blocked for
-	/// the entire iter. The thread-hop cost is dominated by the iter work in
-	/// every realistic case. Mirrors the writable-`count()` policy.
+	/// Bounded by `limit`, so the call runs through the standard
+	/// inline-blocking permit. Granted → run on the calling tokio worker;
+	/// refused → dispatch to the affinity pool. Applies to both read-only
+	/// and writable transactions; writable iteration on `inner.tx`
+	/// (`BaseDeltaIterator`) holds the inner Mutex for the iter window,
+	/// but that already serialises ops on the same transaction regardless
+	/// of dispatch shape — and the global permit cap bounds how many
+	/// tokio workers can be pinned at once.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(rng = rng.sprint()))]
 	fn keys(
 		&self,
@@ -2333,28 +2332,32 @@ impl Transactable for Transaction {
 			if self.closed() {
 				return Err(Error::TransactionFinished);
 			}
-			// Always offload writable; for read-only, dispatch by byte estimate.
-			if self.write
-				|| Self::should_offload(
-					self.inline_scan_threshold,
-					limit,
-					skip,
-					ESTIMATED_BYTES_PER_KEY,
-				) {
+			// Writable transactions always offload range scans to the
+			// affinity pool. The scan iterator holds the inner Mutex for
+			// the whole iter window (`BaseDeltaIterator` over a writable
+			// `Transaction`), so keeping it inline would pin a tokio
+			// worker for the entire scan — exactly the starvation mode
+			// the inline-blocking permit was built to avoid. The permit
+			// already bounds *one* call, but a writable scan is the
+			// worst-case occupant: long, locked, and chained through the
+			// cursor loop. Send it to the pool unconditionally and keep
+			// the permit-aware path for short bounded ops only.
+			if self.write {
 				let guard = self.inner.lock().await;
-				affinitypool::spawn_local(move || {
+				return affinitypool::spawn_local(move || {
 					self.keys_blocking(rng, limit, skip, version, Direction::Forward, guard)
 				})
-				.await
-			} else {
-				let guard = self.inner.lock().await;
-				self.keys_blocking(rng, limit, skip, version, Direction::Forward, guard)
+				.await;
 			}
+			self.run_blocking(move |guard| {
+				self.keys_blocking(rng, limit, skip, version, Direction::Forward, guard)
+			})
+			.await
 		})
 	}
 
 	/// Retrieve a range of keys, in reverse. See [`Self::keys`] for the
-	/// inline-vs-offload policy.
+	/// dispatch policy.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(rng = rng.sprint()))]
 	fn keysr(
 		&self,
@@ -2370,28 +2373,32 @@ impl Transactable for Transaction {
 			if self.closed() {
 				return Err(Error::TransactionFinished);
 			}
-			// Always offload writable; for read-only, dispatch by byte estimate.
-			if self.write
-				|| Self::should_offload(
-					self.inline_scan_threshold,
-					limit,
-					skip,
-					ESTIMATED_BYTES_PER_KEY,
-				) {
+			// Writable transactions always offload range scans to the
+			// affinity pool. The scan iterator holds the inner Mutex for
+			// the whole iter window (`BaseDeltaIterator` over a writable
+			// `Transaction`), so keeping it inline would pin a tokio
+			// worker for the entire scan — exactly the starvation mode
+			// the inline-blocking permit was built to avoid. The permit
+			// already bounds *one* call, but a writable scan is the
+			// worst-case occupant: long, locked, and chained through the
+			// cursor loop. Send it to the pool unconditionally and keep
+			// the permit-aware path for short bounded ops only.
+			if self.write {
 				let guard = self.inner.lock().await;
-				affinitypool::spawn_local(move || {
+				return affinitypool::spawn_local(move || {
 					self.keys_blocking(rng, limit, skip, version, Direction::Backward, guard)
 				})
-				.await
-			} else {
-				let guard = self.inner.lock().await;
-				self.keys_blocking(rng, limit, skip, version, Direction::Backward, guard)
+				.await;
 			}
+			self.run_blocking(move |guard| {
+				self.keys_blocking(rng, limit, skip, version, Direction::Backward, guard)
+			})
+			.await
 		})
 	}
 
 	/// Retrieve a range of key-value pairs. See [`Self::keys`] for the
-	/// inline-vs-offload policy.
+	/// dispatch policy.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(rng = rng.sprint()))]
 	fn scan(
 		&self,
@@ -2407,28 +2414,32 @@ impl Transactable for Transaction {
 			if self.closed() {
 				return Err(Error::TransactionFinished);
 			}
-			// Always offload writable; for read-only, dispatch by byte estimate.
-			if self.write
-				|| Self::should_offload(
-					self.inline_scan_threshold,
-					limit,
-					skip,
-					ESTIMATED_BYTES_PER_KV,
-				) {
+			// Writable transactions always offload range scans to the
+			// affinity pool. The scan iterator holds the inner Mutex for
+			// the whole iter window (`BaseDeltaIterator` over a writable
+			// `Transaction`), so keeping it inline would pin a tokio
+			// worker for the entire scan — exactly the starvation mode
+			// the inline-blocking permit was built to avoid. The permit
+			// already bounds *one* call, but a writable scan is the
+			// worst-case occupant: long, locked, and chained through the
+			// cursor loop. Send it to the pool unconditionally and keep
+			// the permit-aware path for short bounded ops only.
+			if self.write {
 				let guard = self.inner.lock().await;
-				affinitypool::spawn_local(move || {
+				return affinitypool::spawn_local(move || {
 					self.scan_blocking(rng, limit, skip, version, Direction::Forward, guard)
 				})
-				.await
-			} else {
-				let guard = self.inner.lock().await;
-				self.scan_blocking(rng, limit, skip, version, Direction::Forward, guard)
+				.await;
 			}
+			self.run_blocking(move |guard| {
+				self.scan_blocking(rng, limit, skip, version, Direction::Forward, guard)
+			})
+			.await
 		})
 	}
 
 	/// Retrieve a range of key-value pairs, in reverse. See [`Self::keys`] for
-	/// the inline-vs-offload policy.
+	/// the dispatch policy.
 	#[instrument(level = "trace", target = "surrealdb::core::kvs::api", skip(self), fields(rng = rng.sprint()))]
 	fn scanr(
 		&self,
@@ -2444,23 +2455,27 @@ impl Transactable for Transaction {
 			if self.closed() {
 				return Err(Error::TransactionFinished);
 			}
-			// Always offload writable; for read-only, dispatch by byte estimate.
-			if self.write
-				|| Self::should_offload(
-					self.inline_scan_threshold,
-					limit,
-					skip,
-					ESTIMATED_BYTES_PER_KV,
-				) {
+			// Writable transactions always offload range scans to the
+			// affinity pool. The scan iterator holds the inner Mutex for
+			// the whole iter window (`BaseDeltaIterator` over a writable
+			// `Transaction`), so keeping it inline would pin a tokio
+			// worker for the entire scan — exactly the starvation mode
+			// the inline-blocking permit was built to avoid. The permit
+			// already bounds *one* call, but a writable scan is the
+			// worst-case occupant: long, locked, and chained through the
+			// cursor loop. Send it to the pool unconditionally and keep
+			// the permit-aware path for short bounded ops only.
+			if self.write {
 				let guard = self.inner.lock().await;
-				affinitypool::spawn_local(move || {
+				return affinitypool::spawn_local(move || {
 					self.scan_blocking(rng, limit, skip, version, Direction::Backward, guard)
 				})
-				.await
-			} else {
-				let guard = self.inner.lock().await;
-				self.scan_blocking(rng, limit, skip, version, Direction::Backward, guard)
+				.await;
 			}
+			self.run_blocking(move |guard| {
+				self.scan_blocking(rng, limit, skip, version, Direction::Backward, guard)
+			})
+			.await
 		})
 	}
 
