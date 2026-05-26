@@ -148,6 +148,12 @@ impl Document {
 		if !ctx.check_perms(opt, Action::View)? {
 			return Ok(());
 		}
+		// Skip when the table has no computed fields at all; avoids the
+		// `doc.clone()` and the field-iteration on wide schemas that
+		// only declare stored fields.
+		if !self.has_computed_fields() {
+			return Ok(());
+		}
 		// Snapshot once; cuts accumulate on `doc`, but `each`, `pick` and
 		// the cursor passed to permission predicates all read from the
 		// snapshot so later cuts don't perturb earlier evaluations.
