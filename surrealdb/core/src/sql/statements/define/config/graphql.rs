@@ -100,7 +100,10 @@ pub enum FunctionsConfig {
 	#[default]
 	None,
 	Auto,
-	// These variants are not actually implemented yet
+	// Arbitrary generation is skipped: function names stored here are bare
+	// `name(::name)*` identifiers (no `fn::` prefix), but `Strand`'s `Arbitrary`
+	// impl yields any UTF-8 string, which the `INCLUDE`/`EXCLUDE` syntax
+	// can't round-trip.
 	#[cfg_attr(feature = "arbitrary", arbitrary(skip))]
 	Include(Vec<Strand>),
 	#[cfg_attr(feature = "arbitrary", arbitrary(skip))]
@@ -231,25 +234,35 @@ impl ToSql for FunctionsConfig {
 			FunctionsConfig::Auto => f.push_str("AUTO"),
 			FunctionsConfig::None => f.push_str("NONE"),
 			FunctionsConfig::Include(cs) => {
-				f.push_str("INCLUDE [");
-				for (i, func) in cs.iter().enumerate() {
-					if i > 0 {
-						f.push_str(", ");
-					}
-					EscapeKwFreeIdent(func.as_str()).fmt_sql(f, fmt);
-				}
-				f.push(']');
+				f.push_str("INCLUDE ");
+				fmt_function_name_list(f, fmt, cs);
 			}
 			FunctionsConfig::Exclude(cs) => {
-				f.push_str("EXCLUDE [");
-				for (i, func) in cs.iter().enumerate() {
-					if i > 0 {
-						f.push_str(", ");
-					}
-					EscapeKwFreeIdent(func.as_str()).fmt_sql(f, fmt);
-				}
-				f.push(']');
+				f.push_str("EXCLUDE ");
+				fmt_function_name_list(f, fmt, cs);
 			}
+		}
+	}
+}
+
+/// Render a list of custom function names as a comma-separated sequence of
+/// `fn::<name>` references — the same form the parser accepts, so the output
+/// round-trips through `DEFINE CONFIG GRAPHQL FUNCTIONS INCLUDE/EXCLUDE`. Each
+/// `::`-separated segment is escaped independently to keep the syntax legal
+/// even when a segment is a SurrealQL keyword.
+fn fmt_function_name_list(f: &mut String, fmt: SqlFormat, names: &[Strand]) {
+	for (i, name) in names.iter().enumerate() {
+		if i > 0 {
+			f.push_str(", ");
+		}
+		f.push_str("fn::");
+		let mut first = true;
+		for segment in name.as_str().split("::") {
+			if !first {
+				f.push_str("::");
+			}
+			first = false;
+			EscapeKwFreeIdent(segment).fmt_sql(f, fmt);
 		}
 	}
 }

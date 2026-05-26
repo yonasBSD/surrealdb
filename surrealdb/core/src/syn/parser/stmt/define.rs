@@ -1,4 +1,5 @@
 use reblessive::Stk;
+use surrealdb_strand::Strand;
 
 use crate::catalog::{ApiMethod, EventDefinition, EventKind};
 use crate::sql::access::AccessDuration;
@@ -1715,14 +1716,23 @@ impl Parser<'_> {
 
 					let next = self.next();
 					match next.kind {
+						t!("INCLUDE") => {
+							tmp_fncs = Some(FunctionsConfig::Include(
+								self.parse_graphql_function_configs()?,
+							))
+						}
+						t!("EXCLUDE") => {
+							tmp_fncs = Some(FunctionsConfig::Exclude(
+								self.parse_graphql_function_configs()?,
+							))
+						}
 						t!("NONE") => {
 							tmp_fncs = Some(FunctionsConfig::None);
 						}
 						t!("AUTO") => {
 							tmp_fncs = Some(FunctionsConfig::Auto);
 						}
-						//TODO: Actually implement INCLUDE and EXCLUDE
-						_ => unexpected!(self, next, "`NONE`, `AUTO`"),
+						_ => unexpected!(self, next, "`NONE`, `AUTO`, `INCLUDE` or `EXCLUDE`"),
 					}
 				}
 				TokenKind::Identifier => {
@@ -1775,6 +1785,22 @@ impl Parser<'_> {
 				}
 				_ => unexpected!(self, self.next(), "a table config"),
 			}
+			if !self.eat(t!(",")) {
+				break;
+			}
+		}
+		Ok(acc)
+	}
+
+	/// Parses a comma-separated list of `fn::name[::part]*` references for a
+	/// GraphQL `FUNCTIONS INCLUDE`/`EXCLUDE` clause. The leading `fn::` token is
+	/// required (matching how custom functions are referenced everywhere else
+	/// in the language) and is stripped before storage so the catalog continues
+	/// to hold the bare function name.
+	fn parse_graphql_function_configs(&mut self) -> ParseResult<Vec<Strand>> {
+		let mut acc = vec![];
+		loop {
+			acc.push(self.parse_custom_function_name()?);
 			if !self.eat(t!(",")) {
 				break;
 			}
