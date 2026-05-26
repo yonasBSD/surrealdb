@@ -361,10 +361,6 @@ criteria = "safe-to-deploy"
 version = "1.2.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.crossbeam]]
-version = "0.8.4"
-criteria = "safe-to-deploy"
-
 [[exemptions.crossbeam-channel]]
 version = "0.5.4"
 criteria = "safe-to-deploy"
