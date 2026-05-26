@@ -131,6 +131,15 @@ pub(crate) trait NamespaceProvider: ProviderFutureSendRequirement {
 		ns: NamespaceDefinition,
 	) -> BoxProviderFut<'_, Result<Arc<NamespaceDefinition>>>;
 
+	/// Delete a namespace definition.
+	///
+	/// Mirrors [`DatabaseProvider::del_db`]: clears the metadata entry
+	/// and the namespace-prefixed data range, using soft (`del`/`delp`)
+	/// or hard (`clr`/`clrp`) deletes depending on `expunge`. Returns
+	/// `Some(())` when a definition was found and removed, `None`
+	/// otherwise.
+	fn del_ns<'a>(&'a self, ns: &'a str, expunge: bool) -> BoxProviderFut<'a, Result<Option<()>>>;
+
 	/// Retrieve a specific namespace definition returning an error if it does not exist.
 	fn expect_ns_by_name<'a>(
 		&'a self,

@@ -413,6 +413,13 @@ pub trait TransactionBuilder: TransactionBuilderRequirements {
 	/// Backends expose only stable, shareable handles through this hook. The
 	/// default implementation keeps community datastores free of extension
 	/// state.
+	///
+	/// This is the extension point for backend-specific operations that
+	/// don't fit the generic transaction interface: e.g. the TiKV backend
+	/// returns its [`crate::kvs::tikv::TikvOpsHandle`] (matched on
+	/// `TypeId`) so the engine can offer MVCC-GC / lock-cleanup /
+	/// `unsafe_destroy_range` to operators without polluting this trait
+	/// with TiKV-only signatures every other backend would have to no-op.
 	fn extension(&self, _: TypeId) -> Option<Arc<dyn Any + Send + Sync>> {
 		None
 	}
@@ -678,7 +685,12 @@ impl TransactionBuilderFactory for CommunityComposer {
 			(flavour @ "tikv", path) => {
 				#[cfg(feature = "kv-tikv")]
 				{
-					let v = super::tikv::Datastore::new(&path).await.map(DatastoreFlavor::TiKV)?;
+					// Parse TiKV-specific configuration from env vars
+					// (SURREAL_TIKV_*) and query parameters.
+					let tikv_config = config.load();
+					let v = super::tikv::Datastore::new(&path, tikv_config)
+						.await
+						.map(DatastoreFlavor::TiKV)?;
 					info!(target: TARGET, "Started {flavour} kvs store");
 					Ok(TransactionBuilderParts::without_router_state(Box::<DatastoreFlavor>::new(
 						v,
@@ -798,6 +810,19 @@ impl TransactionBuilder for DatastoreFlavor {
 				_ => unreachable!(),
 			}
 		})
+	}
+
+	#[allow(
+		unused_variables,
+		reason = "type_id is only consumed when a backend feature is enabled"
+	)]
+	fn extension(&self, type_id: TypeId) -> Option<Arc<dyn Any + Send + Sync>> {
+		match self {
+			#[cfg(feature = "kv-tikv")]
+			Self::TiKV(v) if type_id == TypeId::of::<super::tikv::TikvOpsHandle>() => Some(v.ops_handle()),
+			#[allow(unreachable_patterns)]
+			_ => None,
+		}
 	}
 }
 
@@ -1290,6 +1315,73 @@ impl Datastore {
 		);
 		// Run any storage engine shutdown tasks
 		self.transaction_factory.builder.shutdown().await
+	}
+
+	/// Drop every version of every key in the half-open range `[start, end)`
+	/// **outside** any user transaction.
+	///
+	/// Routes through the backend's [`TransactionBuilder::extension`] hook.
+	/// Backends other than TiKV treat this as a no-op. Callers are
+	/// responsible for ensuring the data is already logically inaccessible
+	/// (typically by running this only after a committed catalog-clearing
+	/// transaction).
+	pub async fn unsafe_destroy_range(&self, start: Vec<u8>, end: Vec<u8>) -> Result<()> {
+		#[cfg(feature = "kv-tikv")]
+		if let Some(ops) = self.tikv_ops() {
+			return ops.unsafe_destroy_range(start, end).await.map_err(Into::into);
+		}
+		let _ = (start, end);
+		Ok(())
+	}
+
+	/// Advance the MVCC garbage-collection safepoint by `lifetime`.
+	///
+	/// Routes through the backend's [`TransactionBuilder::extension`] hook;
+	/// no-op on backends other than TiKV. Background tasks call this on
+	/// `EngineOptions::tikv_gc_interval` and shutdown runs one final
+	/// advisory pass.
+	pub async fn run_mvcc_gc(&self, lifetime: Duration) -> Result<()> {
+		#[cfg(feature = "kv-tikv")]
+		if let Some(ops) = self.tikv_ops() {
+			return ops.run_mvcc_gc(lifetime).await.map_err(Into::into);
+		}
+		let _ = lifetime;
+		Ok(())
+	}
+
+	/// Resolve stale transactional locks left by crashed clients.
+	///
+	/// Routes through the backend's [`TransactionBuilder::extension`] hook;
+	/// no-op on backends other than TiKV. Background tasks call this on
+	/// `EngineOptions::tikv_lock_cleanup_interval`.
+	pub async fn run_lock_cleanup(&self, lifetime: Duration) -> Result<()> {
+		#[cfg(feature = "kv-tikv")]
+		if let Some(ops) = self.tikv_ops() {
+			return ops.run_lock_cleanup(lifetime).await.map_err(Into::into);
+		}
+		let _ = lifetime;
+		Ok(())
+	}
+
+	/// Number of in-flight transactions tracked by the backend, when
+	/// available. `None` indicates the backend does not track this.
+	pub fn in_flight_transaction_count(&self) -> Option<usize> {
+		#[cfg(feature = "kv-tikv")]
+		if let Some(ops) = self.tikv_ops() {
+			return Some(ops.in_flight_transaction_count());
+		}
+		None
+	}
+
+	/// Resolve the TiKV operational extension handle, if the backend is
+	/// TiKV. Returns `None` for every other flavour.
+	#[cfg(feature = "kv-tikv")]
+	fn tikv_ops(&self) -> Option<Arc<super::tikv::TikvOpsHandle>> {
+		let ext = self
+			.transaction_factory
+			.builder
+			.extension(TypeId::of::<super::tikv::TikvOpsHandle>())?;
+		ext.downcast::<super::tikv::TikvOpsHandle>().ok()
 	}
 
 	// --------------------------------------------------

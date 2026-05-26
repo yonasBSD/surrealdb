@@ -62,8 +62,10 @@ pub fn init(dbs: Arc<Datastore>, canceller: CancellationToken, opts: &EngineOpti
 	let task3 = spawn_task_node_membership_cleanup(Arc::clone(&dbs), canceller.clone(), opts);
 	let task4 = spawn_task_changefeed_cleanup(Arc::clone(&dbs), canceller.clone(), opts);
 	let task5 = spawn_task_index_compaction(Arc::clone(&dbs), canceller.clone(), opts);
-	let task6 = spawn_task_event_processing(dbs, canceller, opts);
-	Tasks(vec![task1, task2, task3, task4, task5, task6])
+	let task6 = spawn_task_event_processing(Arc::clone(&dbs), canceller.clone(), opts);
+	let task7 = spawn_task_tikv_gc(Arc::clone(&dbs), canceller.clone(), opts);
+	let task8 = spawn_task_tikv_lock_cleanup(dbs, canceller, opts);
+	Tasks(vec![task1, task2, task3, task4, task5, task6, task7, task8])
 }
 
 fn spawn_task_node_membership_refresh(
@@ -284,6 +286,70 @@ fn spawn_task_event_processing(
 			}
 		}
 		trace!("Background task exited: Running event processing");
+	}))
+}
+
+/// Spawns the periodic TiKV MVCC GC pass.
+///
+/// On non-TiKV backends `Datastore::run_mvcc_gc` is a no-op and the task
+/// loops harmlessly. A configured interval of `Duration::ZERO` is treated
+/// as "disabled" so operators can opt out without recompiling.
+fn spawn_task_tikv_gc(
+	dbs: Arc<Datastore>,
+	canceller: CancellationToken,
+	opts: &EngineOptions,
+) -> Task {
+	let interval = opts.tikv_gc_interval;
+	let lifetime = opts.tikv_gc_lifetime;
+	Box::pin(spawn(async move {
+		if interval.is_zero() {
+			trace!("TiKV GC task disabled (interval=0)");
+			return;
+		}
+		trace!("Running TiKV MVCC GC every {interval:?} with lifetime {lifetime:?}");
+		let mut ticker = interval_ticker(interval).await;
+		loop {
+			tokio::select! {
+				biased;
+				_ = canceller.cancelled() => break,
+				Some(_) = ticker.next() => {
+					if let Err(e) = dbs.run_mvcc_gc(lifetime).await {
+						error!("Error running TiKV MVCC GC: {e}");
+					}
+				}
+			}
+		}
+		trace!("Background task exited: TiKV MVCC GC");
+	}))
+}
+
+/// Spawns the periodic TiKV stale-lock cleanup pass.
+fn spawn_task_tikv_lock_cleanup(
+	dbs: Arc<Datastore>,
+	canceller: CancellationToken,
+	opts: &EngineOptions,
+) -> Task {
+	let interval = opts.tikv_lock_cleanup_interval;
+	let lifetime = opts.tikv_gc_lifetime;
+	Box::pin(spawn(async move {
+		if interval.is_zero() {
+			trace!("TiKV lock-cleanup task disabled (interval=0)");
+			return;
+		}
+		trace!("Running TiKV stale-lock cleanup every {interval:?} with lifetime {lifetime:?}");
+		let mut ticker = interval_ticker(interval).await;
+		loop {
+			tokio::select! {
+				biased;
+				_ = canceller.cancelled() => break,
+				Some(_) = ticker.next() => {
+					if let Err(e) = dbs.run_lock_cleanup(lifetime).await {
+						error!("Error running TiKV lock cleanup: {e}");
+					}
+				}
+			}
+		}
+		trace!("Background task exited: TiKV lock cleanup");
 	}))
 }
 

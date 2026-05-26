@@ -150,7 +150,7 @@ version = "3.4.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.async-recursion]]
-version = "0.3.2"
+version = "1.1.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.async-stream]]
@@ -179,14 +179,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.aws-lc-sys]]
 version = "0.41.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.axum]]
-version = "0.6.20"
-criteria = "safe-to-deploy"
-
-[[exemptions.axum-core]]
-version = "0.3.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.axum-core]]
@@ -441,6 +433,10 @@ criteria = "safe-to-deploy"
 version = "10.0.0"
 criteria = "safe-to-run"
 
+[[exemptions.derive-new]]
+version = "0.7.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.deunicode]]
 version = "1.6.2"
 criteria = "safe-to-deploy"
@@ -542,7 +538,7 @@ version = "0.1.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.fail]]
-version = "0.4.0"
+version = "0.5.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.fastnum]]
@@ -674,10 +670,6 @@ version = "0.2.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.getrandom]]
-version = "0.1.16"
-criteria = "safe-to-deploy"
-
-[[exemptions.getrandom]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
 
@@ -759,10 +751,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.hyper-rustls]]
 version = "0.27.9"
-criteria = "safe-to-deploy"
-
-[[exemptions.hyper-timeout]]
-version = "0.4.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.hyper-timeout]]
@@ -955,10 +943,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.match_token]]
 version = "0.35.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.matchit]]
-version = "0.7.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.matchit]]
@@ -1230,7 +1214,7 @@ version = "3.5.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.prometheus]]
-version = "0.13.4"
+version = "0.14.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.proptest]]
@@ -1301,24 +1285,8 @@ criteria = "safe-to-deploy"
 version = "0.3.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.rand]]
-version = "0.7.3"
-criteria = "safe-to-deploy"
-
-[[exemptions.rand_chacha]]
-version = "0.2.2"
-criteria = "safe-to-deploy"
-
-[[exemptions.rand_core]]
-version = "0.5.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.rand_core]]
 version = "0.10.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.rand_hc]]
-version = "0.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.rayon]]
@@ -1438,23 +1406,11 @@ version = "4.1.0"
 criteria = "safe-to-run"
 
 [[exemptions.rustls]]
-version = "0.21.8"
-criteria = "safe-to-deploy"
-
-[[exemptions.rustls]]
 version = "0.23.40"
-criteria = "safe-to-deploy"
-
-[[exemptions.rustls-pemfile]]
-version = "1.0.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls-platform-verifier-android]]
 version = "0.1.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.rustls-webpki]]
-version = "0.101.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls-webpki]]
@@ -1495,10 +1451,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.scopeguard]]
 version = "1.1.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.sct]]
-version = "0.7.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.sdd]]
@@ -1583,10 +1535,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.smartstring]]
 version = "1.0.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.socket2]]
-version = "0.5.10"
 criteria = "safe-to-deploy"
 
 [[exemptions.socket2]]
@@ -1734,19 +1682,11 @@ version = "1.1.1+spec-1.1.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tonic]]
-version = "0.10.2"
-criteria = "safe-to-deploy"
-
-[[exemptions.tonic]]
 version = "0.14.6"
 criteria = "safe-to-deploy"
 
 [[exemptions.tonic-prost]]
 version = "0.14.6"
-criteria = "safe-to-deploy"
-
-[[exemptions.tower]]
-version = "0.4.13"
 criteria = "safe-to-deploy"
 
 [[exemptions.tower-layer]]

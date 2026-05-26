@@ -68,7 +68,25 @@ impl RemoveDatabaseStatement {
 			seq.database_removed(&txn, db.namespace_id, db.database_id).await?;
 		}
 
-		// Delete the definition
+		// Delete the definition.
+		//
+		// The transactional `del_db` path (which eventually calls
+		// `delp` / `clrp`) is bounded by `SURREAL_TIKV_DELR_MAX_KEYS`
+		// (default 1M) on TiKV. If the database is larger than that
+		// the call below returns `TransactionRangeTooLarge` and the
+		// outer transaction is rolled back — both the metadata clear
+		// and the partial prefix-delete are undone together, so the
+		// database is left intact (and reachable via the catalog)
+		// afterwards.
+		//
+		// Operators hitting that cap have two escape hatches:
+		//   1. Raise `SURREAL_TIKV_DELR_MAX_KEYS` for this datastore instance and re-issue the
+		//      `REMOVE DATABASE` statement.
+		//   2. Run [`crate::kvs::Datastore::unsafe_destroy_range`] against the database key prefix
+		//      *first*, shrinking the data side to something the bounded delete can swallow, then
+		//      re-issue `REMOVE DATABASE`. The catalog metadata still points at the (now-empty)
+		//      prefix during this window, so the unsafe destroy is consistent with what the
+		//      statement is about to do anyway.
 		txn.del_db(ns, &db.name, self.expunge).await?;
 
 		// Clear the cache

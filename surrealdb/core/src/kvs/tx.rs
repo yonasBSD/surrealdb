@@ -2071,6 +2071,33 @@ impl NamespaceProvider for Transaction {
 	) -> BoxProviderFut<'a, Result<NamespaceId>> {
 		Box::pin(async move { self.sequences.next_namespace_id(ctx).await })
 	}
+
+	fn del_ns<'a>(&'a self, ns: &'a str, expunge: bool) -> BoxProviderFut<'a, Result<Option<()>>> {
+		Box::pin(async move {
+			let Some(ns_def) = self.get_ns_by_name(ns, None).await? else {
+				return Ok(None);
+			};
+			let key = crate::key::root::ns::new(&ns_def.name);
+			let namespace_root = crate::key::namespace::all::new(ns_def.namespace_id);
+			if expunge {
+				self.clr(&key).await?;
+				self.clrp(&namespace_root).await?;
+			} else {
+				self.del(&key).await?;
+				self.delp(&namespace_root).await?;
+			};
+
+			// Invalidate the cached list of all namespaces
+			let list_key = cache::tx::Lookup::Nss;
+			self.cache.remove(&list_key);
+
+			// Invalidate the cached namespace entry
+			let ns_key = cache::tx::Lookup::NsByName(&ns_def.name);
+			self.cache.remove(&ns_key);
+
+			Ok(Some(()))
+		})
+	}
 }
 
 // --------------------------------------------------

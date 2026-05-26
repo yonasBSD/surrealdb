@@ -74,6 +74,27 @@ pub struct StartCommandArguments {
 	#[arg(env = "SURREAL_ASYNC_EVENT_PROCESSING_INTERVAL", long = "async-event-interval", value_parser = super::validator::duration)]
 	#[arg(default_value = "5s")]
 	event_processing_interval: Duration,
+	#[arg(
+		help = "The interval at which the TiKV MVCC garbage collector runs",
+		help_heading = "Database"
+	)]
+	#[arg(env = "SURREAL_TIKV_GC_INTERVAL", long = "tikv-gc-interval", value_parser = super::validator::duration)]
+	#[arg(default_value = "10m")]
+	tikv_gc_interval: Duration,
+	#[arg(
+		help = "How far behind the current TSO the TiKV GC safepoint is allowed to sit",
+		help_heading = "Database"
+	)]
+	#[arg(env = "SURREAL_TIKV_GC_LIFETIME", long = "tikv-gc-lifetime", value_parser = super::validator::duration)]
+	#[arg(default_value = "10m")]
+	tikv_gc_lifetime: Duration,
+	#[arg(
+		help = "The interval at which TiKV stale transactional locks are resolved",
+		help_heading = "Database"
+	)]
+	#[arg(env = "SURREAL_TIKV_LOCK_CLEANUP_INTERVAL", long = "tikv-lock-cleanup-interval", value_parser = super::validator::duration)]
+	#[arg(default_value = "60s")]
+	tikv_lock_cleanup_interval: Duration,
 	//
 	// Authentication
 	#[arg(
@@ -192,6 +213,9 @@ pub async fn init<
 		changefeed_gc_interval,
 		index_compaction_interval,
 		event_processing_interval,
+		tikv_gc_interval,
+		tikv_gc_lifetime,
+		tikv_lock_cleanup_interval,
 		no_banner,
 		no_identification_headers,
 		allow_origin,
@@ -229,7 +253,10 @@ pub async fn init<
 		.with_node_membership_cleanup_interval(node_membership_cleanup_interval)
 		.with_changefeed_gc_interval(changefeed_gc_interval)
 		.with_index_compaction_interval(index_compaction_interval)
-		.with_event_processing_interval(event_processing_interval);
+		.with_event_processing_interval(event_processing_interval)
+		.with_tikv_gc_interval(tikv_gc_interval)
+		.with_tikv_gc_lifetime(tikv_gc_lifetime)
+		.with_tikv_lock_cleanup_interval(tikv_lock_cleanup_interval);
 	// Configure the config
 	let Some(bind) = listen_addresses.first().copied() else {
 		return Err(anyhow::anyhow!("No listen address provided"));

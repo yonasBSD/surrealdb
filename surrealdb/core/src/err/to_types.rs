@@ -300,7 +300,9 @@ pub fn into_types_error(error: Error) -> TypesError {
 			}
 			KvsError::TransactionKeyAlreadyExists => TypesError::already_exists(message, None),
 			KvsError::ReadAndDeleteOnly => TypesError::not_allowed(message, None),
-			KvsError::TransactionTooLarge | KvsError::TransactionKeyTooLarge => {
+			KvsError::TransactionTooLarge
+			| KvsError::TransactionKeyTooLarge
+			| KvsError::TransactionRangeTooLarge(_) => {
 				TypesError::validation(message, ValidationError::InvalidParams)
 			}
 			KvsError::TransactionFinished
