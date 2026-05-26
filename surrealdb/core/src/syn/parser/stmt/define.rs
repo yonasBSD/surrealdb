@@ -31,7 +31,6 @@ use crate::syn::error::bail;
 use crate::syn::parser::mac::{expected, unexpected};
 use crate::syn::parser::{ParseResult, Parser};
 use crate::syn::token::{Token, TokenKind, t};
-use crate::types::PublicDuration;
 #[cfg(feature = "surrealism")]
 use crate::types::PublicFile;
 
@@ -348,12 +347,8 @@ impl Parser<'_> {
 			kind,
 			name,
 			base,
-			// Safety: "Viewer" does not contain a null byte
-			roles: vec!["Viewer".to_owned()], /* New users get
-			                                   * the viewer role
-			                                   * by default */
-			// TODO: Move out of the parser
-			token_duration: Expr::Literal(Literal::Duration(PublicDuration::from_secs(3600))), /* defaults to 1 hour. */
+			// New users get the viewer role by default.
+			roles: vec!["Viewer".to_owned()],
 			..DefineUserStatement::default()
 		};
 
