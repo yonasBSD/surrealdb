@@ -295,9 +295,16 @@ fn extract_table_and_rid_key(
 	};
 
 	let rid = match record.rid() {
-		// There is a floating point number for the id field
-		// TODO: Is this correct? Rounding to int seems like unexpected behavior.
-		Value::Number(id) if id.is_float() => Some(RecordIdKey::Number(id.as_int())),
+		// There is a floating point number for the id field. Only accept floats
+		// that round-trip exactly to an i64 (finite, no fractional part, within
+		// i64 range). Silent truncation, NaN, infinity and other lossy
+		// conversions are rejected — see `Number::as_int_lossless`.
+		Value::Number(id) if id.is_float() => match id.as_int_lossless() {
+			Some(i) => Some(RecordIdKey::Number(i)),
+			None => bail!(Error::InsertStatementId {
+				value: Value::Number(id).to_sql(),
+			}),
+		},
 		// There is an integer number for the id field
 		Value::Number(id) if id.is_int() => Some(RecordIdKey::Number(id.as_int())),
 		// There is a string for the id field

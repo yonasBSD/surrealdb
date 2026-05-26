@@ -288,6 +288,39 @@ impl Number {
 	// Complex conversion of number
 	// -----------------------------------
 
+	/// Convert to an `i64` only when the value round-trips exactly.
+	///
+	/// Returns `None` for any value that does not represent an exact integer
+	/// within `i64` range — including NaN, infinities, fractional values, and
+	/// out-of-range magnitudes. Lossy `as` casts (which saturate or truncate
+	/// silently) are deliberately avoided so callers can reject the input
+	/// rather than write a wrong value.
+	pub fn as_int_lossless(self) -> Option<i64> {
+		match self {
+			Number::Int(v) => Some(v),
+			Number::Float(v) => {
+				// `i64::MAX as f64` rounds up to 2^63 (the next representable
+				// f64), which is *not* in i64 range. `-(i64::MIN as f64)` is
+				// exactly 2^63 and is the right exclusive upper bound.
+				if !v.is_finite()
+					|| v.fract() != 0.0
+					|| v < i64::MIN as f64
+					|| v >= -(i64::MIN as f64)
+				{
+					return None;
+				}
+				Some(v as i64)
+			}
+			Number::Decimal(v) => {
+				if v.fract().is_zero() {
+					v.try_into().ok()
+				} else {
+					None
+				}
+			}
+		}
+	}
+
 	/// Convert to a `usize` suitable for array indexing.
 	///
 	/// Returns `None` for any value that does not represent an exact
@@ -1385,6 +1418,39 @@ mod tests {
 		check(&[Number::Int(1), Number::Float(1.0), Number::Decimal(Decimal::ONE)]);
 		check(&[Number::Int(-1), Number::Float(-1.0), Number::Decimal(Decimal::NEGATIVE_ONE)]);
 		check(&[Number::Float(1.5), Number::Decimal(Decimal::from_str_normalized("1.5").unwrap())]);
+	}
+
+	#[test]
+	fn as_int_lossless_accepts_valid() {
+		assert_eq!(Number::Int(0).as_int_lossless(), Some(0));
+		assert_eq!(Number::Int(i64::MIN).as_int_lossless(), Some(i64::MIN));
+		assert_eq!(Number::Int(i64::MAX).as_int_lossless(), Some(i64::MAX));
+		assert_eq!(Number::Float(0.0).as_int_lossless(), Some(0));
+		assert_eq!(Number::Float(-0.0).as_int_lossless(), Some(0));
+		assert_eq!(Number::Float(7.0).as_int_lossless(), Some(7));
+		// `i64::MIN` is exactly representable as `f64` and is the inclusive lower bound.
+		assert_eq!(Number::Float(i64::MIN as f64).as_int_lossless(), Some(i64::MIN));
+		assert_eq!(Number::Decimal(Decimal::ZERO).as_int_lossless(), Some(0));
+		assert_eq!(Number::Decimal(Decimal::ONE).as_int_lossless(), Some(1));
+		assert_eq!(Number::Decimal(Decimal::NEGATIVE_ONE).as_int_lossless(), Some(-1));
+	}
+
+	#[test]
+	fn as_int_lossless_rejects_invalid() {
+		assert_eq!(Number::Float(1.5).as_int_lossless(), None);
+		assert_eq!(Number::Float(-1.5).as_int_lossless(), None);
+		assert_eq!(Number::Float(f64::NAN).as_int_lossless(), None);
+		assert_eq!(Number::Float(f64::INFINITY).as_int_lossless(), None);
+		assert_eq!(Number::Float(f64::NEG_INFINITY).as_int_lossless(), None);
+		// `i64::MAX as f64` rounds up to 2^63, which is *not* in `i64` range —
+		// the exclusive upper bound is `-(i64::MIN as f64)`.
+		assert_eq!(Number::Float(i64::MAX as f64).as_int_lossless(), None);
+		assert_eq!(Number::Float(1e30).as_int_lossless(), None);
+		assert_eq!(Number::Float(-1e30).as_int_lossless(), None);
+		assert_eq!(
+			Number::Decimal(Decimal::from_str_normalized("1.5").unwrap()).as_int_lossless(),
+			None,
+		);
 	}
 
 	#[test]
