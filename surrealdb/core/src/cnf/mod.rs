@@ -455,3 +455,61 @@ pub static REGEX_CACHE_SIZE: LazyLock<usize> =
 /// `min(this, module_config.max_pool_size.unwrap_or(this))`.
 pub static SURREALISM_MAX_POOL_SIZE: LazyLock<usize> =
 	lazy_env_parse!("SURREAL_SURREALISM_MAX_POOL_SIZE", usize, 8);
+
+/// Number of worker threads in the shared KVS blocking threadpool
+/// (`surrealdb-threadpool`) used by the `kv-mem`, `kv-rocksdb`, and
+/// `kv-surrealkv` storage backends to run synchronous storage work off the
+/// tokio runtime.
+///
+/// Default: `num_cpus::get()` on hosts with at least 16 logical cores
+/// (matching the legacy `thread_per_core` behaviour with one pinned
+/// worker per core), `16` on smaller hosts. Override with
+/// `SURREAL_KVS_THREADPOOL_SIZE=<N>` (minimum `4`) to oversubscribe (more
+/// concurrent blocking-IO slots, useful when many workers stall on disk
+/// reads or fsyncs) or undersubscribe (cap blocking concurrency below
+/// core count).
+///
+/// Explicit overrides drop the per-core CPU pinning that the default
+/// applies on >=16-core hosts — pinning only makes sense when the
+/// worker count exactly matches the core count.
+///
+/// **Minimum: 4.** Some kvs operations always run on this pool — read-only
+/// `count` with sharded fan-out, `compact`, writable scans — and below ~4
+/// workers their throughput collapses (sharded `COUNT(*)` becomes serial,
+/// `compact` blocks all other always-pool work). Values below 4, non-numeric
+/// values, and an empty string are reported via `tracing::warn!` and the
+/// computed default is used instead.
+#[cfg(any(feature = "kv-mem", feature = "kv-rocksdb", feature = "kv-surrealkv"))]
+#[cfg(not(target_family = "wasm"))]
+pub static KVS_THREADPOOL_SIZE: LazyLock<usize> = LazyLock::new(|| {
+	let default = || {
+		let cores = num_cpus::get();
+		if cores >= 16 {
+			cores
+		} else {
+			16
+		}
+	};
+	const MINIMUM_OVERRIDE: usize = 4;
+	match std::env::var("SURREAL_KVS_THREADPOOL_SIZE") {
+		Err(_) => default(),
+		Ok(s) if s.is_empty() => default(),
+		Ok(s) => match s.parse::<usize>() {
+			Ok(n) if n >= MINIMUM_OVERRIDE => n,
+			Ok(n) => {
+				tracing::warn!(
+					target: "surrealdb::kvs::threadpool",
+					"SURREAL_KVS_THREADPOOL_SIZE={n} is below the minimum of {MINIMUM_OVERRIDE}; using default",
+				);
+				default()
+			}
+			Err(_) => {
+				tracing::warn!(
+					target: "surrealdb::kvs::threadpool",
+					"SURREAL_KVS_THREADPOOL_SIZE={s:?} is not a valid integer; using default",
+				);
+				default()
+			}
+		},
+	}
+});

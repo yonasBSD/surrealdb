@@ -1,27 +1,39 @@
 #![cfg(any(feature = "kv-mem", feature = "kv-rocksdb", feature = "kv-surrealkv"))]
 
-/// Minimum number of worker threads in the blocking threadpool when running
-/// on small-core hosts. Provides enough slack to absorb short bursts of
-/// blocking I/O (e.g. cold rocksdb block reads) without saturating the pool
-/// on 1-8 core deployments. At or above this threshold, the pool uses
-/// `thread_per_core` so each worker is pinned to a dedicated core.
-#[cfg(not(target_family = "wasm"))]
-const MINIMUM_WORKER_THREADS: usize = 16;
-
-/// Create a new blocking threadpool
+/// Create the shared KVS blocking threadpool.
+///
+/// Size and pinning behaviour are driven by [`crate::cnf::KVS_THREADPOOL_SIZE`]:
+///
+/// * When the resolved size matches the host's logical core count *and* that count is at least 16,
+///   the pool uses `affinitypool::thread_per_core` so each worker is pinned to a dedicated core.
+///   This is the default on ≥16-core hosts.
+/// * When the size is below 16 on a small-core host (the computed default floor), the pool is sized
+///   to 16 unpinned workers — enough slack to absorb short bursts of blocking I/O without occupying
+///   every core.
+/// * When `SURREAL_KVS_THREADPOOL_SIZE` is set to an explicit value that does not equal the core
+///   count (oversubscription or undersubscription), the pool drops pinning and uses that exact
+///   worker count.
 pub(super) fn initialise() {
 	// Create the threadpool and ignore errors
 	#[cfg(not(target_family = "wasm"))]
 	{
-		// Get the number of CPU cores
+		// Resolve the configured pool size (env-overridable; default
+		// computed from `num_cpus::get()` with a 16-thread floor).
+		let threads = *crate::cnf::KVS_THREADPOOL_SIZE;
+		// Cache the host's logical core count once so the pinning
+		// decision is consistent with the size resolution above.
 		let cores = num_cpus::get();
 		// Create the threadpool builder
 		let builder = affinitypool::Builder::new().thread_name("surrealdb-threadpool");
-		// Check if the core count is at or above the threshold
-		let builder = if cores >= MINIMUM_WORKER_THREADS {
+		// Pin one worker per core only when the configured size exactly
+		// matches the core count on a ≥16-core host. Any explicit
+		// over/under-subscription drops pinning, since pinning a count
+		// other than `num_cpus` is either impossible (too many) or
+		// leaves cores unused (too few).
+		let builder = if threads == cores && cores >= 16 {
 			builder.thread_per_core(true)
 		} else {
-			builder.worker_threads(MINIMUM_WORKER_THREADS)
+			builder.worker_threads(threads)
 		};
 		// Create the threadpool and ignore errors
 		let _ = builder.build().build_global();
