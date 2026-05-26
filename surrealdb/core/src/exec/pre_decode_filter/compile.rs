@@ -626,7 +626,10 @@ fn fuse_tree(node: PredNode) -> PredNode {
 			let parts: Vec<PredNode> = children.into_iter().map(fuse_tree).collect();
 			fuse_and_combine(parts)
 		}
-		PredNode::Or(children) => PredNode::Or(children.into_iter().map(fuse_tree).collect()),
+		PredNode::Or(children) => {
+			let parts: Vec<PredNode> = children.into_iter().map(fuse_tree).collect();
+			fuse_or_combine(parts)
+		}
 		PredNode::Not(inner) => PredNode::Not(Box::new(fuse_tree(*inner))),
 		other => other,
 	}
@@ -649,6 +652,158 @@ fn fuse_and_combine(children: Vec<PredNode>) -> PredNode {
 		flatten_and_into(&mut bucket, c);
 	}
 	partition_and_fuse(bucket)
+}
+
+/// Flatten nested [`PredNode::Or`] into a single flat list of disjunction arms.
+///
+/// Left-associative parsing nests `a OR b OR c` as `Or(Or(a, b), c)`, and bottom-up
+/// fusion may have already collapsed an inner `Or` into a [`PredNode::LeafSetMembership`].
+/// Flattening lets [`fuse_or_combine`] see every arm at once so same-field equalities
+/// across nesting levels fuse into one set.
+fn flatten_or_into(acc: &mut Vec<PredNode>, node: PredNode) {
+	match node {
+		PredNode::Or(xs) => {
+			for x in xs {
+				flatten_or_into(acc, x);
+			}
+		}
+		x => acc.push(x),
+	}
+}
+
+/// Whether `path` targets the synthetic record-root `id` field (`["id"]`).
+///
+/// `id` is not stored in the encoded record body — it is derived from the KV key,
+/// which only [`PreDecodeFilter::eval_leaf`] knows how to do (its id-key fast path).
+/// [`PreDecodeFilter::eval_set_membership`] reads from the body, so it would see
+/// `id` as missing and wrongly reject every row. Equality arms on `id` must
+/// therefore stay as [`PredNode::Leaf`] rather than fuse into a set — mirroring the
+/// `id`-leaf carve-out in [`partition_and_fuse`].
+fn is_synthetic_id_path(path: &[PathSegment]) -> bool {
+	path.len() == 1 && path[0].as_str() == "id"
+}
+
+/// Fuse a disjunction's arms, rewriting same-field equality chains into a single
+/// wire-fast [`PredNode::LeafSetMembership`].
+///
+/// `a = X OR a = Y` is semantically identical to `a IN [X, Y]` under SurrealQL's
+/// loose equality (`=` / [`operate::equal`]), which matches the `set.contains` probe
+/// used by `eval_set_membership`. Collapsing the chain pays one field descent + one
+/// hash probe per row instead of one descent + comparison per arm.
+///
+/// Conservative — an arm only joins a fused group when it is:
+/// - a [`PredNode::Leaf`] with `op == Equal`, `reversed == false`, a hashset-safe literal (see
+///   [`literal_hashset_element_safe`]), and a non-`id` path (see [`is_synthetic_id_path`]); or
+/// - an existing [`PredNode::LeafSetMembership`] with `op == Inside`, `reversed == false`, and a
+///   non-`id` path (absorbing an `a IN [..]` arm into the same-field group).
+///
+/// Everything else — `ExactEqual` (type-strict, diverges from the loose set path),
+/// `NotEqual`, `NotInside`, reversed arms, `id` paths, different fields, and non-leaf
+/// nodes — passes through untouched.
+fn fuse_or_combine(children: Vec<PredNode>) -> PredNode {
+	let mut bucket = Vec::new();
+	for c in children {
+		flatten_or_into(&mut bucket, c);
+	}
+
+	// A fuseable group of same-field arms. `arms` keeps each contributing node so a
+	// group that ends up with a single arm can be emitted verbatim (preserving e.g.
+	// an original `a IN [..]` arm rather than degrading it to a one-element `Leaf`).
+	struct Group {
+		path: Vec<PathSegment>,
+		set: HashSet<Value>,
+		arms: Vec<PredNode>,
+	}
+	// Slots preserve the original arm order in the output disjunction.
+	enum Slot {
+		Group(usize),
+		Passthrough(PredNode),
+	}
+
+	let mut groups: Vec<Group> = Vec::new();
+	let mut slots: Vec<Slot> = Vec::new();
+
+	'arm: for arm in bucket {
+		// Read the path + literals this arm would contribute, without moving it: a
+		// non-fuseable arm must pass through unchanged.
+		let contribution: Option<(Vec<PathSegment>, Vec<Value>)> = match &arm {
+			PredNode::Leaf {
+				path,
+				op: BinaryOperator::Equal,
+				literal,
+				reversed: false,
+				..
+			} if literal_hashset_element_safe(literal) && !is_synthetic_id_path(path) => {
+				Some((path.clone(), vec![literal.clone()]))
+			}
+			PredNode::LeafSetMembership {
+				path,
+				op: BinaryOperator::Inside,
+				set,
+				reversed: false,
+				..
+			} if !is_synthetic_id_path(path) => Some((path.clone(), set.iter().cloned().collect())),
+			_ => None,
+		};
+
+		let Some((path, literals)) = contribution else {
+			slots.push(Slot::Passthrough(arm));
+			continue;
+		};
+
+		for g in groups.iter_mut() {
+			if g.path == path {
+				for v in literals {
+					g.set.insert(v);
+				}
+				g.arms.push(arm);
+				continue 'arm;
+			}
+		}
+
+		let idx = groups.len();
+		let mut set = HashSet::new();
+		for v in literals {
+			set.insert(v);
+		}
+		groups.push(Group {
+			path,
+			set,
+			arms: vec![arm],
+		});
+		slots.push(Slot::Group(idx));
+	}
+
+	// Reassemble in stable order. A group with 2+ contributing arms collapses into
+	// one `LeafSetMembership`; a lone-arm group is emitted exactly as it came in.
+	let mut out: Vec<PredNode> = Vec::with_capacity(slots.len());
+	for slot in slots {
+		match slot {
+			Slot::Passthrough(n) => out.push(n),
+			Slot::Group(idx) => {
+				let g = &mut groups[idx];
+				if g.arms.len() >= 2 {
+					let set = std::mem::take(&mut g.set);
+					let literal_set = Arc::new(LiteralSet::from_set(&set));
+					out.push(PredNode::LeafSetMembership {
+						path: std::mem::take(&mut g.path),
+						op: BinaryOperator::Inside,
+						set: Arc::new(set),
+						literal_set,
+						reversed: false,
+					});
+				} else {
+					out.push(g.arms.pop().expect("group has >=1 arm"));
+				}
+			}
+		}
+	}
+
+	if out.len() == 1 {
+		out.pop().expect("len checked")
+	} else {
+		PredNode::Or(out)
+	}
 }
 
 fn partition_and_fuse(bucket: Vec<PredNode>) -> PredNode {
@@ -1271,6 +1426,78 @@ mod tests {
 	}
 
 	#[test]
+	fn compile_or_eq_same_field_fuses_to_set_membership() {
+		// `a = 1 OR a = 2` -> bare LeafSetMembership { a, {1, 2} }
+		let p = Arc::new(BinaryOp {
+			left: sb("a", BinaryOperator::Equal, Value::Number(Number::Int(1))),
+			op: BinaryOperator::Or,
+			right: sb("a", BinaryOperator::Equal, Value::Number(Number::Int(2))),
+		}) as Arc<dyn crate::exec::PhysicalExpr>;
+		let n = compile_predicate_shape(&p).expect("compile");
+		let PredNode::LeafSetMembership {
+			path,
+			op,
+			set,
+			reversed,
+			..
+		} = n
+		else {
+			panic!("expected LeafSetMembership, got {n:?}");
+		};
+		assert_eq!(path, vec![PathSegment::from("a")]);
+		assert_eq!(op, BinaryOperator::Inside);
+		assert!(!reversed);
+		assert_eq!(set.len(), 2);
+		assert!(set.contains(&Value::Number(Number::Int(1))));
+		assert!(set.contains(&Value::Number(Number::Int(2))));
+	}
+
+	#[test]
+	fn compile_or_eq_three_arms_fuses() {
+		// `a = 1 OR a = 2 OR a = 3` (left-assoc) -> LeafSetMembership { a, {1, 2, 3} }
+		let inner = Arc::new(BinaryOp {
+			left: sb("a", BinaryOperator::Equal, Value::Number(Number::Int(1))),
+			op: BinaryOperator::Or,
+			right: sb("a", BinaryOperator::Equal, Value::Number(Number::Int(2))),
+		}) as Arc<dyn crate::exec::PhysicalExpr>;
+		let p = Arc::new(BinaryOp {
+			left: inner,
+			op: BinaryOperator::Or,
+			right: sb("a", BinaryOperator::Equal, Value::Number(Number::Int(3))),
+		}) as Arc<dyn crate::exec::PhysicalExpr>;
+		let n = compile_predicate_shape(&p).expect("compile");
+		let PredNode::LeafSetMembership {
+			set,
+			..
+		} = n
+		else {
+			panic!("expected LeafSetMembership, got {n:?}");
+		};
+		assert_eq!(set.len(), 3);
+		for i in 1..=3 {
+			assert!(set.contains(&Value::Number(Number::Int(i))));
+		}
+	}
+
+	#[test]
+	fn compile_or_eq_different_fields_stays_or() {
+		// `a = 1 OR b = 2` -> disjunction preserved (no cross-field fusion).
+		let p = Arc::new(BinaryOp {
+			left: sb("a", BinaryOperator::Equal, Value::Number(Number::Int(1))),
+			op: BinaryOperator::Or,
+			right: sb("b", BinaryOperator::Equal, Value::Number(Number::Int(2))),
+		}) as Arc<dyn crate::exec::PhysicalExpr>;
+		let n = compile_predicate_shape(&p).expect("compile");
+		match n {
+			PredNode::Or(ch) => {
+				assert_eq!(ch.len(), 2);
+				assert!(ch.iter().all(|c| matches!(c, PredNode::Leaf { .. })));
+			}
+			other => panic!("expected Or, got {other:?}"),
+		}
+	}
+
+	#[test]
 	fn compile_array_len_eq_n_emits_leaf_streaming() {
 		use crate::exec::ContextLevel;
 		use crate::exec::parts::field::FieldPart;
@@ -1302,6 +1529,141 @@ mod tests {
 				assert_eq!(path, vec![PathSegment::from("tags")]);
 			}
 			other => panic!("expected LeafStreaming, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn compile_or_mixed_field_partial_fuse() {
+		// `a = 1 OR a = 2 OR b = 3` -> Or([ LeafSetMembership{a,{1,2}}, Leaf{b=3} ]).
+		let inner = Arc::new(BinaryOp {
+			left: sb("a", BinaryOperator::Equal, Value::Number(Number::Int(1))),
+			op: BinaryOperator::Or,
+			right: sb("a", BinaryOperator::Equal, Value::Number(Number::Int(2))),
+		}) as Arc<dyn crate::exec::PhysicalExpr>;
+		let p = Arc::new(BinaryOp {
+			left: inner,
+			op: BinaryOperator::Or,
+			right: sb("b", BinaryOperator::Equal, Value::Number(Number::Int(3))),
+		}) as Arc<dyn crate::exec::PhysicalExpr>;
+		let n = compile_predicate_shape(&p).expect("compile");
+		let PredNode::Or(ch) = n else {
+			panic!("expected Or, got {n:?}");
+		};
+		assert_eq!(ch.len(), 2);
+		let has_set = ch.iter().any(|c| {
+			matches!(c, PredNode::LeafSetMembership { path, set, .. }
+				if path == &vec![PathSegment::from("a")] && set.len() == 2)
+		});
+		let has_leaf = ch.iter().any(
+			|c| matches!(c, PredNode::Leaf { path, .. } if path == &vec![PathSegment::from("b")]),
+		);
+		assert!(has_set && has_leaf, "got {ch:?}");
+	}
+
+	#[test]
+	fn compile_or_exact_equal_not_fused() {
+		// `a == 1 OR a == 2` (ExactEqual) must NOT fuse: the set path is loose-eq.
+		let p = Arc::new(BinaryOp {
+			left: sb("a", BinaryOperator::ExactEqual, Value::Number(Number::Int(1))),
+			op: BinaryOperator::Or,
+			right: sb("a", BinaryOperator::ExactEqual, Value::Number(Number::Int(2))),
+		}) as Arc<dyn crate::exec::PhysicalExpr>;
+		let n = compile_predicate_shape(&p).expect("compile");
+		match n {
+			PredNode::Or(ch) => {
+				assert_eq!(ch.len(), 2);
+				assert!(ch.iter().all(|c| matches!(c, PredNode::Leaf { .. })));
+			}
+			other => panic!("expected Or, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn compile_or_absorbs_in_arm() {
+		// `a IN [1, 2] OR a = 3` -> LeafSetMembership { a, {1, 2, 3} }.
+		let arr = Value::from(vec![Value::Number(Number::Int(1)), Value::Number(Number::Int(2))]);
+		let p = Arc::new(BinaryOp {
+			left: sb("a", BinaryOperator::Inside, arr),
+			op: BinaryOperator::Or,
+			right: sb("a", BinaryOperator::Equal, Value::Number(Number::Int(3))),
+		}) as Arc<dyn crate::exec::PhysicalExpr>;
+		let n = compile_predicate_shape(&p).expect("compile");
+		let PredNode::LeafSetMembership {
+			path,
+			op,
+			set,
+			..
+		} = n
+		else {
+			panic!("expected LeafSetMembership, got {n:?}");
+		};
+		assert_eq!(path, vec![PathSegment::from("a")]);
+		assert_eq!(op, BinaryOperator::Inside);
+		assert_eq!(set.len(), 3);
+		for i in 1..=3 {
+			assert!(set.contains(&Value::Number(Number::Int(i))));
+		}
+	}
+
+	#[test]
+	fn compile_or_lone_in_arm_preserved() {
+		// `a IN [1, 2] OR b = 3` -> the lone IN arm stays a LeafSetMembership,
+		// it must not degrade into a single-element Leaf.
+		let arr = Value::from(vec![Value::Number(Number::Int(1)), Value::Number(Number::Int(2))]);
+		let p = Arc::new(BinaryOp {
+			left: sb("a", BinaryOperator::Inside, arr),
+			op: BinaryOperator::Or,
+			right: sb("b", BinaryOperator::Equal, Value::Number(Number::Int(3))),
+		}) as Arc<dyn crate::exec::PhysicalExpr>;
+		let n = compile_predicate_shape(&p).expect("compile");
+		let PredNode::Or(ch) = n else {
+			panic!("expected Or, got {n:?}");
+		};
+		assert_eq!(ch.len(), 2);
+		let has_set = ch.iter().any(|c| {
+			matches!(c, PredNode::LeafSetMembership { path, set, .. }
+				if path == &vec![PathSegment::from("a")] && set.len() == 2)
+		});
+		assert!(has_set, "lone IN arm should be preserved, got {ch:?}");
+	}
+
+	#[test]
+	fn compile_or_not_equal_not_fused() {
+		// `a != 1 OR a != 2` must NOT fuse (NotEqual is out of scope).
+		let p = Arc::new(BinaryOp {
+			left: sb("a", BinaryOperator::NotEqual, Value::Number(Number::Int(1))),
+			op: BinaryOperator::Or,
+			right: sb("a", BinaryOperator::NotEqual, Value::Number(Number::Int(2))),
+		}) as Arc<dyn crate::exec::PhysicalExpr>;
+		let n = compile_predicate_shape(&p).expect("compile");
+		match n {
+			PredNode::Or(ch) => {
+				assert_eq!(ch.len(), 2);
+				assert!(ch.iter().all(|c| matches!(c, PredNode::Leaf { .. })));
+			}
+			other => panic!("expected Or, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn compile_or_eq_id_field_not_fused() {
+		// `id = 1 OR id = 2`: the synthetic `id` field is derived from the KV key,
+		// which only `eval_leaf` can resolve. Fusing into a `LeafSetMembership` would
+		// route it through `eval_set_membership` (body lookup) and wrongly reject every
+		// row — so id equalities must stay an Or of Leaf nodes. (Regression test for the
+		// GraphQL `id: { in: [...] }` filter, which lowers to `id = a OR id = b`.)
+		let p = Arc::new(BinaryOp {
+			left: sb("id", BinaryOperator::Equal, Value::Number(Number::Int(1))),
+			op: BinaryOperator::Or,
+			right: sb("id", BinaryOperator::Equal, Value::Number(Number::Int(2))),
+		}) as Arc<dyn crate::exec::PhysicalExpr>;
+		let n = compile_predicate_shape(&p).expect("compile");
+		match n {
+			PredNode::Or(ch) => {
+				assert_eq!(ch.len(), 2);
+				assert!(ch.iter().all(|c| matches!(c, PredNode::Leaf { .. })));
+			}
+			other => panic!("expected Or, got {other:?}"),
 		}
 	}
 
