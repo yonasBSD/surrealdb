@@ -107,7 +107,7 @@ impl ExecOperator for RecordIdScan {
 			attrs.push(("predicate".to_string(), pred.to_sql()));
 		}
 		if let Some(s) = self.pre_decode_filter_status.explain_text() {
-			attrs.push(("pre_decode_filter".to_string(), s));
+			attrs.push(("pre_decode_filter".to_string(), s.to_string()));
 		}
 		attrs
 	}

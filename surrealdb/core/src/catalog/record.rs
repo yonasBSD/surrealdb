@@ -30,7 +30,21 @@ use crate::val::{RecordId, Value};
 /// // Check if it's an edge record
 /// assert!(!record.is_edge());
 /// ```
-#[revisioned(revision = 1)]
+/// - **Rev 1** — sequential fields (`u16 revision || metadata || data`). Skipping past `metadata`
+///   requires walking its inner structure with `SkipRevisioned`.
+/// - **Rev 2** — optimised envelope + `indexed_struct` prologue: `u16 revision || u32_le
+///   payload_length || [u32_le metadata_off, u32_le data_off] || metadata bytes || data bytes`. The
+///   two `u32_le` offsets are relative to the start of the prologue, so the data field's bytes are
+///   `payload[data_off..]` — O(1) to locate regardless of how big the metadata was.
+///
+/// The pre-decode filter consumes this via the macro-emitted accessor:
+/// `Record::walk_revisioned(...)?.into_data_bytes()?` returns the `data`
+/// field's bytes as `Cow<'_, [u8]>` in O(1) on rev-2 (offset-table slice) and
+/// via a sequential `metadata` skip on rev-1, without decoding the field's
+/// inner value. The caller then opens `Value::walk_revisioned` over the
+/// returned bytes for streaming descent — see
+/// [`crate::val::object_extract::extract_field_from_record_bytes`].
+#[revisioned(revision(1), revision(2, optimised, indexed_struct))]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Record {
 	/// Optional metadata about the record (e.g., record type)
@@ -99,6 +113,7 @@ impl KVValue for Record {
 		let record_rev = <u16 as DeserializeRevisioned>::deserialize_revisioned(&mut reader)?;
 		match record_rev {
 			1 => Self::decode_rev1_with_id(reader, rid),
+			2 => Self::decode_rev2_with_id(bytes, rid),
 			x => Err(anyhow!("Invalid revision `{x}` for type `Record`")),
 		}
 	}
@@ -108,10 +123,19 @@ impl Record {
 	/// Compile-time guard: every revision of [`Record`] supported on
 	/// disk must have a corresponding arm in [`Record::kv_decode_value`].
 	/// Bumping `#[revisioned(revision = N)]` on [`Record`] without adding
-	/// a matching `decode_revN_with_id` arm will trip this assertion at
+	/// a matching `decode_revN_with_id` arm trips this assertion at
 	/// `cargo build` time.
-	const _ASSERT_REVISION_DISPATCHER_COVERS_CURRENT: () =
-		assert!(<Record>::REVISION <= 1, "Record revision exceeds the decoder's handled max");
+	///
+	/// The strict equality (rather than `<=`) is deliberate: each revision
+	/// bump must be paired with a deliberate update here. Loosening to a
+	/// `<=` bound would let someone add `revision(3, …)` to the annotation
+	/// without writing a `decode_rev3_with_id` arm — `kv_decode_value`
+	/// would silently start erroring at runtime for rev-3 records, rather
+	/// than failing the build. Catching this at compile time is cheap.
+	const _ASSERT_REVISION_DISPATCHER_COVERS_CURRENT: () = assert!(
+		<Record>::REVISION == 2,
+		"Record revision changed: add the matching `decode_revN_with_id` arm in `kv_decode_value` and bump this assert",
+	);
 
 	/// Decode a `Record` revision-1 body (i.e. after the Record revision
 	/// tag has already been consumed), splicing the canonical `id` into
@@ -132,6 +156,39 @@ impl Record {
 			metadata,
 			data,
 		})
+	}
+
+	/// Decode a `Record` revision-2 (`optimised, indexed_struct`) value
+	/// from `bytes` starting at the `u16` revision tag. Defers the
+	/// envelope decode to the macro-generated
+	/// `<Record as DeserializeRevisioned>::deserialize_revisioned` and
+	/// then splices the canonical `id` into the top-level `Object` if the
+	/// payload is one.
+	///
+	/// Rev-1's hand-rolled decoder reads `metadata` and `data` sequentially
+	/// from the post-rev reader; the rev-2 envelope wraps the body in
+	/// `u32_le payload_length` plus an indexed-struct offset prologue, so
+	/// hand-rolling would duplicate the macro's envelope parsing. The
+	/// macro path is `O(field_count)` for skip-bound offsets plus the
+	/// actual field decodes, identical asymptotically to the rev-1 path.
+	///
+	/// **Why not splice-during-decode like rev-1?** Rev-1's hand-rolled
+	/// path reads `metadata` and `data` as locals then constructs the
+	/// `Record` from them, so it can mutate `data` between decoding fields
+	/// at zero cost. Rev-2 goes through the macro's full deserialiser,
+	/// which materialises a complete `Record` struct before returning —
+	/// we can't borrow `record.data` mutably mid-decode without forking
+	/// the macro's codegen. Splicing post-hoc costs one `VecMap::entry`
+	/// lookup against the (typically empty) top-level Object's key set;
+	/// rev-2 records also originate from the read side of KV, not the
+	/// scan hot loop, so this isn't on the critical descent path.
+	fn decode_rev2_with_id(bytes: &[u8], rid: RecordId) -> Result<Record> {
+		let mut reader: &[u8] = bytes;
+		let mut record = <Record as DeserializeRevisioned>::deserialize_revisioned(&mut reader)?;
+		if let Value::Object(obj) = &mut record.data {
+			obj.0.entry(ID_KEY).or_insert_with(|| Value::RecordId(rid));
+		}
+		Ok(record)
 	}
 
 	/// Creates a new record with the given data and no metadata
@@ -210,12 +267,14 @@ pub(crate) const LATEST_EDGE_VARIANT: u16 = 2;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, PartialOrd, Hash)]
 pub(crate) enum RecordType {
 	/// Represents a normal table record
+	/// From 3.0.0
 	#[default]
 	Table,
 	/// Revision-1 unit form of `Edge`. Records persisted before the
 	/// variant marker existed deserialize through this variant and are
 	/// upgraded to `Edge { variant: 1 }`, which corresponds to the
 	/// original adjacency-key layout (no embedded target vertex).
+	/// From v3.0.0 to 3.1.0
 	#[revision(end = 2, convert_fn = "upgrade_edge_v1", fields_name = "EdgeV1")]
 	Edge,
 	/// Represents an edge in a graph. `variant` identifies which
@@ -223,6 +282,7 @@ pub(crate) enum RecordType {
 	/// purge path knows exactly which keys to delete without probing
 	/// multiple formats. New edges get the current format generation;
 	/// older edges keep whatever variant they were written with.
+	/// From v3.1.0
 	#[revision(start = 2)]
 	Edge {
 		variant: u16,
@@ -332,7 +392,17 @@ mod tests {
 		// metadata bytes, a Bool encoding change) trip a test. Previously
 		// covered by the generic `test_serialize_deserialize` rstest, which
 		// dropped its Record case when the `KeyContext = ()` bound was added.
-		assert_eq!(Record::new(Value::Bool(true)).kv_encode_value().unwrap().len(), 5);
+		//
+		// Wire breakdown under rev-2 `optimised, indexed_struct`:
+		//   1 byte  u16 rev=2 (varint)
+		//   4 bytes u32_le payload_length = 12
+		//  12 bytes payload:
+		//      8 bytes prologue (`u32_le metadata_off=8, u32_le data_off=9`)
+		//      1 byte  metadata = Option::None tag
+		//      3 bytes data = Value::Bool(true) (rev=2 || tag=0x22 || 0x01)
+		//  ─────────
+		//  17 bytes total.
+		assert_eq!(Record::new(Value::Bool(true)).kv_encode_value().unwrap().len(), 17);
 	}
 
 	#[test]

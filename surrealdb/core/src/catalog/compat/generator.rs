@@ -1120,13 +1120,18 @@ fn test_v3_1_0_remains_unchanged() {
 	use sha2::{Digest, Sha256};
 
 	// Read the v3_1_0.rs file, hash it and assert on the hash.
-	// v3_1_0 is the rev-2 wire format snapshot adopted by PR #206; see
-	// `surrealdb/core/src/val/mod.rs:72-93` for the rationale on Value's
-	// rev-2 walker. NEVER modify v3_1_0.rs after commit; if a real
-	// format change ships, capture a new version snapshot rather than
-	// rotating this hash.
+	//
+	// v3_1_0 captures the rev-2 wire format. Originally adopted by PR #206
+	// (Value's rev-2 optimised walker — see `surrealdb/core/src/val/mod.rs`);
+	// regenerated when `Record` was bumped to `revision(2, optimised,
+	// indexed_struct)` so the data field's bytes can be sliced in O(1) by
+	// the pre-decode filter's descent path (via
+	// `Record::walk_revisioned(...)?.into_data_bytes()?`).
+	//
+	// NEVER modify v3_1_0.rs after commit; if a real format change ships,
+	// capture a new version snapshot rather than rotating this hash.
 	let v3_1_0 = include_bytes!("v3_1_0.rs");
 	let hash = Sha256::digest(v3_1_0);
 	let hash_str = hex::encode(hash);
-	assert_eq!(hash_str, "61dabcef43004f0367337ebc5ca1ce188cf7bee12a5e82c4faaa3bcc32ad3791");
+	assert_eq!(hash_str, "84897ab9a06cf136d1af5bb8ee0005462ebd56726de822724ff60c6dc3ba23a9");
 }

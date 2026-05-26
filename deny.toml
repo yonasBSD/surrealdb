@@ -69,6 +69,10 @@ yanked = "warn"
 #   via surrealdb-tikv-client -> tonic 0.10.2 -> rustls 0.21.12. SurrealDB does not parse CRLs
 #   through this transitive path. Remove once surrealdb-tikv-client moves to a tonic version
 #   that uses rustls 0.23+ (rustls-webpki >=0.103.13).
+# - for RUSTSEC-2026-0149, wasmtime-wasi 43.0.2 has a `path_open(TRUNCATE)` bug that bypasses
+#   the host's `FilePerms::WRITE` restriction. Fix requires wasmtime-wasi >=44.0.2, which means
+#   pulling wasmtime to 44+ workspace-wide. PR #228 is doing that bump alongside the diskann
+#   0.52 update; remove this entry once #228 lands on main and we rebase.
 ignore = [
     "RUSTSEC-2025-0134",
     "RUSTSEC-2025-0141",
@@ -77,6 +81,7 @@ ignore = [
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0099",
     "RUSTSEC-2026-0104",
+    "RUSTSEC-2026-0149",
 ]
 
 # --------------------------------------------------

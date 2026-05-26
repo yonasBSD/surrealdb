@@ -4,27 +4,65 @@
 
 use std::collections::BTreeMap;
 
-use revision::{Revisioned, SerializeRevisioned};
+use revision::{DeserializeRevisioned, SerializeRevisioned};
 use surrealdb_strand::Strand;
 
 use super::{
-	Extracted, ScanResult, TEST_DEPTH_LIMIT, descend_record_value_path, descend_value_slice_path,
-	extract_field_from_record_bytes, scan_record_object_at_path_for_keys_sorted,
-	scan_record_root_object_for_keys_sorted,
+	Extracted, PathSegment, SlotScanResult, TEST_DEPTH_LIMIT, descend_record_value_path,
+	descend_value_slice_path, extract_field_from_record_bytes,
+	scan_record_object_at_path_with_slots,
 };
 use crate::catalog::Record;
 use crate::val::{Number, Object, Value};
 
+/// Build a `Vec<PathSegment>` from string slices. Mirrors how the planner
+/// hands paths to descent (one segment per dotted part).
+fn p(segments: &[&str]) -> Vec<PathSegment> {
+	segments.iter().copied().map(PathSegment::from).collect()
+}
+
 /// Encode a "plain" record (no metadata) wrapping `obj` as `Value::Object(obj)`.
+///
+/// Routes through the macro-generated [`Record::serialize_revisioned`] so the
+/// produced bytes always match the latest revision's wire layout (rev-2
+/// optimised + indexed_struct as of DB-655's predecessor). Hand-rolling the
+/// envelope here used to work for rev 1 but breaks the moment the revision
+/// bumps — the offset prologue and `u32_le payload_length` envelope would be
+/// missing.
 fn wire_record_plain_object(obj: Object) -> Vec<u8> {
-	let val = Value::Object(obj);
-	let mut payload = Vec::new();
-	val.serialize_revisioned(&mut payload).unwrap();
+	let rec = Record {
+		metadata: None,
+		data: Value::Object(obj),
+	};
 	let mut out = Vec::new();
-	Record::revision().serialize_revisioned(&mut out).unwrap();
-	0u8.serialize_revisioned(&mut out).unwrap();
-	out.extend_from_slice(&payload);
+	rec.serialize_revisioned(&mut out).unwrap();
 	out
+}
+
+/// Test-only convenience over [`scan_record_object_at_path_with_slots`] that
+/// decodes each slot's wire bytes into a [`Value`] (or [`Value::None`] when
+/// the slot is absent), giving back the same `Vec<Value>` shape the legacy
+/// scan returned. Production callers run their evaluator on borrowed slot
+/// bytes inside the closure — the tests just verify the descent + needle
+/// pairing logic, so decoding the slots is harmless.
+fn scan_slots_decoded(
+	record_bytes: &[u8],
+	path: &[PathSegment],
+	needles: &[&[u8]],
+) -> SlotScanResult<Vec<Value>> {
+	scan_record_object_at_path_with_slots(record_bytes, path, needles, TEST_DEPTH_LIMIT, |slots| {
+		slots
+			.iter()
+			.map(|s| match s {
+				None => Value::None,
+				Some(bytes) => {
+					let mut r: &[u8] = bytes;
+					<Value as DeserializeRevisioned>::deserialize_revisioned(&mut r)
+						.unwrap_or(Value::None)
+				}
+			})
+			.collect()
+	})
 }
 
 #[test]
@@ -34,7 +72,7 @@ fn extract_existing_top_level_field() {
 		(Strand::from("b"), Value::Bool(true)),
 	]));
 	let rec = wire_record_plain_object(obj);
-	let result = extract_field_from_record_bytes(&rec, &[String::from("b")], TEST_DEPTH_LIMIT);
+	let result = extract_field_from_record_bytes(&rec, &p(&["b"]), TEST_DEPTH_LIMIT);
 	match result {
 		Extracted::Found(Value::Bool(true)) => {}
 		other => panic!("expected Found(Bool(true)), got {:?}", other),
@@ -46,11 +84,7 @@ fn extract_nested_field_descends_correctly() {
 	let inner = Object::from(BTreeMap::from([(Strand::from("x"), Value::Number(Number::Int(42)))]));
 	let outer = Object::from(BTreeMap::from([(Strand::from("o"), Value::Object(inner))]));
 	let rec = wire_record_plain_object(outer);
-	let result = extract_field_from_record_bytes(
-		&rec,
-		&[String::from("o"), String::from("x")],
-		TEST_DEPTH_LIMIT,
-	);
+	let result = extract_field_from_record_bytes(&rec, &p(&["o", "x"]), TEST_DEPTH_LIMIT);
 	assert!(matches!(result, Extracted::Found(Value::Number(Number::Int(42)))));
 }
 
@@ -58,8 +92,7 @@ fn extract_nested_field_descends_correctly() {
 fn missing_key_yields_missing() {
 	let obj = Object::from(BTreeMap::from([(Strand::from("only"), Value::Number(Number::Int(1)))]));
 	let rec = wire_record_plain_object(obj);
-	let result =
-		extract_field_from_record_bytes(&rec, &[String::from("missing")], TEST_DEPTH_LIMIT);
+	let result = extract_field_from_record_bytes(&rec, &p(&["missing"]), TEST_DEPTH_LIMIT);
 	assert!(matches!(result, Extracted::Missing));
 }
 
@@ -85,8 +118,7 @@ fn edge_metadata_extracts_data() {
 	};
 	let mut bytes = Vec::new();
 	rec.serialize_revisioned(&mut bytes).unwrap();
-	let result =
-		extract_field_from_record_bytes(&bytes, &[String::from("score")], TEST_DEPTH_LIMIT);
+	let result = extract_field_from_record_bytes(&bytes, &p(&["score"]), TEST_DEPTH_LIMIT);
 	match result {
 		Extracted::Found(Value::Number(Number::Int(7))) => {}
 		other => panic!("expected Found(Int(7)) for edge data, got {:?}", other),
@@ -115,8 +147,7 @@ fn aggregation_view_metadata_extracts_data() {
 	};
 	let mut bytes = Vec::new();
 	rec.serialize_revisioned(&mut bytes).unwrap();
-	let result =
-		extract_field_from_record_bytes(&bytes, &[String::from("total")], TEST_DEPTH_LIMIT);
+	let result = extract_field_from_record_bytes(&bytes, &p(&["total"]), TEST_DEPTH_LIMIT);
 	match result {
 		Extracted::Found(Value::Number(Number::Int(42))) => {}
 		other => panic!("expected Found(Int(42)) for aggregation row data, got {:?}", other),
@@ -138,7 +169,7 @@ fn descend_value_slice_path_decodes_field() {
 	let value = Value::Object(inner);
 	let mut wire = Vec::new();
 	value.serialize_revisioned(&mut wire).unwrap();
-	let result = descend_value_slice_path(&wire, &[String::from("k")]);
+	let result = descend_value_slice_path(&wire, &p(&["k"]));
 	match result {
 		Extracted::Found(Value::String(s)) => assert_eq!(s.as_str(), "v"),
 		other => panic!("unexpected: {:?}", other),
@@ -155,11 +186,84 @@ fn descend_record_value_path_round_trips_all_supported_types() {
 	let rec = wire_record_plain_object(obj);
 
 	for (key, expected) in [("alpha", 1), ("middle", 2), ("zeta", 3)] {
-		let result = descend_record_value_path(&rec, &[String::from(key)]);
+		let result = descend_record_value_path(&rec, &p(&[key]));
 		match result {
 			Extracted::Found(Value::Number(Number::Int(v))) => assert_eq!(v, expected),
 			other => panic!("unexpected for {key}: {other:?}"),
 		}
+	}
+}
+
+/// `scan_value_object_with_slots`'s indexed branch switches from
+/// `entries()` iteration to per-needle `find_value_bytes` when needles
+/// are sparse against a wide row (M · log N vs N · log M). The threshold
+/// is `4 * M < N`; a row with ≥ 12 entries indexed (need ≥ 8 to trigger
+/// the indexed prologue) and 2 needles satisfies that.
+#[test]
+fn scan_sparse_needles_against_wide_indexed_object_returns_correct_slots() {
+	// Object with 16 keys (well past the indexed-prologue threshold)
+	// — k00..k15 — each holding a distinct integer value.
+	let mut entries = BTreeMap::new();
+	for i in 0..16u64 {
+		entries.insert(Strand::from(format!("k{i:02}")), Value::Number(Number::Int(i as i64 * 10)));
+	}
+	let obj = Object::from(entries);
+	let rec = wire_record_plain_object(obj);
+
+	// 2 needles against 16 entries → 4*2 < 16 → needle-driven branch.
+	let needles: &[&[u8]] = &[b"k03", b"k12"];
+	let result = scan_slots_decoded(&rec, &[], needles);
+	match result {
+		SlotScanResult::Found(values) => {
+			assert_eq!(values.len(), 2);
+			assert!(matches!(values[0], Value::Number(Number::Int(30))));
+			assert!(matches!(values[1], Value::Number(Number::Int(120))));
+		}
+		other => panic!("expected Found, got {other:?}"),
+	}
+
+	// Absent needle in the sparse path stays `Value::None`. Keep the
+	// needle slice strictly UTF-8-ascending: `k03 < k12 < zzz`.
+	let needles: &[&[u8]] = &[b"k03", b"k12", b"zzz"];
+	let result = scan_slots_decoded(&rec, &[], needles);
+	match result {
+		SlotScanResult::Found(values) => {
+			assert_eq!(values.len(), 3);
+			assert!(matches!(values[0], Value::Number(Number::Int(30))));
+			assert!(matches!(values[1], Value::Number(Number::Int(120))));
+			assert!(matches!(values[2], Value::None));
+		}
+		other => panic!("expected Found with sparse-needle miss, got {other:?}"),
+	}
+}
+
+/// Symmetric coverage: same wide object, but with **dense** needles
+/// (M ≈ N) staying on the original `entries()`-iteration branch.
+#[test]
+fn scan_dense_needles_against_wide_indexed_object_returns_correct_slots() {
+	let mut entries = BTreeMap::new();
+	for i in 0..16u64 {
+		entries.insert(Strand::from(format!("k{i:02}")), Value::Number(Number::Int(i as i64 * 10)));
+	}
+	let obj = Object::from(entries);
+	let rec = wire_record_plain_object(obj);
+
+	// 12 needles against 16 entries → 4*12 = 48, not < 16 → entries()
+	// iteration. Result must still align with the input needle order.
+	let needle_strings: Vec<String> = (0..12).map(|i| format!("k{i:02}")).collect();
+	let needles: Vec<&[u8]> = needle_strings.iter().map(|s| s.as_bytes()).collect();
+	let result = scan_slots_decoded(&rec, &[], &needles);
+	match result {
+		SlotScanResult::Found(values) => {
+			assert_eq!(values.len(), 12);
+			for (i, v) in values.iter().enumerate() {
+				assert!(
+					matches!(v, Value::Number(Number::Int(n)) if *n == (i as i64) * 10),
+					"slot {i}: {v:?}",
+				);
+			}
+		}
+		other => panic!("expected Found, got {other:?}"),
 	}
 }
 
@@ -174,11 +278,16 @@ fn scan_record_root_returns_values_for_present_keys_and_none_for_absent() {
 
 	// Sorted needle list with a missing key in the middle.
 	let needles: &[&[u8]] = &[b"a", b"missing", b"z"];
-	let result = scan_record_root_object_for_keys_sorted(&rec, needles).expect("plain row");
-	assert_eq!(result.len(), 3);
-	assert!(matches!(result[0], Value::Bool(false)));
-	assert!(matches!(result[1], Value::None));
-	assert!(matches!(result[2], Value::Bool(true)));
+	let result = scan_slots_decoded(&rec, &[], needles);
+	match result {
+		SlotScanResult::Found(values) => {
+			assert_eq!(values.len(), 3);
+			assert!(matches!(values[0], Value::Bool(false)));
+			assert!(matches!(values[1], Value::None));
+			assert!(matches!(values[2], Value::Bool(true)));
+		}
+		other => panic!("expected Found at root, got {other:?}"),
+	}
 }
 
 #[test]
@@ -197,16 +306,16 @@ fn scan_record_object_at_path_walks_nested_object() {
 	let rec = wire_record_plain_object(outer);
 
 	let needles: &[&[u8]] = &[b"a", b"b", b"missing"];
-	let path = [String::from("outer")];
-	let result = scan_record_object_at_path_for_keys_sorted(&rec, &path, needles, TEST_DEPTH_LIMIT);
+	let path = p(&["outer"]);
+	let result = scan_slots_decoded(&rec, &path, needles);
 	match result {
-		ScanResult::Found(values) => {
+		SlotScanResult::Found(values) => {
 			assert_eq!(values.len(), 3);
 			assert!(matches!(values[0], Value::Number(Number::Int(1))));
 			assert!(matches!(values[1], Value::Number(Number::Int(2))));
 			assert!(matches!(values[2], Value::None));
 		}
-		other => panic!("expected Found, got {:?}", other),
+		other => panic!("expected Found, got {other:?}"),
 	}
 }
 
@@ -221,9 +330,9 @@ fn scan_record_object_at_path_missing_intermediate_yields_missing() {
 	let rec = wire_record_plain_object(outer);
 
 	let needles: &[&[u8]] = &[b"a"];
-	let path = [String::from("outer"), String::from("inner")];
-	let result = scan_record_object_at_path_for_keys_sorted(&rec, &path, needles, TEST_DEPTH_LIMIT);
-	assert!(matches!(result, ScanResult::Missing));
+	let path = p(&["outer", "inner"]);
+	let result = scan_slots_decoded(&rec, &path, needles);
+	assert!(matches!(result, SlotScanResult::Missing));
 }
 
 #[test]
@@ -235,9 +344,9 @@ fn scan_record_object_at_path_non_object_intermediate_bails() {
 	let rec = wire_record_plain_object(outer);
 
 	let needles: &[&[u8]] = &[b"a"];
-	let path = [String::from("outer"), String::from("anything")];
-	let result = scan_record_object_at_path_for_keys_sorted(&rec, &path, needles, TEST_DEPTH_LIMIT);
-	assert!(matches!(result, ScanResult::Bail));
+	let path = p(&["outer", "anything"]);
+	let result = scan_slots_decoded(&rec, &path, needles);
+	assert!(matches!(result, SlotScanResult::Bail));
 }
 
 /// Non-ASCII keys lock down the load-bearing claim of the byte-borrowed
@@ -259,22 +368,28 @@ fn extract_handles_non_ascii_keys() {
 	]));
 	let rec = wire_record_plain_object(obj);
 	for (key, expected) in [("café", 1i64), ("naïve", 2), ("日本", 3)] {
-		match extract_field_from_record_bytes(&rec, &[String::from(key)], TEST_DEPTH_LIMIT) {
+		match extract_field_from_record_bytes(&rec, &p(&[key]), TEST_DEPTH_LIMIT) {
 			Extracted::Found(Value::Number(Number::Int(n))) => {
 				assert_eq!(n, expected, "wrong value for key {key:?}")
 			}
 			other => panic!("expected Found(Int({expected})) for {key:?}, got {other:?}"),
 		}
 	}
-	// Multi-needle scan over the same object exercises `with_key_bytes`.
+	// Multi-needle scan over the same object exercises the byte-borrowed
+	// `find_value_bytes` path.
 	let needles: &[&[u8]] = &["café".as_bytes(), "naïve".as_bytes(), "日本".as_bytes()];
-	let scanned = scan_record_root_object_for_keys_sorted(&rec, needles).expect("plain row");
-	assert_eq!(scanned.len(), 3);
-	for (got, expected) in scanned.iter().zip([1i64, 2, 3]) {
-		match got {
-			Value::Number(Number::Int(n)) => assert_eq!(*n, expected),
-			other => panic!("expected Int({expected}), got {other:?}"),
+	let result = scan_slots_decoded(&rec, &[], needles);
+	match result {
+		SlotScanResult::Found(scanned) => {
+			assert_eq!(scanned.len(), 3);
+			for (got, expected) in scanned.iter().zip([1i64, 2, 3]) {
+				match got {
+					Value::Number(Number::Int(n)) => assert_eq!(*n, expected),
+					other => panic!("expected Int({expected}), got {other:?}"),
+				}
+			}
 		}
+		other => panic!("expected Found, got {other:?}"),
 	}
 }
 
@@ -302,7 +417,7 @@ fn descent_bails_past_depth_limit() {
 	// pressuring the descent's per-level allocations.
 	let depth = 8usize;
 	let rec = wire_record_nested_x(depth);
-	let path: Vec<String> = std::iter::repeat_n(String::from("x"), depth).collect();
+	let path: Vec<PathSegment> = std::iter::repeat_n(PathSegment::from("x"), depth).collect();
 	let limit: u32 = (depth as u32) - 1;
 
 	let extracted = super::extract_field_from_record_bytes(&rec, &path, limit);
@@ -321,7 +436,7 @@ fn descent_succeeds_at_exact_depth_limit() {
 	// be rejected by the cap — the check is strict `>` not `>=`.
 	let depth = 8usize;
 	let rec = wire_record_nested_x(depth);
-	let path: Vec<String> = std::iter::repeat_n(String::from("x"), depth).collect();
+	let path: Vec<PathSegment> = std::iter::repeat_n(PathSegment::from("x"), depth).collect();
 	let limit: u32 = depth as u32;
 
 	let extracted = super::extract_field_from_record_bytes(&rec, &path, limit);
@@ -338,15 +453,15 @@ fn descent_bails_on_zero_depth_limit() {
 	// Trivial edge case: a zero limit always bails because every real
 	// descent has at least one segment.
 	let rec = wire_record_nested_x(1);
-	let path = vec![String::from("x")];
+	let path = p(&["x"]);
 	let extracted = super::extract_field_from_record_bytes(&rec, &path, 0);
 	assert!(matches!(extracted, Extracted::Bail));
 }
 
 #[test]
-fn scan_record_object_at_path_with_empty_path_falls_back_to_root() {
-	// Empty path should produce the same scan output as the root-only
-	// helper: needles resolve directly against the row's outer object.
+fn scan_record_object_at_path_with_empty_path_resolves_against_root() {
+	// Empty path resolves needles directly against the row's outer object
+	// — same shape as a `path = []` scan, no NavigatePrefix descent needed.
 	let obj = Object::from(BTreeMap::from([
 		(Strand::from("a"), Value::Bool(false)),
 		(Strand::from("z"), Value::Bool(true)),
@@ -354,15 +469,14 @@ fn scan_record_object_at_path_with_empty_path_falls_back_to_root() {
 	let rec = wire_record_plain_object(obj);
 
 	let needles: &[&[u8]] = &[b"a", b"missing", b"z"];
-	let via_path = scan_record_object_at_path_for_keys_sorted(&rec, &[], needles, TEST_DEPTH_LIMIT);
-	let via_root = scan_record_root_object_for_keys_sorted(&rec, needles).expect("plain row");
-	match via_path {
-		ScanResult::Found(values) => {
-			assert_eq!(values.len(), via_root.len());
-			for (a, b) in values.iter().zip(via_root.iter()) {
-				assert_eq!(a, b);
-			}
+	let result = scan_slots_decoded(&rec, &[], needles);
+	match result {
+		SlotScanResult::Found(values) => {
+			assert_eq!(values.len(), 3);
+			assert!(matches!(values[0], Value::Bool(false)));
+			assert!(matches!(values[1], Value::None));
+			assert!(matches!(values[2], Value::Bool(true)));
 		}
-		other => panic!("expected Found, got {:?}", other),
+		other => panic!("expected Found, got {other:?}"),
 	}
 }

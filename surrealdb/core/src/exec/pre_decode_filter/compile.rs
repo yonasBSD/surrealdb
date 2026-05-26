@@ -4,11 +4,13 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 use memchr::memmem;
+use surrealdb_strand::Strand;
 
 use super::streaming::{
 	ArrayElementContains, ArrayOverlapsLiteralSet, OverlapMode, StreamingLeafEvaluator,
 	SubstringMatch, overlap_streaming_from_set,
 };
+use super::wire_literal::{LiteralSet, LiteralWire};
 use super::{
 	FusedFlatClause, FusedFlatClauses, LeafFallback, PreDecodeFilter, PreDecodeFilterReason,
 	PreDecodeFilterStatus, PredNode,
@@ -22,6 +24,7 @@ use crate::exec::physical_expr::{
 };
 use crate::exec::planner::is_simple_binary_eligible;
 use crate::expr::operator::{BinaryOperator, PrefixOperator};
+use crate::val::object_extract::PathSegment;
 use crate::val::{RecordId, RecordIdKey, Value};
 
 /// Compile the physical WHERE predicate into a fused predicate tree for KV-byte inspection.
@@ -42,7 +45,7 @@ pub(crate) fn compile_predicate_shape(
 /// Used by [`finalize_pre_decode_filter`] to apply field-state checks only against fields the
 /// predicate actually inspects, rather than rejecting the pre-decode filter for the whole table
 /// when an unrelated field is computed or has restricted permissions.
-fn collect_referenced_root_segments(node: &PredNode, out: &mut BTreeSet<String>) {
+fn collect_referenced_root_segments(node: &PredNode, out: &mut BTreeSet<Strand>) {
 	match node {
 		PredNode::And(xs) | PredNode::Or(xs) => {
 			for c in xs {
@@ -55,7 +58,7 @@ fn collect_referenced_root_segments(node: &PredNode, out: &mut BTreeSet<String>)
 			..
 		} => {
 			if let Some(seg) = path.first() {
-				out.insert(seg.clone());
+				out.insert(seg.as_strand().clone());
 			}
 		}
 		PredNode::LeafSetMembership {
@@ -63,7 +66,7 @@ fn collect_referenced_root_segments(node: &PredNode, out: &mut BTreeSet<String>)
 			..
 		} => {
 			if let Some(seg) = path.first() {
-				out.insert(seg.clone());
+				out.insert(seg.as_strand().clone());
 			}
 		}
 		PredNode::LeafStreaming {
@@ -71,7 +74,7 @@ fn collect_referenced_root_segments(node: &PredNode, out: &mut BTreeSet<String>)
 			..
 		} => {
 			if let Some(seg) = path.first() {
-				out.insert(seg.clone());
+				out.insert(seg.as_strand().clone());
 			}
 		}
 		PredNode::FusedFlatMapAnd {
@@ -81,7 +84,7 @@ fn collect_referenced_root_segments(node: &PredNode, out: &mut BTreeSet<String>)
 			if *at_record_root {
 				for c in clauses.iter() {
 					if let Ok(s) = std::str::from_utf8(&c.key_utf8) {
-						out.insert(s.to_string());
+						out.insert(Strand::from(s));
 					}
 				}
 			}
@@ -103,7 +106,7 @@ fn collect_referenced_root_segments(node: &PredNode, out: &mut BTreeSet<String>)
 			segment,
 			child: _,
 		} => {
-			out.insert(segment.clone());
+			out.insert(segment.as_strand().clone());
 		}
 	}
 }
@@ -128,7 +131,7 @@ pub(crate) fn finalize_pre_decode_filter(
 	check_perms: bool,
 	depth_limit: u32,
 ) -> Result<Arc<PreDecodeFilter>, PreDecodeFilterReason> {
-	let mut refs = BTreeSet::new();
+	let mut refs: BTreeSet<Strand> = BTreeSet::new();
 	collect_referenced_root_segments(root, &mut refs);
 	for name in &refs {
 		if field_state.computed_fields.iter().any(|c| c.field_name() == name.as_str()) {
@@ -276,7 +279,7 @@ fn try_build_inside_literal_hashset(literal: &Value) -> Option<Arc<HashSet<Value
 
 /// Try to compile a containment / overlap predicate into [`PredNode::LeafStreaming`].
 fn try_compile_leaf_streaming(
-	path: Vec<String>,
+	path: Vec<PathSegment>,
 	op: &BinaryOperator,
 	literal: &Value,
 	reversed: bool,
@@ -305,8 +308,10 @@ fn try_compile_leaf_streaming(
 				})
 			} else {
 				let negated = matches!(op, BinaryOperator::NotContain);
+				let needle_wire = Arc::new(LiteralWire::from_value(literal));
 				let evaluator: Arc<dyn StreamingLeafEvaluator> = Arc::new(ArrayElementContains {
 					needle: Arc::new(literal.clone()),
+					needle_wire,
 					negated,
 				});
 				Some(PredNode::LeafStreaming {
@@ -318,7 +323,7 @@ fn try_compile_leaf_streaming(
 		}
 		BinaryOperator::ContainAny | BinaryOperator::ContainNone | BinaryOperator::ContainAll => {
 			let set = try_build_inside_literal_hashset(literal)?;
-			let literal_to_idx = overlap_streaming_from_set(set.as_ref());
+			let tables = overlap_streaming_from_set(set.as_ref());
 			let mode = match op {
 				BinaryOperator::ContainAny => OverlapMode::Any,
 				BinaryOperator::ContainNone => OverlapMode::None,
@@ -326,7 +331,9 @@ fn try_compile_leaf_streaming(
 				_ => return None,
 			};
 			let evaluator: Arc<dyn StreamingLeafEvaluator> = Arc::new(ArrayOverlapsLiteralSet {
-				literal_to_idx,
+				literal_to_idx: tables.literal_to_idx,
+				wire_to_idx: tables.wire_to_idx,
+				literal_set: tables.literal_set,
 				mode,
 			});
 			Some(PredNode::LeafStreaming {
@@ -425,25 +432,29 @@ fn compile_simple_binary(sb: &SimpleBinaryOp) -> Option<PredNode> {
 	if !is_simple_binary_eligible(&sb.op) || unsupported_containment_like(&sb.op) {
 		return None;
 	}
-	let path = vec![sb.field_name.clone()];
+	let path: Vec<PathSegment> = vec![PathSegment::from(sb.field_name.as_str())];
 	if !sb.reversed
 		&& matches!(sb.op, BinaryOperator::Inside | BinaryOperator::NotInside)
 		&& let Some(set) = try_build_inside_literal_hashset(&sb.literal)
 	{
+		let literal_set = Arc::new(LiteralSet::from_set(set.as_ref()));
 		return Some(PredNode::LeafSetMembership {
 			path,
 			op: sb.op.clone(),
 			set,
+			literal_set,
 			reversed: false,
 		});
 	}
 	if let Some(n) = try_compile_leaf_streaming(path.clone(), &sb.op, &sb.literal, sb.reversed) {
 		return Some(n);
 	}
+	let literal_wire = Arc::new(LiteralWire::from_value(&sb.literal));
 	Some(PredNode::Leaf {
 		path,
 		op: sb.op.clone(),
 		literal: sb.literal.clone(),
+		literal_wire,
 		reversed: sb.reversed,
 	})
 }
@@ -457,14 +468,99 @@ fn compile_binary(b: &BinaryOp) -> Option<PredNode> {
 			Some(PredNode::Or(vec![compile_expr(&b.left)?, compile_expr(&b.right)?]))
 		}
 		_ => {
-			if is_simple_binary_eligible(&b.op) && !unsupported_containment_like(&b.op) {
-				compile_field_lit_pair(&b.left, &b.right, false, &b.op)
-					.or_else(|| compile_field_lit_pair(&b.right, &b.left, true, &b.op))
-			} else {
-				None
+			if !is_simple_binary_eligible(&b.op) || unsupported_containment_like(&b.op) {
+				return None;
 			}
+			// Try the dedicated `array::len(field) <op> N` shape first —
+			// it bypasses every field-value decode by reading just the
+			// array's prologue length.
+			if let Some(n) = try_compile_array_len_pair(&b.left, &b.right, false, &b.op) {
+				return Some(n);
+			}
+			if let Some(n) = try_compile_array_len_pair(&b.right, &b.left, true, &b.op) {
+				return Some(n);
+			}
+			compile_field_lit_pair(&b.left, &b.right, false, &b.op)
+				.or_else(|| compile_field_lit_pair(&b.right, &b.left, true, &b.op))
 		}
 	}
+}
+
+/// Recognise `array::len(field) <op> N` and emit a `LeafStreaming` over
+/// [`ArrayLenCompare`] (skips every Strand / Value decode — reads the
+/// array's varint length prologue and compares).
+///
+/// Returns `None` for any other shape; the caller falls back to
+/// [`compile_field_lit_pair`].
+fn try_compile_array_len_pair(
+	function_side: &Arc<dyn PhysicalExpr>,
+	literal_side: &Arc<dyn PhysicalExpr>,
+	reversed: bool,
+	op: &BinaryOperator,
+) -> Option<PredNode> {
+	use super::streaming::ArrayLenCompare;
+	use crate::exec::physical_expr::function::BuiltinFunctionExec;
+	use crate::val::Number;
+
+	let func = function_side.as_ref().downcast_ref::<BuiltinFunctionExec>()?;
+	if func.name != "array::len" || func.arguments.len() != 1 {
+		return None;
+	}
+	let path = resolve_static_path(&func.arguments[0])?;
+	let literal = try_static_literal_value(literal_side)?;
+	let Value::Number(n) = literal.clone() else {
+		return None;
+	};
+	let expected_len: i64 = match n {
+		Number::Int(i) => i,
+		Number::Float(f)
+			if f.fract() == 0.0 && (i64::MIN as f64..=i64::MAX as f64).contains(&f) =>
+		{
+			f as i64
+		}
+		_ => return None,
+	};
+	// `array::len(x) > N` and `N < array::len(x)` are the same predicate;
+	// when `reversed`, flip the operator so the evaluator's comparison
+	// stays "actual <op> expected_len".
+	let effective_op = if reversed {
+		match op {
+			BinaryOperator::LessThan => BinaryOperator::MoreThan,
+			BinaryOperator::LessThanEqual => BinaryOperator::MoreThanEqual,
+			BinaryOperator::MoreThan => BinaryOperator::LessThan,
+			BinaryOperator::MoreThanEqual => BinaryOperator::LessThanEqual,
+			// Equal / NotEqual / ExactEqual are commutative.
+			BinaryOperator::Equal | BinaryOperator::NotEqual | BinaryOperator::ExactEqual => {
+				op.clone()
+			}
+			_ => return None,
+		}
+	} else {
+		match op {
+			BinaryOperator::Equal
+			| BinaryOperator::ExactEqual
+			| BinaryOperator::NotEqual
+			| BinaryOperator::LessThan
+			| BinaryOperator::LessThanEqual
+			| BinaryOperator::MoreThan
+			| BinaryOperator::MoreThanEqual => op.clone(),
+			_ => return None,
+		}
+	};
+	let fallback = LeafFallback {
+		op: op.clone(),
+		literal,
+		reversed,
+	};
+	let evaluator: Arc<dyn StreamingLeafEvaluator> = Arc::new(ArrayLenCompare {
+		expected_len,
+		op: effective_op,
+	});
+	Some(PredNode::LeafStreaming {
+		path,
+		evaluator,
+		fallback,
+	})
 }
 
 fn compile_field_lit_pair(
@@ -479,31 +575,36 @@ fn compile_field_lit_pair(
 		&& matches!(op, BinaryOperator::Inside | BinaryOperator::NotInside)
 		&& let Some(set) = try_build_inside_literal_hashset(&literal)
 	{
+		let literal_set = Arc::new(LiteralSet::from_set(set.as_ref()));
 		return Some(PredNode::LeafSetMembership {
 			path,
 			op: op.clone(),
 			set,
+			literal_set,
 			reversed: false,
 		});
 	}
 	if let Some(n) = try_compile_leaf_streaming(path.clone(), op, &literal, reversed) {
 		return Some(n);
 	}
+	let literal_wire = Arc::new(LiteralWire::from_value(&literal));
 	Some(PredNode::Leaf {
 		path,
 		op: op.clone(),
 		literal,
+		literal_wire,
 		reversed,
 	})
 }
 
-fn resolve_static_path(e: &Arc<dyn PhysicalExpr>) -> Option<Vec<String>> {
+fn resolve_static_path(e: &Arc<dyn PhysicalExpr>) -> Option<Vec<PathSegment>> {
 	let e: &dyn PhysicalExpr = e.as_ref();
 	if let Some(id) = e.downcast_ref::<IdiomExpr>() {
 		id.try_static_object_field_path()
+			.map(|parts| parts.into_iter().map(PathSegment::from).collect())
 	} else {
 		let s = e.try_simple_field()?;
-		Some(vec![s.to_owned()])
+		Some(vec![PathSegment::from(s)])
 	}
 }
 
@@ -603,7 +704,7 @@ fn partition_and_fuse(bucket: Vec<PredNode>) -> PredNode {
 }
 
 fn leaf_to_spec(
-	path: Vec<String>,
+	path: Vec<PathSegment>,
 	op: BinaryOperator,
 	literal: Value,
 	reversed: bool,
@@ -621,7 +722,7 @@ fn leaf_to_spec(
 
 #[derive(Clone)]
 struct FuseLeaf {
-	path: Vec<String>,
+	path: Vec<PathSegment>,
 	op: BinaryOperator,
 	literal: Value,
 	reversed: bool,
@@ -634,6 +735,7 @@ fn build_root_fused_flat_map(leaves: &[PredNode]) -> Option<PredNode> {
 			path,
 			op,
 			literal,
+			literal_wire: _,
 			reversed,
 		} = n
 		{
@@ -649,24 +751,34 @@ fn build_root_fused_flat_map(leaves: &[PredNode]) -> Option<PredNode> {
 	})
 }
 
-/// Returns a [`FusedFlatClauses`] (strictly ascending by UTF‑8 `key_utf8`, unique keys) from
-/// the supplied root-leaf specs. Returns `None` if any spec has a non-single-segment path —
-/// the BTreeMap guarantees the sortedness/dedup invariant for the success case.
+/// Returns a [`FusedFlatClauses`] (strictly ascending by UTF‑8 `key_utf8`,
+/// unique keys) from the supplied root-leaf specs. Multiple specs with the
+/// same `key_utf8` are folded into a single [`FusedFlatClause`] holding all
+/// of their `(op, literal, reversed)` triples in `ops` — input order is
+/// preserved per key. Returns `None` if any spec has a non-single-segment
+/// path; the `BTreeMap` guarantees the sortedness/dedup invariant for the
+/// success case.
 fn flat_clauses_from_specs(specs: &[FuseLeaf]) -> Option<FusedFlatClauses> {
-	let mut map: BTreeMap<Vec<u8>, (BinaryOperator, Value, bool)> = BTreeMap::new();
+	use super::FlatClauseOp;
+
+	let mut map: BTreeMap<Vec<u8>, Vec<FlatClauseOp>> = BTreeMap::new();
 	for s in specs {
 		if s.path.len() != 1 {
 			return None;
 		}
-		map.insert(s.path[0].as_bytes().to_vec(), (s.op.clone(), s.literal.clone(), s.reversed));
+		let literal_wire = Arc::new(LiteralWire::from_value(&s.literal));
+		map.entry(s.path[0].as_bytes().to_vec()).or_default().push(FlatClauseOp {
+			op: s.op.clone(),
+			literal: s.literal.clone(),
+			literal_wire,
+			reversed: s.reversed,
+		});
 	}
 	let inner: Vec<FusedFlatClause> = map
 		.into_iter()
-		.map(|(key_utf8, (op, literal, reversed))| FusedFlatClause {
+		.map(|(key_utf8, ops)| FusedFlatClause {
 			key_utf8,
-			op,
-			literal,
-			reversed,
+			ops,
 		})
 		.collect();
 	FusedFlatClauses::try_new(inner)
@@ -680,6 +792,7 @@ fn fuse_multi_segment_leaves(leaves: Vec<PredNode>) -> PredNode {
 				path,
 				op,
 				literal,
+				literal_wire: _,
 				reversed,
 			} => {
 				if let Ok(fl) = leaf_to_spec(path, op, literal, reversed) {
@@ -703,10 +816,12 @@ fn cluster_multi_specs(mut specs: Vec<FuseLeaf>) -> PredNode {
 	}
 	if specs.len() == 1 {
 		let s = specs.remove(0);
+		let literal_wire = Arc::new(LiteralWire::from_value(&s.literal));
 		return PredNode::Leaf {
 			path: s.path,
 			op: s.op,
 			literal: s.literal,
+			literal_wire,
 			reversed: s.reversed,
 		};
 	}
@@ -754,10 +869,12 @@ fn fuse_tails_under_segment(tails: &[FuseLeaf]) -> PredNode {
 	}
 	if tails.len() == 1 {
 		let t = &tails[0];
+		let literal_wire = Arc::new(LiteralWire::from_value(&t.literal));
 		return PredNode::Leaf {
 			path: t.path.clone(),
 			op: t.op.clone(),
 			literal: t.literal.clone(),
+			literal_wire,
 			reversed: t.reversed,
 		};
 	}
@@ -770,10 +887,12 @@ fn fuse_tails_under_segment(tails: &[FuseLeaf]) -> PredNode {
 	if has_empty && !non_empty.is_empty() {
 		let mut parts: Vec<PredNode> = Vec::new();
 		for t in tails.iter().filter(|t| t.path.is_empty()) {
+			let literal_wire = Arc::new(LiteralWire::from_value(&t.literal));
 			parts.push(PredNode::Leaf {
 				path: Vec::new(),
 				op: t.op.clone(),
 				literal: t.literal.clone(),
+				literal_wire,
 				reversed: t.reversed,
 			});
 		}
@@ -784,11 +903,15 @@ fn fuse_tails_under_segment(tails: &[FuseLeaf]) -> PredNode {
 	if tails.iter().all(|t| t.path.is_empty()) {
 		let parts: Vec<PredNode> = tails
 			.iter()
-			.map(|t| PredNode::Leaf {
-				path: Vec::new(),
-				op: t.op.clone(),
-				literal: t.literal.clone(),
-				reversed: t.reversed,
+			.map(|t| {
+				let literal_wire = Arc::new(LiteralWire::from_value(&t.literal));
+				PredNode::Leaf {
+					path: Vec::new(),
+					op: t.op.clone(),
+					literal: t.literal.clone(),
+					literal_wire,
+					reversed: t.reversed,
+				}
 			})
 			.collect();
 		return normalize_and(parts);
@@ -828,7 +951,7 @@ mod tests {
 	use std::str::FromStr;
 	use std::sync::Arc;
 
-	use super::{PredNode, compile_expr, compile_predicate_shape};
+	use super::{PathSegment, PredNode, compile_expr, compile_predicate_shape};
 	use crate::exec::parts::field::FieldPart;
 	use crate::exec::physical_expr::{
 		ArrayLiteral, BinaryOp, IdiomExpr, Literal, PhysicalExpr, SimpleBinaryOp, UnaryOp,
@@ -853,7 +976,7 @@ mod tests {
 			PredNode::Leaf {
 				path,
 				..
-			} => assert_eq!(path, vec!["a.b".to_string()]),
+			} => assert_eq!(path, vec![PathSegment::from("a.b")]),
 			other => panic!("expected Leaf, got {other:?}"),
 		}
 	}
@@ -926,11 +1049,12 @@ mod tests {
 			set,
 			reversed,
 			path,
+			..
 		} = n
 		else {
 			panic!("expected LeafSetMembership, got {n:?}");
 		};
-		assert_eq!(path, vec!["v".to_string()]);
+		assert_eq!(path, vec![PathSegment::from("v")]);
 		assert_eq!(op, BinaryOperator::Inside);
 		assert!(!reversed);
 		assert!(set.contains(&Value::Number(Number::Int(1))));
@@ -1147,6 +1271,78 @@ mod tests {
 	}
 
 	#[test]
+	fn compile_array_len_eq_n_emits_leaf_streaming() {
+		use crate::exec::ContextLevel;
+		use crate::exec::parts::field::FieldPart;
+		use crate::exec::physical_expr::function::BuiltinFunctionExec;
+		use crate::exec::physical_expr::{IdiomExpr, Literal};
+
+		let tags_idiom = Arc::new(IdiomExpr::new(
+			"tags".into(),
+			None,
+			vec![Arc::new(FieldPart {
+				name: "tags".into(),
+			}) as Arc<dyn crate::exec::PhysicalExpr>],
+		)) as Arc<dyn crate::exec::PhysicalExpr>;
+		let array_len = Arc::new(BuiltinFunctionExec {
+			name: "array::len".into(),
+			arguments: vec![tags_idiom],
+			func_required_context: ContextLevel::Root,
+		}) as Arc<dyn crate::exec::PhysicalExpr>;
+		let p = Arc::new(BinaryOp {
+			left: array_len,
+			op: BinaryOperator::Equal,
+			right: Arc::new(Literal(Value::Number(Number::Int(3)))),
+		}) as Arc<dyn crate::exec::PhysicalExpr>;
+		match compile_predicate_shape(&p).expect("compile") {
+			PredNode::LeafStreaming {
+				path,
+				..
+			} => {
+				assert_eq!(path, vec![PathSegment::from("tags")]);
+			}
+			other => panic!("expected LeafStreaming, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn compile_array_len_reversed_swaps_operator() {
+		// `5 < array::len(tags)` reversed becomes `array::len(tags) > 5`.
+		use crate::exec::ContextLevel;
+		use crate::exec::parts::field::FieldPart;
+		use crate::exec::physical_expr::function::BuiltinFunctionExec;
+		use crate::exec::physical_expr::{IdiomExpr, Literal};
+
+		let tags_idiom = Arc::new(IdiomExpr::new(
+			"tags".into(),
+			None,
+			vec![Arc::new(FieldPart {
+				name: "tags".into(),
+			}) as Arc<dyn crate::exec::PhysicalExpr>],
+		)) as Arc<dyn crate::exec::PhysicalExpr>;
+		let array_len = Arc::new(BuiltinFunctionExec {
+			name: "array::len".into(),
+			arguments: vec![tags_idiom],
+			func_required_context: ContextLevel::Root,
+		}) as Arc<dyn crate::exec::PhysicalExpr>;
+		// Literal on the left, function on the right → reversed compile.
+		let p = Arc::new(BinaryOp {
+			left: Arc::new(Literal(Value::Number(Number::Int(5)))),
+			op: BinaryOperator::LessThan,
+			right: array_len,
+		}) as Arc<dyn crate::exec::PhysicalExpr>;
+		match compile_predicate_shape(&p).expect("compile") {
+			PredNode::LeafStreaming {
+				path,
+				..
+			} => {
+				assert_eq!(path, vec![PathSegment::from("tags")]);
+			}
+			other => panic!("expected LeafStreaming, got {other:?}"),
+		}
+	}
+
+	#[test]
 	fn compile_not_inverts_supported_inner() {
 		let p = Arc::new(UnaryOp {
 			op: PrefixOperator::Not,
@@ -1157,7 +1353,12 @@ mod tests {
 	}
 
 	#[test]
-	fn repeated_root_key_last_clause_wins_in_fusion() {
+	fn repeated_root_key_keeps_both_clauses_in_fusion() {
+		// Range / multi-clause same-field: `a = 1 AND a = 2` (and shapes
+		// like `a > 3 AND a < 7`) used to collapse to last-clause-wins in
+		// `flat_clauses_from_specs`. With multi-clause `FusedFlatClause`,
+		// both clauses are preserved under a single key and evaluated
+		// against the same `value_bytes` after one map lookup.
 		let p = Arc::new(BinaryOp {
 			left: sb("a", BinaryOperator::Equal, Value::Number(Number::Int(1))),
 			op: BinaryOperator::And,
@@ -1172,7 +1373,32 @@ mod tests {
 			panic!("expected FusedFlatMapAnd, got {n:?}");
 		};
 		assert_eq!(clauses.len(), 1);
-		assert_eq!(clauses[0].literal, Value::Number(Number::Int(2)));
+		assert_eq!(clauses[0].ops.len(), 2);
+		assert_eq!(clauses[0].ops[0].literal, Value::Number(Number::Int(1)));
+		assert_eq!(clauses[0].ops[1].literal, Value::Number(Number::Int(2)));
+	}
+
+	#[test]
+	fn range_same_field_keeps_both_ops() {
+		// `a > 3 AND a < 7` — the bread-and-butter range query — must land
+		// on a single `FusedFlatClause` with both `>` and `<` ops.
+		let p = Arc::new(BinaryOp {
+			left: sb("a", BinaryOperator::MoreThan, Value::Number(Number::Int(3))),
+			op: BinaryOperator::And,
+			right: sb("a", BinaryOperator::LessThan, Value::Number(Number::Int(7))),
+		}) as Arc<dyn crate::exec::PhysicalExpr>;
+		let n = compile_predicate_shape(&p).expect("compile");
+		let PredNode::FusedFlatMapAnd {
+			clauses,
+			..
+		} = n
+		else {
+			panic!("expected FusedFlatMapAnd, got {n:?}");
+		};
+		assert_eq!(clauses.len(), 1);
+		assert_eq!(clauses[0].ops.len(), 2);
+		assert_eq!(clauses[0].ops[0].op, BinaryOperator::MoreThan);
+		assert_eq!(clauses[0].ops[1].op, BinaryOperator::LessThan);
 	}
 
 	#[test]
@@ -1222,7 +1448,7 @@ mod tests {
 		else {
 			panic!("expected NavigatePrefix, got {n:?}");
 		};
-		assert_eq!(segment, "outer");
+		assert_eq!(segment.as_str(), "outer");
 		assert!(matches!(
 			*child,
 			PredNode::FusedFlatMapAnd {
@@ -1292,7 +1518,7 @@ mod tests {
 		else {
 			panic!("expected outer NavigatePrefix, got {n:?}");
 		};
-		assert_eq!(outer_seg, "a");
+		assert_eq!(outer_seg.as_str(), "a");
 		let PredNode::NavigatePrefix {
 			segment: inner_seg,
 			child: inner_child,
@@ -1300,7 +1526,7 @@ mod tests {
 		else {
 			panic!("expected inner NavigatePrefix, got {outer_child:?}");
 		};
-		assert_eq!(inner_seg, "b");
+		assert_eq!(inner_seg.as_str(), "b");
 		let PredNode::FusedFlatMapAnd {
 			at_record_root,
 			clauses,
@@ -1348,7 +1574,7 @@ mod tests {
 		else {
 			panic!("expected NavigatePrefix, got {n:?}");
 		};
-		assert_eq!(segment, "a");
+		assert_eq!(segment.as_str(), "a");
 	}
 
 	#[test]
@@ -1366,6 +1592,6 @@ mod tests {
 		else {
 			panic!("expected NavigatePrefix, got {n:?}");
 		};
-		assert_eq!(segment, "a");
+		assert_eq!(segment.as_str(), "a");
 	}
 }

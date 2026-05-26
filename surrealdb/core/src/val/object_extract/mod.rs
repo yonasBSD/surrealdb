@@ -10,12 +10,13 @@
 use revision::optimised::IndexedMapWalker;
 use revision::{
 	BorrowedReader, DeserializeRevisioned, Error as RevisionError, SerializeRevisioned,
-	SkipRevisioned, WalkRevisioned,
+	WalkRevisioned,
 };
 use surrealdb_strand::Strand;
+use wire_skip::{rev2_optimised_payload_unchecked, skip_value_wire};
 
 use crate::catalog::Record;
-use crate::val::{Object, Value};
+use crate::val::Value;
 
 // Note: there is intentionally no bail on `metadata`. `metadata` flags the
 // record type (plain vs. edge) and carries `aggregation_stats` for
@@ -31,6 +32,109 @@ use crate::val::{Object, Value};
 // The pre-decode filter therefore reads `data` for every record kind.
 
 mod tests;
+pub(crate) mod wire_skip;
+
+/// A path segment paired with its pre-encoded `Strand` wire form
+/// (`<usize varint || utf8>`).
+///
+/// Path segments are fixed at plan time. Storing the wire form alongside
+/// the UTF-8 string eliminates a per-row `Vec<u8>` allocation in
+/// [`lookup_value_bytes_in_map`]'s indexed binary-search comparator.
+///
+/// [`Strand`] is 24 bytes with an inline capacity of 23 (see
+/// [`surrealdb_strand::Strand`]), so field names like `name`, `email`, or
+/// `metadata` carry no heap allocation. `wire` is `Box<[u8]>` so the
+/// pre-encoded bytes own exactly their needed length with no extra
+/// capacity slot.
+#[derive(Debug, Clone)]
+pub(crate) struct PathSegment {
+	utf8: Strand,
+	wire: Box<[u8]>,
+}
+
+impl PathSegment {
+	/// Construct from a UTF-8 string, pre-serialising the [`Strand`] wire
+	/// form once.
+	pub(crate) fn new(utf8: impl Into<Strand>) -> Self {
+		let utf8: Strand = utf8.into();
+		let mut wire = Vec::with_capacity(utf8.len() + 4);
+		<Strand as SerializeRevisioned>::serialize_revisioned(&utf8, &mut wire)
+			.expect("Vec writer never errors");
+		Self {
+			utf8,
+			wire: wire.into_boxed_slice(),
+		}
+	}
+
+	/// UTF-8 view of the segment name. Borrows from the inline [`Strand`]
+	/// (no allocation, no copy).
+	#[inline]
+	pub(crate) fn as_str(&self) -> &str {
+		self.utf8.as_str()
+	}
+
+	/// UTF-8 bytes of the segment name (no length prefix).
+	#[inline]
+	pub(crate) fn as_bytes(&self) -> &[u8] {
+		self.utf8.as_bytes()
+	}
+
+	/// The owning [`Strand`] for the segment name. Lets callers reuse the
+	/// stored small-string without re-allocating.
+	#[inline]
+	pub(crate) fn as_strand(&self) -> &Strand {
+		&self.utf8
+	}
+
+	/// Pre-encoded [`Strand`] wire bytes: `<usize varint || utf8>`. Used
+	/// as the needle for [`revision::optimised::IndexedMapWalker::find_value_bytes`].
+	#[inline]
+	pub(crate) fn wire(&self) -> &[u8] {
+		&self.wire
+	}
+}
+
+impl From<&str> for PathSegment {
+	fn from(s: &str) -> Self {
+		Self::new(s)
+	}
+}
+
+impl From<String> for PathSegment {
+	fn from(s: String) -> Self {
+		Self::new(s)
+	}
+}
+
+impl From<Strand> for PathSegment {
+	fn from(s: Strand) -> Self {
+		Self::new(s)
+	}
+}
+
+/// Equality / ordering compare the segment by its UTF-8 form only — the
+/// wire bytes are derived from the UTF-8 string, so two `PathSegment`s
+/// with equal `utf8` always have equal `wire`. Comparing on `utf8`
+/// avoids the per-comparison double-cost of touching the wire slice.
+impl PartialEq for PathSegment {
+	fn eq(&self, other: &Self) -> bool {
+		self.utf8 == other.utf8
+	}
+}
+
+impl Eq for PathSegment {}
+
+impl PartialOrd for PathSegment {
+	fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+		Some(self.cmp(other))
+	}
+}
+
+impl Ord for PathSegment {
+	fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+		self.utf8.cmp(&other.utf8)
+	}
+}
 
 /// Missing path segment while walking to a leaf.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -53,23 +157,6 @@ pub(crate) enum Extracted {
 	Bail,
 }
 
-/// Result of scanning a navigated object inside a revisioned record for a
-/// fixed list of needle keys.
-#[derive(Debug)]
-pub(crate) enum ScanResult {
-	/// Successfully descended to the navigated object and scanned its
-	/// entries. Each result entry is the decoded `Value` for the
-	/// corresponding needle (in input order), or `Value::None` when the
-	/// needle is absent from the navigated object.
-	Found(Vec<Value>),
-	/// Some path segment was missing during descent. Callers treat every
-	/// needle as resolving to `Value::None`.
-	Missing,
-	/// A wire-level error occurred or an intermediate value was not an
-	/// object. Callers fall back to a full decode.
-	Bail,
-}
-
 /// Walk the revisioned `record_bytes` along `path` and decode the leaf as a
 /// [`Value`].
 ///
@@ -87,7 +174,7 @@ pub(crate) enum ScanResult {
 ///   `depth_limit`, or any wire-level error.
 pub(crate) fn extract_field_from_record_bytes(
 	record_bytes: &[u8],
-	path: &[String],
+	path: &[PathSegment],
 	depth_limit: u32,
 ) -> Extracted {
 	extract_field_from_record_bytes_parts(record_bytes, &[], path, depth_limit)
@@ -97,41 +184,99 @@ pub(crate) fn extract_field_from_record_bytes(
 /// first, then `path`, without concatenating into a new [`Vec`].
 ///
 /// Lets per-record evaluators in `pre_decode_filter` avoid allocating a
-/// `Vec<String>` of `prefix ++ path` in their hot loops.
+/// `Vec<PathSegment>` of `prefix ++ path` in their hot loops.
 pub(crate) fn extract_field_from_record_bytes_parts(
 	record_bytes: &[u8],
-	prefix: &[String],
-	path: &[String],
+	prefix: &[PathSegment],
+	path: &[PathSegment],
 	depth_limit: u32,
 ) -> Extracted {
 	if prefix.is_empty() && path.is_empty() {
 		return Extracted::Bail;
 	}
-	let mut reader = record_bytes;
-	// Skip past the Record's `metadata` field — see the module-level
-	// comment for why metadata is irrelevant to filtering.
-	let mut record_walker = match Record::walk_revisioned(&mut reader) {
-		Ok(w) => w,
-		Err(_) => return Extracted::Bail,
-	};
-	if record_walker.skip_metadata().is_err() {
-		return Extracted::Bail;
-	}
-	// Hand the reader to a Value walker for the `data` field.
-	let value_walker = match record_walker.into_walk_data() {
+	// Open the record walker, get the `data` field's wire bytes via the
+	// macro-emitted accessor. For rev-2 `indexed_struct` records this is
+	// O(1) (read `(data_off, data_off+1)` from the prologue, slice
+	// straight to the field); for rev-1 it's a sequential `metadata` skip.
+	// `into_data_bytes()` returns `Cow<'_, [u8]>` which derefs to
+	// `&[u8]` for the inner `Value::walk_revisioned` follow-up.
+	let mut record_reader: &[u8] = record_bytes;
+	let data_bytes =
+		match Record::walk_revisioned(&mut record_reader).and_then(|w| w.into_data_bytes()) {
+			Ok(b) => b,
+			Err(_) => return Extracted::Bail,
+		};
+	let mut reader: &[u8] = &data_bytes;
+	let value_walker = match Value::walk_revisioned(&mut reader) {
 		Ok(w) => w,
 		Err(_) => return Extracted::Bail,
 	};
 	descend_value_path_parts(value_walker, prefix, path, depth_limit)
 }
 
-/// Serialise a `&str` needle to its on-wire `Strand` representation
-/// (`usize len || utf8`). The indexed-map walker compares full wire bytes,
-/// so the needle must match the same shape.
-fn strand_wire_bytes(needle: &str) -> Vec<u8> {
-	let mut out = Vec::with_capacity(needle.len() + 4);
-	<Strand as SerializeRevisioned>::serialize_revisioned(&Strand::new(needle), &mut out)
+/// Construct an [`IndexedMapWalker`] directly from an [`Object`]'s rev-2
+/// wire bytes, **bypassing** the macro-generated
+/// `Object::walk_revisioned` → `into_walk_field_0` chain.
+///
+/// Why: the macro-emitted accessor takes the `fast_path_wire` arm for
+/// `Wire`-backed parents, which calls
+/// `<VecMap as IndexedMapEncoded>::skip_indexed_map` just to **find the
+/// field's byte boundary** before slicing. `skip_indexed_map` walks every
+/// entry, invoking `Strand::skip_revisioned` and
+/// `Value::skip_revisioned` per pair — exactly what showed up as
+/// `Value::skip_revisioned (11.35%)` in the scan profile.
+///
+/// `Object` is `#[revisioned(revision(1), revision(2, optimised))]` with a
+/// single `#[revision(indexed_map)]` field, so its rev-2 wire layout is
+/// fully known:
+///
+/// ```text
+///   <varint u16 rev=2>  ||  <u32_le payload_length>  ||  <indexed_map body>
+/// ```
+///
+/// Since the indexed_map is the **only** field, the payload IS the
+/// indexed_map body — no offset prologue, no field separator. We read the
+/// rev prefix, validate it's 2, skip the `u32_le` envelope length, and
+/// feed the remainder straight to [`IndexedMapWalker::from_payload`].
+/// That's one pass over the body (the eventual `find_value_bytes` /
+/// `entries` call) instead of two.
+///
+/// Uses the **validating** `from_payload` rather than
+/// `from_payload_unvalidated`: the workspace release profile sets
+/// `panic = 'abort'`, so a corrupted offset table sneaking past us (disk
+/// bit-rot, FS corruption, an off-path serialiser) would cause an
+/// out-of-bounds slice inside `element_bytes` / `find_value_bytes` and
+/// abort the whole `surrealdb` process. The pre-PR walker contract
+/// returned a clean [`Error::OptimisedOffsetsNonMonotonic`] / similar and
+/// callers fell through to full decode — a graceful recovery we want to
+/// preserve. The validation cost (~1.28 % in the scan profile under
+/// `validate_key_region_ascending`) is the price of that availability
+/// guarantee.
+///
+/// Returns the rev prefix-validated walker on success, or an error on
+/// non-2 rev (callers fall back to the macro-emitted path), a truncated
+/// envelope, or a corrupted offset prologue.
+///
+/// [`Error::OptimisedOffsetsNonMonotonic`]: revision::Error::OptimisedOffsetsNonMonotonic
+fn indexed_map_walker_from_object_bytes(
+	object_wire: &[u8],
+) -> Result<IndexedMapWalker<'_, Strand, Value>, RevisionError> {
+	// Caller is descending from a rev-2 `Value::Object(_)`; the parent
+	// walker already validated the outer `Value` rev, and by macro
+	// construction the inner `Object` shares the rev. Skip the inner
+	// rev re-read.
+	let payload = rev2_optimised_payload_unchecked(object_wire)?;
+	IndexedMapWalker::<'_, Strand, Value>::from_payload(payload)
+}
+
+/// Serialise pre-validated UTF-8 bytes to their on-wire `Strand`
+/// representation (`<usize varint len || utf8>`) for sites that don't
+/// have a [`PathSegment`] handy (test helpers, scan needle preparation).
+fn strand_wire_bytes_from_utf8(utf8: &[u8]) -> Vec<u8> {
+	let mut out = Vec::with_capacity(utf8.len() + 4);
+	<usize as SerializeRevisioned>::serialize_revisioned(&utf8.len(), &mut out)
 		.expect("Vec writer never errors");
+	out.extend_from_slice(utf8);
 	out
 }
 
@@ -141,21 +286,22 @@ fn strand_wire_bytes(needle: &str) -> Vec<u8> {
 /// linear scan over the dense `(Strand, Value)*` body without allocating a `Strand`).
 ///
 /// Wire-form note: `IndexedMapWalker::find_value_bytes`'s predicate compares
-/// against the **full wire bytes** of each key (`usize len || utf8`), and the
-/// keys are sorted by wire bytes (which means by `(length, utf8 bytes)`, not
-/// by UTF-8 codepoint order). The caller passes `needle_str` as the raw UTF-8
-/// path segment; we serialise it to wire form for the indexed compare, and on
-/// the legacy path we strip each entry's length prefix to compare against
-/// `needle_str.as_bytes()` directly. The legacy scan does not short-circuit
-/// on a "greater" key because wire order is not UTF-8 order.
+/// against the **full wire bytes** of each key (`<usize varint len || utf8>`),
+/// and the keys are sorted by wire bytes (which means by `(length, utf8 bytes)`,
+/// not by UTF-8 codepoint order). The caller passes a [`PathSegment`] whose
+/// `wire()` is the pre-encoded needle (one allocation at plan time, none on
+/// the hot path); on the legacy / sub-threshold path we strip each entry's
+/// length prefix and compare against the segment's UTF-8 bytes directly. The
+/// legacy scan does not short-circuit on a "greater" key because wire order
+/// is not UTF-8 order.
 fn lookup_value_bytes_in_map<'p>(
 	map_walker: &IndexedMapWalker<'p, Strand, Value>,
-	needle_str: &str,
+	needle: &PathSegment,
 ) -> Result<Option<&'p [u8]>, RevisionError> {
-	let needle_utf8 = needle_str.as_bytes();
+	let needle_utf8 = needle.as_bytes();
 	if map_walker.is_indexed() {
-		let needle_wire = strand_wire_bytes(needle_str);
-		return map_walker.find_value_bytes(|kb: &[u8]| kb.cmp(needle_wire.as_slice()));
+		let needle_wire = needle.wire();
+		return map_walker.find_value_bytes(|kb: &[u8]| kb.cmp(needle_wire));
 	}
 	// Legacy sub-threshold body: `(Strand wire || Value wire)*` with `len`
 	// known up front. Walk all entries, comparing UTF-8 bytes against the
@@ -178,11 +324,11 @@ fn lookup_value_bytes_in_map<'p>(
 		if key_bytes == needle_utf8 {
 			let v_start = body.len() - reader.len();
 			let mut probe: &[u8] = reader;
-			<Value as SkipRevisioned>::skip_revisioned(&mut probe)?;
+			skip_value_wire(&mut probe)?;
 			let v_end = body.len() - probe.len();
 			return Ok(Some(&body[v_start..v_end]));
 		}
-		<Value as SkipRevisioned>::skip_revisioned(&mut reader)?;
+		skip_value_wire(&mut reader)?;
 	}
 	Ok(None)
 }
@@ -210,169 +356,87 @@ fn lookup_value_bytes_in_map<'p>(
 /// freed at function return.
 fn descend_value_path_parts<'r, R: BorrowedReader>(
 	value_walker: <Value as WalkRevisioned>::Walker<'r, R>,
-	prefix: &[String],
-	path: &[String],
+	prefix: &[PathSegment],
+	path: &[PathSegment],
 	depth_limit: u32,
 ) -> Extracted {
 	let total = prefix.len() + path.len();
 	if total == 0 || total > depth_limit as usize {
 		return Extracted::Bail;
 	}
+	// Recursive descent: each frame holds its own `OwnedIndexedMapView`
+	// (the `view` / `object_walker` / `map_view` / `map_walker` chain)
+	// alive on the stack, and the recursive call borrows the inner
+	// value's wire bytes from that frame. No intermediate `Vec<u8>`
+	// copy per level — the previous iterative form copied each level's
+	// body into a fresh `Vec` only to break the borrow-checker chain.
+	descend_value_recursive(value_walker, prefix, path)
+}
 
-	// The walker must be positioned at an `Object` for the first segment to
-	// resolve. Pull the initial object body into an owned `Vec<u8>` so the
-	// per-iteration borrow chain below has a self-owned source it can
-	// re-borrow each time.
-	if !value_walker.is_object() {
+/// Inner recursion for [`descend_value_path_parts`]. Pops one segment
+/// per call from `prefix` first, then `path`; the terminal step (no
+/// segments left) is unreachable because each call short-circuits on
+/// `segments.len() == 1`. Returns [`Extracted::Bail`] for non-object
+/// intermediates, [`Extracted::Missing`] for absent map keys, and a
+/// decoded leaf [`Value`] for success.
+fn descend_value_recursive<'r, R: BorrowedReader>(
+	walker: <Value as WalkRevisioned>::Walker<'r, R>,
+	prefix: &[PathSegment],
+	path: &[PathSegment],
+) -> Extracted {
+	let needle = if let Some(s) = prefix.first() {
+		s
+	} else if let Some(s) = path.first() {
+		s
+	} else {
+		// Caller guards against empty (prefix ++ path), so this only
+		// fires if the recursive trampoline is reached with no work
+		// left — treat as bail.
+		return Extracted::Bail;
+	};
+	if !walker.is_object() {
 		return Extracted::Bail;
 	}
-	let mut current_bytes: Vec<u8> = match value_walker.object_view() {
-		Ok(v) => v.as_bytes().to_vec(),
+	let view = match walker.object_view() {
+		Ok(v) => v,
 		Err(_) => return Extracted::Bail,
 	};
-
-	for i in 0..total {
-		let needle = if i < prefix.len() {
-			prefix[i].as_str()
-		} else {
-			path[i - prefix.len()].as_str()
-		};
-		// Run the per-level descent in a tight block so all intermediate
-		// borrows into `current_bytes` end before we reassign it. The block
-		// either short-circuits via `return` (leaf / missing / wire error)
-		// or evaluates to the next iteration's owned bytes.
-		let next_bytes: Vec<u8> = {
-			let mut object_reader: &[u8] = &current_bytes;
-			let object_walker =
-				match <Object as WalkRevisioned>::walk_revisioned(&mut object_reader) {
-					Ok(w) => w,
-					Err(_) => return Extracted::Bail,
-				};
-			let map_view = match object_walker.into_walk_field_0() {
-				Ok(v) => v,
-				Err(_) => return Extracted::Bail,
-			};
-			let map_walker = match map_view.walker() {
-				Ok(w) => w,
-				Err(_) => return Extracted::Bail,
-			};
-			let value_bytes = match lookup_value_bytes_in_map(&map_walker, needle) {
-				Ok(Some(b)) => b,
-				Ok(None) => return Extracted::Missing,
-				Err(_) => return Extracted::Bail,
-			};
-			if i + 1 == total {
-				let mut leaf_reader: &[u8] = value_bytes;
-				return match <Value as DeserializeRevisioned>::deserialize_revisioned(
-					&mut leaf_reader,
-				) {
-					Ok(v) => Extracted::Found(v),
-					Err(_) => Extracted::Bail,
-				};
-			}
-			// Intermediate: open a fresh `Value` walker on `value_bytes`,
-			// verify it's an object, and copy its variant body bytes into a
-			// fresh owned buffer for the next iteration.
-			let mut value_reader: &[u8] = value_bytes;
-			let next_walker = match <Value as WalkRevisioned>::walk_revisioned(&mut value_reader) {
-				Ok(w) => w,
-				Err(_) => return Extracted::Bail,
-			};
-			if !next_walker.is_object() {
-				return Extracted::Bail;
-			}
-			let next_view = match next_walker.object_view() {
-				Ok(v) => v,
-				Err(_) => return Extracted::Bail,
-			};
-			next_view.as_bytes().to_vec()
-		};
-		current_bytes = next_bytes;
-	}
-	// Unreachable: the leaf return inside the loop fires when `i + 1 == total`,
-	// and `total > 0` is enforced at entry.
-	Extracted::Bail
-}
-
-/// Multi-key scan over a record's outer object map: for each key in
-/// `needles_sorted` (strictly increasing UTF-8 order), record either the
-/// decoded [`Value`] or `Value::None` when the key is absent.
-///
-/// Returns [`None`] only for wire-level errors so callers fall back to a
-/// full decode; the metadata field (plain row vs. edge vs. materialised
-/// view) is intentionally irrelevant — see the module-level comment.
-pub(crate) fn scan_record_root_object_for_keys_sorted<K: AsRef<[u8]>>(
-	record_bytes: &[u8],
-	needles_sorted: &[K],
-) -> Option<Vec<Value>> {
-	if needles_sorted.is_empty() {
-		return Some(Vec::new());
-	}
-	debug_assert!(
-		needles_sorted.windows(2).all(|w| w[0].as_ref() < w[1].as_ref()),
-		"needles_sorted must be strictly increasing; the merge walk only advances",
-	);
-	let mut reader = record_bytes;
-	let mut record_walker = Record::walk_revisioned(&mut reader).ok()?;
-	record_walker.skip_metadata().ok()?;
-	let value_walker = record_walker.into_walk_data().ok()?;
-	scan_value_object_for_keys_sorted(value_walker, needles_sorted)
-}
-
-/// Multi-key scan that first walks `path` into the record's data tree and
-/// then scans the resulting object for `needles_sorted`.
-///
-/// `path` is the navigation prefix from `PredNode::NavigatePrefix`; it may
-/// be empty, in which case this delegates to
-/// [`scan_record_root_object_for_keys_sorted`] (the unchanged root-level
-/// hot path).
-///
-/// Unlike the previous `extract_field_from_record_bytes` +
-/// `evaluate_fused_against_object` pipeline, this **never materialises the
-/// navigated `Value::Object`** — the descent and the inner scan share a
-/// single walker chain, and only matched values are decoded.
-pub(crate) fn scan_record_object_at_path_for_keys_sorted<K: AsRef<[u8]>>(
-	record_bytes: &[u8],
-	path: &[String],
-	needles_sorted: &[K],
-	depth_limit: u32,
-) -> ScanResult {
-	if needles_sorted.is_empty() {
-		return ScanResult::Found(Vec::new());
-	}
-	debug_assert!(
-		needles_sorted.windows(2).all(|w| w[0].as_ref() < w[1].as_ref()),
-		"needles_sorted must be strictly increasing; the merge walk only advances",
-	);
-	if path.is_empty() {
-		return match scan_record_root_object_for_keys_sorted(record_bytes, needles_sorted) {
-			Some(values) => ScanResult::Found(values),
-			None => ScanResult::Bail,
-		};
-	}
-	let mut reader = record_bytes;
-	let mut record_walker = match Record::walk_revisioned(&mut reader) {
+	// Bypass the macro-emitted `walk_revisioned → into_walk_field_0 →
+	// walker()` chain; that path calls `skip_indexed_map` per row just to
+	// find the field boundary, walking every entry via
+	// `Value::skip_revisioned`. See `indexed_map_walker_from_object_bytes`
+	// for the manual rev-2 envelope decode.
+	let map_walker = match indexed_map_walker_from_object_bytes(view.as_bytes()) {
 		Ok(w) => w,
-		Err(_) => return ScanResult::Bail,
+		Err(_) => return Extracted::Bail,
 	};
-	if record_walker.skip_metadata().is_err() {
-		return ScanResult::Bail;
+	let value_bytes = match lookup_value_bytes_in_map(&map_walker, needle) {
+		Ok(Some(b)) => b,
+		Ok(None) => return Extracted::Missing,
+		Err(_) => return Extracted::Bail,
+	};
+	// One segment consumed — slice the remaining `(prefix, path)`.
+	let (next_prefix, next_path): (&[PathSegment], &[PathSegment]) = if prefix.is_empty() {
+		(&[], &path[1..])
+	} else {
+		(&prefix[1..], path)
+	};
+	if next_prefix.is_empty() && next_path.is_empty() {
+		// Leaf: decode the value.
+		let mut leaf_reader: &[u8] = value_bytes;
+		return match <Value as DeserializeRevisioned>::deserialize_revisioned(&mut leaf_reader) {
+			Ok(v) => Extracted::Found(v),
+			Err(_) => Extracted::Bail,
+		};
 	}
-	let value_walker = match record_walker.into_walk_data() {
+	// Intermediate: descend one more level. The new walker borrows from
+	// `value_bytes`, which borrows from `view` (alive on this frame).
+	let mut value_reader: &[u8] = value_bytes;
+	let inner_walker = match <Value as WalkRevisioned>::walk_revisioned(&mut value_reader) {
 		Ok(w) => w,
-		Err(_) => return ScanResult::Bail,
+		Err(_) => return Extracted::Bail,
 	};
-	let result = descend_to_value_walker(value_walker, path, depth_limit, |value_bytes| {
-		let mut reader: &[u8] = value_bytes;
-		let walker = <Value as WalkRevisioned>::walk_revisioned(&mut reader).ok()?;
-		scan_value_object_for_keys_sorted(walker, needles_sorted)
-	});
-	match result {
-		DescendResult::Found(Some(values)) => ScanResult::Found(values),
-		DescendResult::Found(None) => ScanResult::Bail,
-		DescendResult::Missing => ScanResult::Missing,
-		DescendResult::Bail => ScanResult::Bail,
-	}
+	descend_value_recursive(inner_walker, next_prefix, next_path)
 }
 
 /// Outcome of [`descend_to_value_walker`].
@@ -397,7 +461,7 @@ pub(crate) enum DescendResult<T> {
 /// similar) inside the closure.
 pub(crate) fn descend_to_value_walker<T, F>(
 	value_walker: <Value as WalkRevisioned>::Walker<'_, &[u8]>,
-	path: &[String],
+	path: &[PathSegment],
 	depth_limit: u32,
 	consume: F,
 ) -> DescendResult<T>
@@ -410,15 +474,15 @@ where
 /// Like [`descend_to_value_walker`] but walks `prefix` segments first, then
 /// `path`, without concatenating into a new [`Vec`].
 ///
-/// Iterative implementation mirroring [`descend_value_path_parts`]; each
-/// intermediate level's variant body is copied into a small owned `Vec<u8>`
-/// so subsequent iterations have a self-owned source to re-borrow. The
-/// terminal call passes the navigated value's wire bytes (still borrowed
-/// from the current level's owned buffer) to `consume`.
+/// Recursive descent: each frame holds its own `view` / `object_walker` /
+/// `map_view` / `map_walker` alive on the stack and the recursive call
+/// borrows the inner value's wire bytes from that frame. The terminal call
+/// hands those borrowed bytes to `consume` while the source frame is still
+/// alive — no intermediate `Vec<u8>` copy per level.
 pub(crate) fn descend_to_value_walker_parts<T, F>(
 	walker: <Value as WalkRevisioned>::Walker<'_, &[u8]>,
-	prefix: &[String],
-	path: &[String],
+	prefix: &[PathSegment],
+	path: &[PathSegment],
 	depth_limit: u32,
 	consume: F,
 ) -> DescendResult<T>
@@ -426,134 +490,240 @@ where
 	F: FnOnce(&[u8]) -> T,
 {
 	let total = prefix.len() + path.len();
-	// Initial-step special case: when the descent has no segments, the
-	// caller wants the walker's CURRENT position (a borrowed-from-record
-	// Value). We re-encode that position into a fresh Vec<u8> via a peek,
-	// but the cleaner path is to detect zero segments at the entry and
-	// require callers to handle it themselves. For now, treat zero
-	// segments as "bail" — no existing caller relies on it.
 	if total == 0 || total > depth_limit as usize {
 		return DescendResult::Bail;
 	}
+	descend_walker_recursive(walker, prefix, path, consume)
+}
+
+/// Inner recursion for [`descend_to_value_walker_parts`]. Each call pops
+/// one segment (prefix first, then path), opens the navigated value's
+/// walker on the bytes borrowed from this frame's `view`, and either
+/// invokes `consume` on the leaf bytes (terminal) or recurses one level
+/// deeper. The closure is `FnOnce` so it threads through unchanged until
+/// the terminal step consumes it.
+fn descend_walker_recursive<'r, R, T, F>(
+	walker: <Value as WalkRevisioned>::Walker<'r, R>,
+	prefix: &[PathSegment],
+	path: &[PathSegment],
+	consume: F,
+) -> DescendResult<T>
+where
+	R: BorrowedReader,
+	F: FnOnce(&[u8]) -> T,
+{
+	let needle = if let Some(s) = prefix.first() {
+		s
+	} else if let Some(s) = path.first() {
+		s
+	} else {
+		return DescendResult::Bail;
+	};
 	if !walker.is_object() {
 		return DescendResult::Bail;
 	}
-	let mut current_bytes: Vec<u8> = match walker.object_view() {
-		Ok(v) => v.as_bytes().to_vec(),
+	let view = match walker.object_view() {
+		Ok(v) => v,
 		Err(_) => return DescendResult::Bail,
 	};
-
-	// `consume` is `FnOnce`, so it has to leave the block exactly once. We
-	// thread it through the loop via `Option::take` at the terminal step.
-	let mut consume_slot: Option<F> = Some(consume);
-
-	for i in 0..total {
-		let needle = if i < prefix.len() {
-			prefix[i].as_str()
-		} else {
-			path[i - prefix.len()].as_str()
-		};
-		let next_bytes: Vec<u8> = {
-			let mut object_reader: &[u8] = &current_bytes;
-			let object_walker =
-				match <Object as WalkRevisioned>::walk_revisioned(&mut object_reader) {
-					Ok(w) => w,
-					Err(_) => return DescendResult::Bail,
-				};
-			let map_view = match object_walker.into_walk_field_0() {
-				Ok(v) => v,
-				Err(_) => return DescendResult::Bail,
-			};
-			let map_walker = match map_view.walker() {
-				Ok(w) => w,
-				Err(_) => return DescendResult::Bail,
-			};
-			let value_bytes = match lookup_value_bytes_in_map(&map_walker, needle) {
-				Ok(Some(b)) => b,
-				Ok(None) => return DescendResult::Missing,
-				Err(_) => return DescendResult::Bail,
-			};
-			if i + 1 == total {
-				// Terminal: invoke the caller's closure with the navigated
-				// value's wire bytes. `current_bytes` is alive in this
-				// frame so the `&[u8]` slice (transitively borrowed from
-				// it) remains valid for the closure call.
-				let f = consume_slot.take().expect("consume_slot taken exactly once");
-				return DescendResult::Found(f(value_bytes));
-			}
-			let mut value_reader: &[u8] = value_bytes;
-			let next_walker = match <Value as WalkRevisioned>::walk_revisioned(&mut value_reader) {
-				Ok(w) => w,
-				Err(_) => return DescendResult::Bail,
-			};
-			if !next_walker.is_object() {
-				return DescendResult::Bail;
-			}
-			let next_view = match next_walker.object_view() {
-				Ok(v) => v,
-				Err(_) => return DescendResult::Bail,
-			};
-			next_view.as_bytes().to_vec()
-		};
-		current_bytes = next_bytes;
+	// Bypass the macro-emitted walker chain — see
+	// `indexed_map_walker_from_object_bytes` for rationale.
+	let map_walker = match indexed_map_walker_from_object_bytes(view.as_bytes()) {
+		Ok(w) => w,
+		Err(_) => return DescendResult::Bail,
+	};
+	let value_bytes = match lookup_value_bytes_in_map(&map_walker, needle) {
+		Ok(Some(b)) => b,
+		Ok(None) => return DescendResult::Missing,
+		Err(_) => return DescendResult::Bail,
+	};
+	let (next_prefix, next_path): (&[PathSegment], &[PathSegment]) = if prefix.is_empty() {
+		(&[], &path[1..])
+	} else {
+		(&prefix[1..], path)
+	};
+	if next_prefix.is_empty() && next_path.is_empty() {
+		// Terminal: hand the leaf bytes to `consume`. `view` is still
+		// alive on this frame, so `value_bytes` is valid for the call.
+		return DescendResult::Found(consume(value_bytes));
 	}
-	// Unreachable: terminal `return` above fires when `i + 1 == total`, and
-	// `total > 0` is enforced at entry.
-	DescendResult::Bail
+	// Recurse into the inner value. The new walker borrows from
+	// `value_bytes`, which borrows from `view` (alive on this frame
+	// until the recursive call returns).
+	let mut value_reader: &[u8] = value_bytes;
+	let inner_walker = match <Value as WalkRevisioned>::walk_revisioned(&mut value_reader) {
+		Ok(w) => w,
+		Err(_) => return DescendResult::Bail,
+	};
+	descend_walker_recursive(inner_walker, next_prefix, next_path, consume)
 }
 
-/// Multi-key scan over an object payload reached through a value walker.
+/// Outcome of [`scan_record_object_at_path_with_slots`].
+#[derive(Debug)]
+pub(crate) enum SlotScanResult<T> {
+	/// Descent succeeded; `on_slots` produced `T`.
+	Found(T),
+	/// A path segment was missing during descent.
+	Missing,
+	/// Wire-level error, non-object intermediate, or non-object inner.
+	Bail,
+}
+
+/// Walk `path` segments inside the record, then scan the navigated object for
+/// each needle in `needles_sorted` (in input order), and invoke `on_slots`
+/// with one borrowed wire slice per needle (or `None` when the needle is
+/// absent from the object).
 ///
-/// `needles_sorted` is assumed sorted by UTF-8 bytes (the planner-side
-/// callers pre-sort their queries that way). The indexed-map encoding,
-/// however, sorts entries by **wire bytes** (`usize_len || utf8`), which
-/// differs from UTF-8 order whenever the entries have varying lengths — so
-/// we can't rely on a single linear merge walk in input order.
+/// Zero-copy alternative to [`scan_record_object_at_path_for_keys_sorted`]:
+/// matched values stay as borrowed wire bytes for typed byte-compare downstream
+/// instead of being deserialised into [`Value`] per row.
 ///
-/// Instead, iterate every entry and binary-search the needle list for the
-/// entry's UTF-8 key. Stops early once all needles have been matched. The
-/// indexed path uses `IndexedMapWalker::entries()`; the legacy sub-threshold
-/// path walks the `(Strand wire || Value wire)*` body manually.
-pub(crate) fn scan_value_object_for_keys_sorted<'r, R: BorrowedReader, K: AsRef<[u8]>>(
-	value_walker: <Value as WalkRevisioned>::Walker<'r, R>,
+/// `needles_sorted` is assumed strictly ascending by UTF-8 bytes (the same
+/// invariant the legacy function expects).
+///
+/// Lifetime notes: the closure receives a slice of `Option<&[u8]>` whose
+/// borrows are valid only inside the call; evaluation must complete before
+/// return. `T` may not borrow from those slices (it is moved out of the
+/// closure).
+pub(crate) fn scan_record_object_at_path_with_slots<K, F, T>(
+	record_bytes: &[u8],
+	path: &[PathSegment],
 	needles_sorted: &[K],
-) -> Option<Vec<Value>> {
+	depth_limit: u32,
+	on_slots: F,
+) -> SlotScanResult<T>
+where
+	K: AsRef<[u8]>,
+	F: FnOnce(&[Option<&[u8]>]) -> T,
+{
+	if needles_sorted.is_empty() {
+		return SlotScanResult::Found(on_slots(&[]));
+	}
 	debug_assert!(
 		needles_sorted.windows(2).all(|w| w[0].as_ref() < w[1].as_ref()),
 		"needles_sorted must be strictly increasing in UTF-8 byte order",
 	);
+	// Open the record walker, take the `data` field's wire bytes via the
+	// macro-emitted accessor. O(1) on rev-2 `indexed_struct` records (read
+	// `data_off` from the prologue, slice); sequential `metadata` skip on
+	// rev-1.
+	let mut record_reader: &[u8] = record_bytes;
+	let data_bytes =
+		match Record::walk_revisioned(&mut record_reader).and_then(|w| w.into_data_bytes()) {
+			Ok(b) => b,
+			Err(_) => return SlotScanResult::Bail,
+		};
+	let mut reader: &[u8] = &data_bytes;
+	let value_walker = match Value::walk_revisioned(&mut reader) {
+		Ok(w) => w,
+		Err(_) => return SlotScanResult::Bail,
+	};
+	if path.is_empty() {
+		match scan_value_object_with_slots(value_walker, needles_sorted, on_slots) {
+			Some(t) => SlotScanResult::Found(t),
+			None => SlotScanResult::Bail,
+		}
+	} else {
+		let result = descend_to_value_walker(value_walker, path, depth_limit, |value_bytes| {
+			let mut reader: &[u8] = value_bytes;
+			let walker = <Value as WalkRevisioned>::walk_revisioned(&mut reader).ok()?;
+			scan_value_object_with_slots(walker, needles_sorted, on_slots)
+		});
+		match result {
+			DescendResult::Found(Some(t)) => SlotScanResult::Found(t),
+			DescendResult::Found(None) => SlotScanResult::Bail,
+			DescendResult::Missing => SlotScanResult::Missing,
+			DescendResult::Bail => SlotScanResult::Bail,
+		}
+	}
+}
+
+/// Walker-positioned variant of [`scan_record_object_at_path_with_slots`]:
+/// scans the object reached by `value_walker` for `needles_sorted` and invokes
+/// `on_slots` with one borrowed wire slice per needle (or `None` for absent
+/// needles). Returns `None` on a wire-level error so callers can map to bail.
+fn scan_value_object_with_slots<'r, R, K, F, T>(
+	value_walker: <Value as WalkRevisioned>::Walker<'r, R>,
+	needles_sorted: &[K],
+	on_slots: F,
+) -> Option<T>
+where
+	R: BorrowedReader,
+	K: AsRef<[u8]>,
+	F: FnOnce(&[Option<&[u8]>]) -> T,
+{
 	if !value_walker.is_object() {
 		return None;
 	}
 	let object_view = value_walker.object_view().ok()?;
-	let object_bytes = object_view.as_bytes();
-	let mut object_reader: &[u8] = object_bytes;
-	let object_walker = <Object as WalkRevisioned>::walk_revisioned(&mut object_reader).ok()?;
-	let map_view = object_walker.into_walk_field_0().ok()?;
-	let map_walker = map_view.walker().ok()?;
+	// Bypass the macro-emitted walker chain — see
+	// `indexed_map_walker_from_object_bytes` for rationale.
+	let map_walker = indexed_map_walker_from_object_bytes(object_view.as_bytes()).ok()?;
 
-	let mut out: Vec<Value> = Vec::with_capacity(needles_sorted.len());
-	out.resize_with(needles_sorted.len(), || Value::None);
-	let mut remaining = needles_sorted.len();
+	let n = needles_sorted.len();
+	// Slot buffer. Most multi-needle scans touch 2-5 fields per object
+	// level (one fused conjunct per referenced field), so the stack array
+	// covers the typical case with zero allocation; only fan-out beyond
+	// 8 falls back to heap. Mirrors the stack/heap split in
+	// `ArrayOverlapsLiteralSet::evaluate`'s `All` bitmask.
+	const STACK_SLOT_CAP: usize = 8;
+	let mut stack_slots: [Option<&[u8]>; STACK_SLOT_CAP] = [None; STACK_SLOT_CAP];
+	let mut heap_slots: Vec<Option<&[u8]>> = Vec::new();
+	let slots: &mut [Option<&[u8]>] = if n <= STACK_SLOT_CAP {
+		&mut stack_slots[..n]
+	} else {
+		heap_slots.resize(n, None);
+		heap_slots.as_mut_slice()
+	};
+	let mut remaining = n;
 
 	if map_walker.is_indexed() {
-		for (kb_wire, vb) in map_walker.entries()? {
-			if remaining == 0 {
-				break;
+		// Two strategies on the indexed path:
+		//
+		// * **Iterate entries (N · log M):** walk every map entry, binary search the (sorted)
+		//   needle slice. Best when needles approach the map size — the per-entry cost is one
+		//   varint decode + one `binary_search_by`.
+		//
+		// * **Iterate needles (M · log N):** for each needle, ask the indexed prologue's
+		//   binary-search (`find_value_bytes`) to resolve it. Best when needles are sparse against
+		//   a wide row.
+		//
+		// Empirical threshold: if `4 * M < N` switch to needle-driven.
+		// The `4` weights `find_value_bytes`'s constant (full Strand-wire
+		// compare per probe + offset-table indexing) against `binary_search`'s
+		// (UTF-8 byte compare against a sorted in-memory slice).
+		let m = needles_sorted.len();
+		let n = map_walker.len();
+		if m > 0 && 4 * m < n {
+			for (i, needle) in needles_sorted.iter().enumerate() {
+				let needle_utf8 = needle.as_ref();
+				let needle_wire = strand_wire_bytes_from_utf8(needle_utf8);
+				match map_walker.find_value_bytes(|kb: &[u8]| kb.cmp(needle_wire.as_slice())) {
+					Ok(Some(vb)) => slots[i] = Some(vb),
+					Ok(None) => {}
+					Err(_) => return None,
+				}
 			}
-			// Strip the length prefix off the wire-encoded key to get its
-			// UTF-8 bytes — the indexed encoder writes full Strand wire
-			// (`usize len || utf8`), but our needles are UTF-8 only.
-			let mut kr: &[u8] = kb_wire;
-			let key_len = <usize as DeserializeRevisioned>::deserialize_revisioned(&mut kr).ok()?;
-			if kr.len() != key_len {
-				return None;
-			}
-			if let Ok(idx) = needles_sorted.binary_search_by(|n| n.as_ref().cmp(kr)) {
-				let mut vr: &[u8] = vb;
-				out[idx] =
-					<Value as DeserializeRevisioned>::deserialize_revisioned(&mut vr).ok()?;
-				remaining -= 1;
+		} else {
+			for (kb_wire, vb) in map_walker.entries()? {
+				if remaining == 0 {
+					break;
+				}
+				// Indexed key wire is `<usize varint len> || utf8`;
+				// strip the length prefix before comparing against
+				// the UTF-8 needle.
+				let mut kr: &[u8] = kb_wire;
+				let key_len =
+					<usize as DeserializeRevisioned>::deserialize_revisioned(&mut kr).ok()?;
+				if kr.len() != key_len {
+					return None;
+				}
+				if let Ok(idx) = needles_sorted.binary_search_by(|n| n.as_ref().cmp(kr))
+					&& slots[idx].is_none()
+				{
+					slots[idx] = Some(vb);
+					remaining -= 1;
+				}
 			}
 		}
 	} else {
@@ -572,15 +742,21 @@ pub(crate) fn scan_value_object_for_keys_sorted<'r, R: BorrowedReader, K: AsRef<
 			let kb_utf8 = &reader[..key_len];
 			reader = &reader[key_len..];
 			if let Ok(idx) = needles_sorted.binary_search_by(|n| n.as_ref().cmp(kb_utf8)) {
-				out[idx] =
-					<Value as DeserializeRevisioned>::deserialize_revisioned(&mut reader).ok()?;
-				remaining -= 1;
+				let v_start = body.len() - reader.len();
+				let mut probe: &[u8] = reader;
+				skip_value_wire(&mut probe).ok()?;
+				let v_end = body.len() - probe.len();
+				if slots[idx].is_none() {
+					slots[idx] = Some(&body[v_start..v_end]);
+					remaining -= 1;
+				}
+				reader = probe;
 			} else {
-				<Value as SkipRevisioned>::skip_revisioned(&mut reader).ok()?;
+				skip_value_wire(&mut reader).ok()?;
 			}
 		}
 	}
-	Some(out)
+	Some(on_slots(slots))
 }
 
 /// Depth limit used by test helpers and by test sites that construct a
@@ -590,12 +766,12 @@ pub(crate) fn scan_value_object_for_keys_sorted<'r, R: BorrowedReader, K: AsRef<
 pub(crate) const TEST_DEPTH_LIMIT: u32 = 256;
 
 #[cfg(test)]
-pub(crate) fn descend_record_value_path(record_bytes: &[u8], path: &[String]) -> Extracted {
+pub(crate) fn descend_record_value_path(record_bytes: &[u8], path: &[PathSegment]) -> Extracted {
 	extract_field_from_record_bytes(record_bytes, path, TEST_DEPTH_LIMIT)
 }
 
 #[cfg(test)]
-pub(crate) fn descend_value_slice_path(value_wire: &[u8], path: &[String]) -> Extracted {
+pub(crate) fn descend_value_slice_path(value_wire: &[u8], path: &[PathSegment]) -> Extracted {
 	if path.is_empty() {
 		return Extracted::Bail;
 	}
