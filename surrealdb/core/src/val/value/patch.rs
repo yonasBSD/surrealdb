@@ -1,4 +1,4 @@
-use anyhow::{Result, ensure};
+use anyhow::{Result, bail, ensure};
 use surrealdb_types::ToSql;
 
 use crate::err::Error;
@@ -40,16 +40,22 @@ impl Value {
 							let path =
 								left.iter().map(|x| Part::Field(x.clone())).collect::<Vec<_>>();
 
-							// TODO: Fix behavior on overload.
 							match this.pick(&path) {
 								Value::Array(mut v) => {
-									if v.len() > x {
-										v.insert(x, value);
-										this.put(&path, Value::Array(v));
-									} else {
-										v.push(value);
-										this.put(&path, Value::Array(v));
+									// RFC 6902 §4.1: the index for `add` MUST NOT
+									// be greater than the number of elements in
+									// the array. `insert(len, _)` is the spec's
+									// append form; anything beyond is rejected.
+									if x > v.len() {
+										bail!(Error::InvalidPatch(PatchError {
+											message: format!(
+												"index {x} is out of bounds for array of length {len}",
+												len = v.len(),
+											),
+										}));
 									}
+									v.insert(x, value);
+									this.put(&path, Value::Array(v));
 								}
 								_ => this.put(&path, value),
 							}
@@ -60,7 +66,6 @@ impl Value {
 							let path =
 								left.iter().map(|x| Part::Field(x.clone())).collect::<Vec<_>>();
 
-							// TODO: Fix behavior on overload.
 							match this.pick(&path) {
 								Value::Array(mut v) => {
 									v.push(value);
@@ -268,6 +273,31 @@ mod tests {
 		val.patch(add).unwrap();
 		val.patch(remove).unwrap();
 		assert_eq!(res, val);
+	}
+
+	#[tokio::test]
+	async fn patch_add_array_index_append_at_length() {
+		// RFC 6902 §4.1: an index equal to the array length appends.
+		let mut val = parse_val!("{ list: ['a', 'b'] }");
+		let ops = parse_val!("[{ op: 'add', path: '/list/2', value: 'c' }]");
+		let res = parse_val!("{ list: ['a', 'b', 'c'] }");
+		val.patch(ops).unwrap();
+		assert_eq!(res, val);
+	}
+
+	#[tokio::test]
+	async fn patch_add_array_index_out_of_bounds_errors() {
+		// RFC 6902 §4.1: an index greater than the array length is invalid.
+		let mut val = parse_val!("{ list: ['a', 'b'] }");
+		let ops = parse_val!("[{ op: 'add', path: '/list/5', value: 'c' }]");
+		let err = val.patch(ops).unwrap_err();
+		let msg = err.to_string();
+		assert!(
+			msg.contains("index 5 is out of bounds for array of length 2"),
+			"unexpected error message: {msg}"
+		);
+		// The value must be unchanged when a patch op fails.
+		assert_eq!(val, parse_val!("{ list: ['a', 'b'] }"));
 	}
 
 	#[tokio::test]
