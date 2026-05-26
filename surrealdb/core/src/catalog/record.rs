@@ -5,8 +5,8 @@
 
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
-use revision::{DeserializeRevisioned, revisioned};
+use anyhow::Result;
+use revision::revisioned;
 use surrealdb_strand::Strand;
 
 use crate::catalog::aggregation::AggregationStat;
@@ -30,19 +30,20 @@ use crate::val::{RecordId, Value};
 /// // Check if it's an edge record
 /// assert!(!record.is_edge());
 /// ```
-/// - **Rev 1** — sequential fields (`u16 revision || metadata || data`). Skipping past `metadata`
-///   requires walking its inner structure with `SkipRevisioned`.
-/// - **Rev 2** — optimised envelope + `indexed_struct` prologue: `u16 revision || u32_le
-///   payload_length || [u32_le metadata_off, u32_le data_off] || metadata bytes || data bytes`. The
-///   two `u32_le` offsets are relative to the start of the prologue, so the data field's bytes are
-///   `payload[data_off..]` — O(1) to locate regardless of how big the metadata was.
+/// `Record` serialises through the standard `#[revisioned]` derive — no
+/// custom wire surgery. The `data` field carries the record's fields,
+/// including the top-level `"id"` when present.
 ///
-/// The pre-decode filter consumes this via the macro-emitted accessor:
-/// `Record::walk_revisioned(...)?.into_data_bytes()?` returns the `data`
-/// field's bytes as `Cow<'_, [u8]>` in O(1) on rev-2 (offset-table slice) and
-/// via a sequential `metadata` skip on rev-1, without decoding the field's
-/// inner value. The caller then opens `Value::walk_revisioned` over the
-/// returned bytes for streaming descent — see
+/// `id` redundancy with the storage key: a record's canonical id also
+/// lives in its storage key (a `RecordId`). New writes store `id` in the
+/// value too; [`Record::kv_decode_value`] only synthesises it from the
+/// key for *legacy* data written before the id was stored (see the
+/// `entry().or_insert_with(..)` splice there).
+///
+/// The pre-decode filter consumes the rev-2 wire layout via the
+/// macro-emitted accessor `Record::walk_revisioned(...)?.into_data_bytes()?`,
+/// which returns the `data` field's bytes as `Cow<'_, [u8]>` in O(1)
+/// (offset-table slice) without decoding the field — see
 /// [`crate::val::object_extract::extract_field_from_record_bytes`].
 #[revisioned(revision(1), revision(2, optimised, indexed_struct))]
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -55,142 +56,44 @@ pub struct Record {
 }
 
 /// Strand value for the `"id"` field name. Used by the post-decode id
-/// splicer so we don't allocate a fresh `Strand` per record.
+/// normaliser so we don't allocate a fresh `Strand` per record.
 const ID_KEY: Strand = Strand::new_static("id");
 
 impl KVValue for Record {
-	/// The storage key carries the canonical `RecordId`, which the value
-	/// encoder strips from `data` and the value decoder splices back in.
+	/// The storage key carries the canonical `RecordId`. The decoder uses
+	/// it to set `data`'s `"id"` field — the storage key is the single
+	/// source of truth for a record's identity.
 	type KeyContext = RecordId;
 
-	/// Encode a `Record` for storage, skipping the top-level `id` field of
-	/// `data` if present. The id is reconstructed from the storage key on
-	/// read (see [`Record::kv_decode_value`]), so storing it in the
-	/// serialized payload would be redundant.
-	///
-	/// The output is byte-identical to the `#[revisioned]` derive applied
-	/// to `Record` *except* the entry for `"id"` (if any) is dropped from
-	/// the top-level `Object`. The wire format itself is unchanged: a node
-	/// that reads `Record` via the standard derived deserializer will
-	/// simply observe an `Object` without an `id` key.
-	///
-	/// The skip is surgical: only the top-level `id` of `Record::data` is
-	/// dropped. Any nested `Value::Object` containing an `id` field — e.g.
-	/// `{ author: { id: ... } }` — serializes unchanged through the
-	/// standard `Value` encoder.
-	///
-	/// When `Object` adopted `revision(2, optimised)` the
-	/// previous inline-splice optimisation broke: the rev-2 envelope
-	/// wraps the body in a `u32_le payload_length`, so we can no longer
-	/// write a stripped body byte-by-byte without knowing the length up
-	/// front. Instead, clone the top-level `Object`, remove `"id"`, and
-	/// hand the cleaned record to the derived serializer. The clone is
-	/// O(n) over the immediate keys of the top-level object; nested
-	/// structure is moved, not cloned.
+	/// Encode a `Record` for storage via the derived `revisioned`
+	/// serialiser. The top-level `"id"` (if present) is stored as-is.
 	fn kv_encode_value(&self) -> Result<Vec<u8>> {
-		match &self.data {
-			Value::Object(obj) if obj.0.contains_key("id") => {
-				let mut cleaned = obj.clone();
-				cleaned.0.remove("id");
-				let stripped = Record {
-					metadata: self.metadata.clone(),
-					data: Value::Object(cleaned),
-				};
-				Ok(revision::to_vec(&stripped)?)
-			}
-			_ => Ok(revision::to_vec(self)?),
-		}
+		Ok(revision::to_vec(self)?)
 	}
 
-	/// Decode a `Record` and ensure its `data` carries the canonical `id`
-	/// reconstructed from the storage key.
+	/// Decode a `Record` and force its `data`'s top-level `"id"` to the
+	/// canonical id reconstructed from the storage key.
 	///
-	/// Uses the derived deserialiser for the whole record, then splices
-	/// `id` into the top-level `Object` if the payload is an object that
-	/// doesn't already carry one.
+	/// The storage key — not the stored bytes — is the source of truth
+	/// for a record's identity, so we **overwrite** any `"id"` carried in
+	/// the payload rather than preserving it. This matters for records
+	/// whose stored `"id"` differs from their key: a materialised view
+	/// such as `DEFINE TABLE v AS SELECT id, .. FROM src` projects the
+	/// *source* row's id into the view record's data, but the view
+	/// record's identity is its own key (`v:..`), which is what callers
+	/// (and the pre-decode filter, which derives `id` from the key) must
+	/// see. Overwriting also fixes up legacy rows written before the id
+	/// was stored inline.
 	fn kv_decode_value(bytes: &[u8], rid: RecordId) -> Result<Record> {
-		let mut reader: &[u8] = bytes;
-		let record_rev = <u16 as DeserializeRevisioned>::deserialize_revisioned(&mut reader)?;
-		match record_rev {
-			1 => Self::decode_rev1_with_id(reader, rid),
-			2 => Self::decode_rev2_with_id(bytes, rid),
-			x => Err(anyhow!("Invalid revision `{x}` for type `Record`")),
+		let mut record: Record = revision::from_slice(bytes)?;
+		if let Value::Object(obj) = &mut record.data {
+			obj.0.insert(ID_KEY, Value::RecordId(rid));
 		}
+		Ok(record)
 	}
 }
 
 impl Record {
-	/// Compile-time guard: every revision of [`Record`] supported on
-	/// disk must have a corresponding arm in [`Record::kv_decode_value`].
-	/// Bumping `#[revisioned(revision = N)]` on [`Record`] without adding
-	/// a matching `decode_revN_with_id` arm trips this assertion at
-	/// `cargo build` time.
-	///
-	/// The strict equality (rather than `<=`) is deliberate: each revision
-	/// bump must be paired with a deliberate update here. Loosening to a
-	/// `<=` bound would let someone add `revision(3, …)` to the annotation
-	/// without writing a `decode_rev3_with_id` arm — `kv_decode_value`
-	/// would silently start erroring at runtime for rev-3 records, rather
-	/// than failing the build. Catching this at compile time is cheap.
-	const _ASSERT_REVISION_DISPATCHER_COVERS_CURRENT: () = assert!(
-		<Record>::REVISION == 2,
-		"Record revision changed: add the matching `decode_revN_with_id` arm in `kv_decode_value` and bump this assert",
-	);
-
-	/// Decode a `Record` revision-1 body (i.e. after the Record revision
-	/// tag has already been consumed), splicing the canonical `id` into
-	/// the top-level `Object` after the fact.
-	fn decode_rev1_with_id(mut reader: &[u8], rid: RecordId) -> Result<Record> {
-		let metadata =
-			<Option<Metadata> as DeserializeRevisioned>::deserialize_revisioned(&mut reader)?;
-		let mut data = <Value as DeserializeRevisioned>::deserialize_revisioned(&mut reader)?;
-		// Splice the canonical record id into the top-level `Object` (if
-		// the payload is one). VecMap's `Entry` API maintains the
-		// sorted-key invariant; `Vacant` inserts in O(log n), `Occupied`
-		// preserves whatever the payload already carried (defensive — no
-		// current writer emits an `id` field, but legacy bytes might).
-		if let Value::Object(obj) = &mut data {
-			obj.0.entry(ID_KEY).or_insert_with(|| Value::RecordId(rid));
-		}
-		Ok(Record {
-			metadata,
-			data,
-		})
-	}
-
-	/// Decode a `Record` revision-2 (`optimised, indexed_struct`) value
-	/// from `bytes` starting at the `u16` revision tag. Defers the
-	/// envelope decode to the macro-generated
-	/// `<Record as DeserializeRevisioned>::deserialize_revisioned` and
-	/// then splices the canonical `id` into the top-level `Object` if the
-	/// payload is one.
-	///
-	/// Rev-1's hand-rolled decoder reads `metadata` and `data` sequentially
-	/// from the post-rev reader; the rev-2 envelope wraps the body in
-	/// `u32_le payload_length` plus an indexed-struct offset prologue, so
-	/// hand-rolling would duplicate the macro's envelope parsing. The
-	/// macro path is `O(field_count)` for skip-bound offsets plus the
-	/// actual field decodes, identical asymptotically to the rev-1 path.
-	///
-	/// **Why not splice-during-decode like rev-1?** Rev-1's hand-rolled
-	/// path reads `metadata` and `data` as locals then constructs the
-	/// `Record` from them, so it can mutate `data` between decoding fields
-	/// at zero cost. Rev-2 goes through the macro's full deserialiser,
-	/// which materialises a complete `Record` struct before returning —
-	/// we can't borrow `record.data` mutably mid-decode without forking
-	/// the macro's codegen. Splicing post-hoc costs one `VecMap::entry`
-	/// lookup against the (typically empty) top-level Object's key set;
-	/// rev-2 records also originate from the read side of KV, not the
-	/// scan hot loop, so this isn't on the critical descent path.
-	fn decode_rev2_with_id(bytes: &[u8], rid: RecordId) -> Result<Record> {
-		let mut reader: &[u8] = bytes;
-		let mut record = <Record as DeserializeRevisioned>::deserialize_revisioned(&mut reader)?;
-		if let Value::Object(obj) = &mut record.data {
-			obj.0.entry(ID_KEY).or_insert_with(|| Value::RecordId(rid));
-		}
-		Ok(record)
-	}
-
 	/// Creates a new record with the given data and no metadata
 	pub(crate) fn new(data: Value) -> Self {
 		Self {
@@ -405,51 +308,18 @@ mod tests {
 		assert_eq!(Record::new(Value::Bool(true)).kv_encode_value().unwrap().len(), 17);
 	}
 
-	#[test]
-	fn custom_encode_matches_derive_encode_of_stripped_record() {
-		// The custom `KVValue` encoder clones the top-level Object, removes
-		// `"id"`, then hands the cleaned record to the derived serializer.
-		// Result must be byte-identical to the derived encode of a record
-		// that never had an id to begin with.
-		let rid = make_rid("user", "alice");
-		// Record as stored at rest in memory, with `id` present.
-		let mut with_id = Object::default();
-		with_id.0.insert(Strand::new("id"), Value::RecordId(rid));
-		with_id.0.insert(Strand::new("name"), Value::String(Strand::new("Alice")));
-		with_id.0.insert(Strand::new("age"), Value::from(30i64));
-		let with_id = Record::new(Value::Object(with_id));
-		// Same record with `id` stripped — what the derived encoder would
-		// see if our custom encoder did its job correctly.
-		let mut without_id = Object::default();
-		without_id.0.insert(Strand::new("name"), Value::String(Strand::new("Alice")));
-		without_id.0.insert(Strand::new("age"), Value::from(30i64));
-		let without_id = Record::new(Value::Object(without_id));
-		// Custom encode of the record-with-id must equal the derived
-		// encode of the record-without-id, byte for byte.
-		assert_eq!(with_id.kv_encode_value().unwrap(), revision::to_vec(&without_id).unwrap());
+	/// Build the on-disk bytes a *legacy* writer would have produced: a
+	/// `Record` whose stored `Object` has had its top-level `"id"`
+	/// removed (the pre-3.2 encoder stripped it). Used to exercise the
+	/// `kv_decode_value` splice path.
+	fn legacy_stripped_bytes(obj_without_id: Object) -> Vec<u8> {
+		revision::to_vec(&Record::new(Value::Object(obj_without_id))).unwrap()
 	}
 
 	#[test]
-	fn encode_skips_top_level_id() {
-		// Encoding a record with an `id` in `data` must produce the same
-		// bytes as encoding the same record without `id` in `data`.
-		let rid = make_rid("user", "alice");
-		let mut with_id = Object::default();
-		with_id.0.insert(Strand::new("id"), Value::RecordId(rid));
-		with_id.0.insert(Strand::new("name"), Value::String(Strand::new("Alice")));
-		with_id.0.insert(Strand::new("age"), Value::from(30i64));
-		let with_id = Record::new(Value::Object(with_id));
-
-		let mut without_id = Object::default();
-		without_id.0.insert(Strand::new("name"), Value::String(Strand::new("Alice")));
-		without_id.0.insert(Strand::new("age"), Value::from(30i64));
-		let without_id = Record::new(Value::Object(without_id));
-
-		assert_eq!(with_id.kv_encode_value().unwrap(), without_id.kv_encode_value().unwrap());
-	}
-
-	#[test]
-	fn decode_with_id_injects_when_absent() {
+	fn encode_decode_round_trips_with_id() {
+		// Current writers store `id` inline. Encode → decode must return
+		// the record unchanged, with `id` present at the top level.
 		let rid = make_rid("user", "alice");
 		let mut obj = Object::default();
 		obj.0.insert(Strand::new("id"), Value::RecordId(rid.clone()));
@@ -459,72 +329,51 @@ mod tests {
 		let bytes = original.kv_encode_value().unwrap();
 		let decoded = Record::kv_decode_value(&bytes, rid.clone()).unwrap();
 		assert_eq!(decoded, original);
-		// And id must be present at the top level.
 		match &decoded.data {
-			Value::Object(o) => {
-				assert_eq!(o.0.get("id"), Some(&Value::RecordId(rid)));
-			}
+			Value::Object(o) => assert_eq!(o.0.get("id"), Some(&Value::RecordId(rid))),
 			_ => panic!("expected Value::Object"),
 		}
 	}
 
 	#[test]
-	fn decode_with_id_preserves_legacy_id() {
-		// If on-disk bytes still carry an `id` (defensive case: no current
-		// writer emits this, but the decode wrapper must tolerate it),
-		// the payload's id is preserved and our pending injection is
-		// dropped.
+	fn encode_stores_id_inline() {
+		// The encoder no longer strips `id`: the encoded bytes must be
+		// byte-identical to the plain derived `revision::to_vec`.
 		let rid = make_rid("user", "alice");
 		let mut obj = Object::default();
-		obj.0.insert(Strand::new("id"), Value::RecordId(rid.clone()));
+		obj.0.insert(Strand::new("id"), Value::RecordId(rid));
 		obj.0.insert(Strand::new("name"), Value::String(Strand::new("Alice")));
 		let record = Record::new(Value::Object(obj));
 
-		// Use the standard revision encoder (matches the pre-refactor
-		// on-disk format produced *before* the runtime strip ran).
-		let bytes = revision::to_vec(&record).unwrap();
-		let decoded = Record::kv_decode_value(&bytes, rid).unwrap();
-		assert_eq!(decoded, record);
+		assert_eq!(record.kv_encode_value().unwrap(), revision::to_vec(&record).unwrap());
 	}
 
 	#[test]
-	fn decode_splices_id_at_sorted_position() {
-		// Construct a record with keys that bracket "id" lexicographically:
-		// "age" < "id" < "name". After encode (which strips id) + decode
-		// the entries should be `[age, id, name]`, with id spliced in at
-		// the correct sorted slot rather than appended and re-sorted.
+	fn decode_splices_id_for_legacy_stripped_data() {
+		// Legacy data lacks the top-level `id`. Decode must synthesise it
+		// from the storage key at the correct sorted position. Three
+		// bracket cases: id in the middle, at the end, at the front.
 		let rid = make_rid("user", "alice");
-		let mut obj = Object::default();
-		obj.0.insert(Strand::new("age"), Value::from(30i64));
-		obj.0.insert(Strand::new("id"), Value::RecordId(rid.clone()));
-		obj.0.insert(Strand::new("name"), Value::String(Strand::new("Alice")));
-		let original = Record::new(Value::Object(obj));
 
-		let bytes = original.kv_encode_value().unwrap();
-		let decoded = Record::kv_decode_value(&bytes, rid.clone()).unwrap();
-
+		// "age" < "id" < "name" → id lands in the middle.
+		let mut middle = Object::default();
+		middle.0.insert(Strand::new("age"), Value::from(30i64));
+		middle.0.insert(Strand::new("name"), Value::String(Strand::new("Alice")));
+		let decoded = Record::kv_decode_value(&legacy_stripped_bytes(middle), rid.clone()).unwrap();
 		match &decoded.data {
 			Value::Object(o) => {
 				let keys: Vec<&str> = o.0.iter().map(|(k, _)| k.as_str()).collect();
 				assert_eq!(keys, vec!["age", "id", "name"]);
-				assert_eq!(o.0.get("id"), Some(&Value::RecordId(rid)));
+				assert_eq!(o.0.get("id"), Some(&Value::RecordId(rid.clone())));
 			}
 			_ => panic!("expected Value::Object"),
 		}
-	}
 
-	#[test]
-	fn decode_appends_id_when_no_greater_key() {
-		// All payload keys sort before "id" → id is appended at the end.
-		let rid = make_rid("user", "alice");
-		let mut obj = Object::default();
-		obj.0.insert(Strand::new("age"), Value::from(30i64));
-		obj.0.insert(Strand::new("address"), Value::String(Strand::new("123 main")));
-		obj.0.insert(Strand::new("id"), Value::RecordId(rid.clone()));
-		let original = Record::new(Value::Object(obj));
-
-		let bytes = original.kv_encode_value().unwrap();
-		let decoded = Record::kv_decode_value(&bytes, rid).unwrap();
+		// All keys sort before "id" → appended at the end.
+		let mut tail = Object::default();
+		tail.0.insert(Strand::new("address"), Value::String(Strand::new("123 main")));
+		tail.0.insert(Strand::new("age"), Value::from(30i64));
+		let decoded = Record::kv_decode_value(&legacy_stripped_bytes(tail), rid.clone()).unwrap();
 		match &decoded.data {
 			Value::Object(o) => {
 				let keys: Vec<&str> = o.0.iter().map(|(k, _)| k.as_str()).collect();
@@ -532,20 +381,12 @@ mod tests {
 			}
 			_ => panic!("expected Value::Object"),
 		}
-	}
 
-	#[test]
-	fn decode_prepends_id_when_no_lesser_key() {
-		// All payload keys sort after "id" → id is spliced in at the front.
-		let rid = make_rid("user", "alice");
-		let mut obj = Object::default();
-		obj.0.insert(Strand::new("id"), Value::RecordId(rid.clone()));
-		obj.0.insert(Strand::new("name"), Value::String(Strand::new("Alice")));
-		obj.0.insert(Strand::new("zip"), Value::from(12345i64));
-		let original = Record::new(Value::Object(obj));
-
-		let bytes = original.kv_encode_value().unwrap();
-		let decoded = Record::kv_decode_value(&bytes, rid).unwrap();
+		// All keys sort after "id" → prepended at the front.
+		let mut head = Object::default();
+		head.0.insert(Strand::new("name"), Value::String(Strand::new("Alice")));
+		head.0.insert(Strand::new("zip"), Value::from(12345i64));
+		let decoded = Record::kv_decode_value(&legacy_stripped_bytes(head), rid).unwrap();
 		match &decoded.data {
 			Value::Object(o) => {
 				let keys: Vec<&str> = o.0.iter().map(|(k, _)| k.as_str()).collect();
@@ -556,9 +397,51 @@ mod tests {
 	}
 
 	#[test]
+	fn decode_round_trips_matching_id() {
+		// When the stored `id` matches the storage key (the normal case),
+		// decode returns the record unchanged.
+		let rid = make_rid("user", "alice");
+		let mut obj = Object::default();
+		obj.0.insert(Strand::new("id"), Value::RecordId(rid.clone()));
+		obj.0.insert(Strand::new("name"), Value::String(Strand::new("Alice")));
+		let record = Record::new(Value::Object(obj));
+
+		let bytes = revision::to_vec(&record).unwrap();
+		let decoded = Record::kv_decode_value(&bytes, rid).unwrap();
+		assert_eq!(decoded, record);
+	}
+
+	#[test]
+	fn decode_overwrites_id_with_storage_key() {
+		// The storage key is the source of truth for identity. When the
+		// stored `id` differs from the key — as for a materialised view
+		// `DEFINE TABLE v AS SELECT id, .. FROM src`, which projects the
+		// *source* row's id into the view record stored under `v:..` — the
+		// decoded `id` must be the key, not the stored (foreign) id.
+		let view_key = make_rid("high_scores", "2");
+		let source_id = make_rid("src", "2");
+		let mut obj = Object::default();
+		// Stored data carries the projected source id, as the view writer
+		// persists it.
+		obj.0.insert(Strand::new("id"), Value::RecordId(source_id));
+		obj.0.insert(Strand::new("name"), Value::String(Strand::new("b")));
+		obj.0.insert(Strand::new("score"), Value::from(20i64));
+		let stored = Record::new(Value::Object(obj));
+
+		let bytes = revision::to_vec(&stored).unwrap();
+		let decoded = Record::kv_decode_value(&bytes, view_key.clone()).unwrap();
+		match &decoded.data {
+			Value::Object(o) => {
+				assert_eq!(o.0.get("id"), Some(&Value::RecordId(view_key)));
+			}
+			_ => panic!("expected Value::Object"),
+		}
+	}
+
+	#[test]
 	fn nested_id_is_preserved() {
-		// The id skip applies only to the top-level object of `data`.
-		// Nested objects with their own `id` field must round-trip intact.
+		// Nested objects with their own `id` field must round-trip intact;
+		// the top-level splice only touches the outermost object.
 		let rid = make_rid("user", "alice");
 
 		let mut profile = Object::default();
@@ -621,17 +504,29 @@ mod tests {
 	}
 
 	#[test]
-	fn encode_without_id_matches_standard() {
-		// When the record has no top-level id, the custom encoder takes
-		// the fast path (delegates to the derived `Value` encoder),
-		// producing bytes byte-identical to `revision::to_vec`.
+	fn encode_round_trips_with_divergent_key_orderings() {
+		// Keys `"name"` (varint length 4) and `"zip"` (varint length 3)
+		// have opposite K::Ord and wire-byte orderings: K::Ord puts
+		// `"name"` before `"zip"`, while the rev-2 indexed-map body sorts
+		// by wire bytes (length-prefixed), putting `"zip"` first. The
+		// deserialiser re-sorts by K::Ord on read, so the round-trip
+		// preserves the record's logical content and key order.
+		let rid = make_rid("user", "alice");
 		let mut obj = Object::default();
+		obj.0.insert(Strand::new("id"), Value::RecordId(rid.clone()));
 		obj.0.insert(Strand::new("name"), Value::String(Strand::new("Alice")));
-		obj.0.insert(Strand::new("age"), Value::from(30i64));
-		let record = Record::new(Value::Object(obj));
+		obj.0.insert(Strand::new("zip"), Value::from(12345i64));
+		let original = Record::new(Value::Object(obj));
 
-		let custom = record.kv_encode_value().unwrap();
-		let standard = revision::to_vec(&record).unwrap();
-		assert_eq!(custom, standard);
+		let bytes = original.kv_encode_value().unwrap();
+		let decoded = Record::kv_decode_value(&bytes, rid).unwrap();
+		assert_eq!(decoded, original);
+		match decoded.data {
+			Value::Object(o) => {
+				let keys: Vec<&str> = o.0.iter().map(|(k, _)| k.as_str()).collect();
+				assert_eq!(keys, vec!["id", "name", "zip"]);
+			}
+			_ => panic!("expected Value::Object"),
+		}
 	}
 }

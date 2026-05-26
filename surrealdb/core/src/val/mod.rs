@@ -1438,7 +1438,7 @@ mod tests {
 	//   indexed_map body (sub-threshold): flag (1) + varint len + (K, V)*
 	// Total delta vs rev-1 Value + rev-1 Object: +13 bytes per Object Value
 	// (Value envelope +6, Object envelope +5, indexed_map flag +1, minus
-	// 4 bytes the rev-1 framing was paying). PR-63's Wire-repr zero-copy
+	// 4 bytes the rev-1 framing was paying). The Wire-repr zero-copy
 	// `walk_field_0` removed the need for a single-field offset table.
 	#[case::object(Value::from(syn::value("{ hello: 'world' }").unwrap()), 31)]
 	#[case::object(Value::from(syn::value("{ compact: true, schema: 0 }").unwrap()), 40)]

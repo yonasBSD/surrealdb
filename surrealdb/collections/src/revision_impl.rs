@@ -43,87 +43,6 @@ impl<K: DeserializeRevisioned + Ord, V: DeserializeRevisioned> DeserializeRevisi
 	}
 }
 
-impl<K, V> VecMap<K, V>
-where
-	K: DeserializeRevisioned + Ord,
-	V: DeserializeRevisioned,
-{
-	/// Deserialise a revisioned `VecMap` payload while merging an
-	/// `extra` entry into its sorted position during decode.
-	///
-	/// The wire format consumed is identical to the standard
-	/// [`DeserializeRevisioned`] implementation. The splice happens
-	/// in-memory between the read of each payload entry, so no
-	/// post-decode shift is required and the result is constructed
-	/// with [`VecMap::from_sorted_vec_unchecked`] directly.
-	///
-	/// # Duplicate-key policy
-	///
-	/// If the payload already contains an entry whose key equals
-	/// `extra.0`, the payload's value wins and `extra.1` is dropped.
-	/// This matches the "field is canonically reconstructed from
-	/// elsewhere but legacy payloads may still carry it" pattern
-	/// (for example, a record `id` field that is now derived from
-	/// the storage key but historically lived inside the payload).
-	///
-	/// # Errors
-	///
-	/// Returns [`Error::Deserialize`] when the payload keys are not
-	/// strictly ascending. The splice point itself is guaranteed to
-	/// preserve sort order without an additional check.
-	pub fn deserialize_revisioned_with_extra<R: std::io::Read>(
-		reader: &mut R,
-		extra: (K, V),
-	) -> Result<Self, Error> {
-		let len = usize::deserialize_revisioned(reader)?;
-		let mut items: Vec<(K, V)> = Vec::with_capacity(len + 1);
-		// `pending` holds the injected entry until it has been spliced
-		// in at its sorted position, or dropped because the payload
-		// already carried the same key.
-		let mut pending: Option<(K, V)> = Some(extra);
-		for _ in 0..len {
-			let k = K::deserialize_revisioned(reader)?;
-			// Strict-ascending check against the in-progress merge.
-			// Splicing `pending` between two strictly-ascending
-			// payload keys preserves the invariant for free, so the
-			// payload-vs-payload check is all we need.
-			if let Some((prev_k, _)) = items.last()
-				&& k <= *prev_k
-			{
-				return Err(Error::Deserialize(
-					"VecMap revision payload: keys not strictly ascending".into(),
-				));
-			}
-			if let Some((extra_k, _)) = pending.as_ref() {
-				match k.cmp(extra_k) {
-					std::cmp::Ordering::Less => {
-						// payload key < extra key: keep extra pending
-					}
-					std::cmp::Ordering::Equal => {
-						// Payload carries the extra key already. Payload wins.
-						let v = V::deserialize_revisioned(reader)?;
-						items.push((k, v));
-						pending = None;
-						continue;
-					}
-					std::cmp::Ordering::Greater => {
-						// payload key > extra key: splice extra in first
-						if let Some(p) = pending.take() {
-							items.push(p);
-						}
-					}
-				}
-			}
-			let v = V::deserialize_revisioned(reader)?;
-			items.push((k, v));
-		}
-		if let Some(p) = pending {
-			items.push(p);
-		}
-		Ok(VecMap::from_sorted_vec_unchecked(items))
-	}
-}
-
 impl<K: Revisioned + Ord, V: Revisioned> Revisioned for VecMap<K, V> {
 	#[inline]
 	fn revision() -> u16 {
@@ -211,16 +130,27 @@ where
 // by key/element bytes, optional offset-table prologue past
 // `OFFSET_TABLE_MIN_LEN = 8`.
 //
-// Deserialisation parses directly into a sorted `Vec<(K, V)>` / `Vec<T>`
-// and constructs via `from_sorted_vec_unchecked`, avoiding the
-// intermediate `BTreeMap` / `BTreeSet` the generic revision-crate
-// helpers would allocate. Wire byte order may diverge from `K::Ord` /
-// `T::Ord` when entries have varying-length keys (the encoder sorts by
-// raw bytes — e.g. Strand keys `"a"` and `"bb"` sort by `(1, "a")` vs
-// `(2, "bb")` rather than UTF-8 codepoint order), so we re-sort by
-// `K::Ord` / `T::Ord` after collecting. For the common case (equal-
-// length keys, or all-ASCII without length variation) the sort is a
-// near no-op on already-sorted input.
+// `serialize_indexed_*` and `skip_indexed_*` delegate straight to the
+// `revision` crate's free functions — the latter pick up the O(1)
+// indexed-body skip added in revision 0.26.0.
+//
+// Deserialisation stays hand-rolled because the crate's
+// `deserialize_indexed_map` / `deserialize_indexed_seq` return
+// `BTreeMap` / `Vec` and would force an intermediate `BTreeMap` /
+// `BTreeSet` allocation (plus tree teardown) on the way to a `VecMap` /
+// `VecSet`. We instead parse directly into a sorted `Vec<(K, V)>` /
+// `Vec<T>` and construct via `from_sorted_vec_unchecked`, and skip the
+// offset-table prologue with `revision::slice_reader::advance_read` — a
+// 4 KB stack-buffer read loop with no heap allocation (the crate's own
+// decoder still `vec![0u8; n]`s the discard buffer).
+//
+// Wire byte order may diverge from `K::Ord` / `T::Ord` when entries have
+// varying-length keys (the encoder sorts by raw bytes — e.g. Strand keys
+// `"a"` and `"bb"` sort by `(1, "a")` vs `(2, "bb")` rather than UTF-8
+// codepoint order), so we re-sort by `K::Ord` / `T::Ord` after
+// collecting. For the common case (equal-length keys, or all-ASCII
+// without length variation) the sort is a near no-op on already-sorted
+// input.
 // -----------------------------------------------------------------------------
 
 /// Bit flag on the leading byte of an indexed-map/seq/set body indicating
@@ -228,16 +158,6 @@ where
 /// `revision::optimised::indexed::seq_walk::FLAG_INDEXED`; reproduced here
 /// because the constant is private to the revision crate.
 const INDEXED_FLAG_BIT: u8 = 0b0000_0001;
-
-/// Skip `count` bytes from a reader.
-#[inline]
-fn discard_bytes<R: std::io::Read>(r: &mut R, count: usize) -> Result<(), Error> {
-	if count == 0 {
-		return Ok(());
-	}
-	let mut buf = vec![0u8; count];
-	r.read_exact(&mut buf).map_err(Error::Io)
-}
 
 impl<K, V> revision::optimised::indexed::IndexedMapEncoded for VecMap<K, V>
 where
@@ -280,7 +200,7 @@ where
 			let table_bytes = len.checked_mul(8).ok_or_else(|| {
 				Error::Deserialize("indexed-map offset table size overflow".into())
 			})?;
-			discard_bytes(r, table_bytes + 8)?;
+			revision::slice_reader::advance_read(r, table_bytes + 8)?;
 			// Two passes: dense keys first (a sorted ascending run by
 			// wire bytes), then dense values in matching order.
 			let mut keys: Vec<K> = Vec::with_capacity(len);
@@ -301,7 +221,20 @@ where
 		}
 		Ok(VecMap::from_sorted_vec_unchecked(entries))
 	}
-	fn skip_indexed_map<R: std::io::Read>(r: &mut R) -> Result<(), Error> {
+	/// Skip a serialised indexed-map without materialising any keys or
+	/// values.
+	///
+	/// Delegates to `revision`'s [`skip_indexed_map`] free function,
+	/// which (since revision 0.26.0) fast-paths the indexed body: it
+	/// derives the dense regions' total byte length from the prologue's
+	/// `(keys_region_len, vals_region_len)` `u32_le` pair and skips it
+	/// via a single `BorrowedReader::advance` — O(1), no per-entry
+	/// `skip_revisioned`, no discard-buffer allocation. The
+	/// `R: BorrowedReader` bound (tightened from `R: Read` in 0.26.0) is
+	/// what lets the skip pointer-bump past the body on slice-backed
+	/// readers; the sub-threshold body still walks entries since it
+	/// carries no region lengths.
+	fn skip_indexed_map<R: revision::BorrowedReader>(r: &mut R) -> Result<(), Error> {
 		revision::optimised::indexed::skip_indexed_map::<K, V, R>(r)
 	}
 }
@@ -335,7 +268,7 @@ where
 			let table_bytes = len.checked_mul(4).ok_or_else(|| {
 				Error::Deserialize("indexed-set offset table size overflow".into())
 			})?;
-			discard_bytes(r, table_bytes)?;
+			revision::slice_reader::advance_read(r, table_bytes)?;
 			for _ in 0..len {
 				entries.push(T::deserialize_revisioned(r)?);
 			}
@@ -346,7 +279,18 @@ where
 		}
 		Ok(VecSet::from_sorted_vec_unchecked(entries))
 	}
-	fn skip_indexed_set<R: std::io::Read>(r: &mut R) -> Result<(), Error> {
+	/// Skip a serialised indexed-set without materialising any elements.
+	///
+	/// Delegates to `revision`'s [`skip_indexed_set`] free function,
+	/// which (since revision 0.26.0) reduces the indexed path from an
+	/// N-element walk to a single entry skip: the seq/set wire format
+	/// records per-element offsets but not the dense region's total
+	/// length, so it reads the **last** offset to reach the start of the
+	/// final element, advances to it, then calls `T::skip_revisioned`
+	/// once. The sub-threshold body still walks every element. The
+	/// `R: BorrowedReader` bound enables the pointer-bump advance on
+	/// slice-backed readers.
+	fn skip_indexed_set<R: revision::BorrowedReader>(r: &mut R) -> Result<(), Error> {
 		revision::optimised::indexed::skip_indexed_set::<T, R>(r)
 	}
 }
@@ -613,128 +557,148 @@ mod tests {
 		assert!(matches!(err, Error::Deserialize(_)));
 	}
 
-	// ---- VecMap::deserialize_revisioned_with_extra ----
+	// ---- Skip fast path (delegates to revision's O(1) indexed skip) ----
 
-	fn encode_pairs<K, V>(pairs: &[(K, V)]) -> Vec<u8>
-	where
-		K: SerializeRevisioned + Ord + Clone,
-		V: SerializeRevisioned + Clone,
-	{
-		let vm: VecMap<K, V> = VecMap::from_sorted_vec_unchecked(pairs.to_vec());
-		revision_bytes(&vm)
+	#[test]
+	fn skip_indexed_map_sub_threshold_lands_at_payload_end() {
+		// Below the offset-table threshold the body is `(K, V)*`; skip
+		// must walk each entry. Verify the cursor sits exactly at the
+		// end of the payload and a sibling-byte sentinel survives.
+		use revision::optimised::indexed::IndexedMapEncoded;
+		let vm: VecMap<u32, u32> = (0..4u32).map(|i| (i, i * 10)).collect();
+		let mut bytes = Vec::new();
+		vm.serialize_indexed_map(&mut bytes).unwrap();
+		// Append a sentinel byte so under-/over-consume both fail.
+		bytes.push(0xAB);
+		let mut reader: &[u8] = &bytes;
+		VecMap::<u32, u32>::skip_indexed_map(&mut reader).unwrap();
+		assert_eq!(reader, &[0xAB]);
 	}
 
 	#[test]
-	fn deserialize_with_extra_splices_in_middle() {
-		// Payload keys bracket the extra: 1 < 2 < 3. The extra (2, 20)
-		// should be spliced between the two payload entries.
-		let bytes = encode_pairs(&[(1u32, 10u32), (3u32, 30u32)]);
-		let decoded = VecMap::<u32, u32>::deserialize_revisioned_with_extra(
-			&mut bytes.as_slice(),
-			(2u32, 20u32),
-		)
-		.unwrap();
-		let pairs: Vec<_> = decoded.iter().map(|(k, v)| (*k, *v)).collect();
-		assert_eq!(pairs, vec![(1, 10), (2, 20), (3, 30)]);
+	fn skip_indexed_map_indexed_lands_at_payload_end() {
+		// At/above the threshold the body has an offset table + region
+		// lengths. The fast path skips the offset table, reads the two
+		// `u32_le` region lengths, then advances past both dense regions
+		// — without invoking K/V skip.
+		use revision::optimised::indexed::IndexedMapEncoded;
+		let vm: VecMap<u32, u32> = (0..16u32).map(|i| (i, i * 1000)).collect();
+		let mut bytes = Vec::new();
+		vm.serialize_indexed_map(&mut bytes).unwrap();
+		bytes.push(0xCD);
+		let mut reader: &[u8] = &bytes;
+		VecMap::<u32, u32>::skip_indexed_map(&mut reader).unwrap();
+		assert_eq!(reader, &[0xCD]);
 	}
 
 	#[test]
-	fn deserialize_with_extra_appends_when_no_greater_key() {
-		// All payload keys sort before the extra: 1, 2 < 9. The extra
-		// (9, 90) should be appended at the end.
-		let bytes = encode_pairs(&[(1u32, 10u32), (2u32, 20u32)]);
-		let decoded = VecMap::<u32, u32>::deserialize_revisioned_with_extra(
-			&mut bytes.as_slice(),
-			(9u32, 90u32),
-		)
-		.unwrap();
-		let pairs: Vec<_> = decoded.iter().map(|(k, v)| (*k, *v)).collect();
-		assert_eq!(pairs, vec![(1, 10), (2, 20), (9, 90)]);
+	fn skip_indexed_map_with_variable_length_values() {
+		// Variable-length value type (`String`) exercises the
+		// `vals_region_len` accounting on the indexed path. If the fast
+		// path miscalculated the dense region size the sentinel would
+		// be eaten or under-consumed.
+		use revision::optimised::indexed::IndexedMapEncoded;
+		let vm: VecMap<u32, String> = (0..12u32).map(|i| (i, "x".repeat(i as usize + 1))).collect();
+		let mut bytes = Vec::new();
+		vm.serialize_indexed_map(&mut bytes).unwrap();
+		bytes.push(0xEF);
+		let mut reader: &[u8] = &bytes;
+		VecMap::<u32, String>::skip_indexed_map(&mut reader).unwrap();
+		assert_eq!(reader, &[0xEF]);
 	}
 
 	#[test]
-	fn deserialize_with_extra_prepends_when_no_lesser_key() {
-		// All payload keys sort after the extra: 0 < 5, 10. The extra
-		// (0, 0) should be prepended.
-		let bytes = encode_pairs(&[(5u32, 50u32), (10u32, 100u32)]);
-		let decoded = VecMap::<u32, u32>::deserialize_revisioned_with_extra(
-			&mut bytes.as_slice(),
-			(0u32, 0u32),
-		)
-		.unwrap();
-		let pairs: Vec<_> = decoded.iter().map(|(k, v)| (*k, *v)).collect();
-		assert_eq!(pairs, vec![(0, 0), (5, 50), (10, 100)]);
+	fn skip_indexed_set_sub_threshold_lands_at_payload_end() {
+		use revision::optimised::indexed::IndexedSetEncoded;
+		let vs: VecSet<u32> = (0..4u32).collect();
+		let mut bytes = Vec::new();
+		vs.serialize_indexed_set(&mut bytes).unwrap();
+		bytes.push(0xAB);
+		let mut reader: &[u8] = &bytes;
+		VecSet::<u32>::skip_indexed_set(&mut reader).unwrap();
+		assert_eq!(reader, &[0xAB]);
 	}
 
 	#[test]
-	fn deserialize_with_extra_into_empty_payload() {
-		// Empty payload: the extra is the only entry.
-		let bytes: Vec<u8> = encode_pairs::<u32, u32>(&[]);
-		let decoded = VecMap::<u32, u32>::deserialize_revisioned_with_extra(
-			&mut bytes.as_slice(),
-			(7u32, 70u32),
-		)
-		.unwrap();
-		let pairs: Vec<_> = decoded.iter().map(|(k, v)| (*k, *v)).collect();
-		assert_eq!(pairs, vec![(7, 70)]);
+	fn skip_indexed_set_indexed_lands_at_payload_end() {
+		// Indexed body: peek the last offset, advance into the dense
+		// region, skip the final element. Verifies the "single entry
+		// skip" arithmetic on a Vec<T> shaped seq/set.
+		use revision::optimised::indexed::IndexedSetEncoded;
+		let vs: VecSet<u32> = (0..16u32).collect();
+		let mut bytes = Vec::new();
+		vs.serialize_indexed_set(&mut bytes).unwrap();
+		bytes.push(0xCD);
+		let mut reader: &[u8] = &bytes;
+		VecSet::<u32>::skip_indexed_set(&mut reader).unwrap();
+		assert_eq!(reader, &[0xCD]);
 	}
 
 	#[test]
-	fn deserialize_with_extra_payload_wins_on_collision() {
-		// Payload already carries the extra key. Payload's value wins
-		// and the extra's value is dropped.
-		let bytes = encode_pairs(&[(1u32, 10u32), (2u32, 20u32), (3u32, 30u32)]);
-		let decoded = VecMap::<u32, u32>::deserialize_revisioned_with_extra(
-			&mut bytes.as_slice(),
-			(2u32, 99u32),
-		)
-		.unwrap();
-		let pairs: Vec<_> = decoded.iter().map(|(k, v)| (*k, *v)).collect();
-		assert_eq!(pairs, vec![(1, 10), (2, 20), (3, 30)]);
+	fn skip_indexed_set_with_variable_length_elements() {
+		// Variable-length elements (`String`). The last entry of the
+		// offset table identifies the start of the final element; the
+		// fast path then calls `T::skip_revisioned` once to advance
+		// past it. Sentinel byte catches misalignment.
+		use revision::optimised::indexed::IndexedSetEncoded;
+		let vs: VecSet<String> = (0..12).map(|i| "abc".repeat(i + 1)).collect();
+		let mut bytes = Vec::new();
+		vs.serialize_indexed_set(&mut bytes).unwrap();
+		bytes.push(0xEF);
+		let mut reader: &[u8] = &bytes;
+		VecSet::<String>::skip_indexed_set(&mut reader).unwrap();
+		assert_eq!(reader, &[0xEF]);
 	}
 
 	#[test]
-	fn deserialize_with_extra_rejects_descending_payload() {
-		// Hand-craft a payload with descending keys to verify the
-		// strict-ascending check still fires when an extra is being
-		// spliced.
-		let mut w = Vec::new();
-		2usize.serialize_revisioned(&mut w).unwrap();
-		5u32.serialize_revisioned(&mut w).unwrap();
-		50u32.serialize_revisioned(&mut w).unwrap();
-		3u32.serialize_revisioned(&mut w).unwrap();
-		30u32.serialize_revisioned(&mut w).unwrap();
-		let err =
-			VecMap::<u32, u32>::deserialize_revisioned_with_extra(&mut w.as_slice(), (1u32, 10u32))
-				.unwrap_err();
-		assert!(matches!(err, Error::Deserialize(_)));
+	fn skip_indexed_map_matches_upstream_consume_length() {
+		// Cross-check: our fast `skip_indexed_map` must consume exactly
+		// the same number of bytes as the reference free function in the
+		// `revision` crate, across both the sub-threshold and indexed
+		// shapes. (`revision`'s free function is the slow per-entry walk
+		// in 0.25.0; our impl is the 0.26.0 fast path applied locally.)
+		use revision::optimised::indexed::{IndexedMapEncoded, skip_indexed_map};
+		for n in [0usize, 1, 7, 8, 16, 64] {
+			let vm: VecMap<u32, String> =
+				(0..n as u32).map(|i| (i, "v".repeat(i as usize % 5))).collect();
+			let mut bytes = Vec::new();
+			vm.serialize_indexed_map(&mut bytes).unwrap();
+
+			let mut ours: &[u8] = &bytes;
+			VecMap::<u32, String>::skip_indexed_map(&mut ours).unwrap();
+
+			let mut reference: &[u8] = &bytes;
+			skip_indexed_map::<u32, String, _>(&mut reference).unwrap();
+
+			assert_eq!(
+				ours.len(),
+				reference.len(),
+				"consume-length mismatch for map of {n} entries"
+			);
+			assert!(ours.is_empty(), "fast skip left {} bytes for map of {n}", ours.len());
+		}
 	}
 
 	#[test]
-	fn deserialize_with_extra_rejects_duplicate_payload_keys() {
-		// Payload itself has duplicate keys (neither matches extra).
-		let mut w = Vec::new();
-		2usize.serialize_revisioned(&mut w).unwrap();
-		3u32.serialize_revisioned(&mut w).unwrap();
-		30u32.serialize_revisioned(&mut w).unwrap();
-		3u32.serialize_revisioned(&mut w).unwrap();
-		31u32.serialize_revisioned(&mut w).unwrap();
-		let err =
-			VecMap::<u32, u32>::deserialize_revisioned_with_extra(&mut w.as_slice(), (1u32, 10u32))
-				.unwrap_err();
-		assert!(matches!(err, Error::Deserialize(_)));
-	}
+	fn skip_indexed_set_matches_upstream_consume_length() {
+		use revision::optimised::indexed::{IndexedSetEncoded, skip_indexed_set};
+		for n in [0usize, 1, 7, 8, 16, 64] {
+			let vs: VecSet<String> = (0..n).map(|i| "e".repeat(i % 5)).collect();
+			let mut bytes = Vec::new();
+			vs.serialize_indexed_set(&mut bytes).unwrap();
 
-	#[test]
-	fn deserialize_with_extra_capacity_avoids_realloc() {
-		// Not a behavioural property, but a regression check that the
-		// helper allocates a single Vec sized for the spliced result.
-		let bytes = encode_pairs(&[(1u32, 10u32), (3u32, 30u32)]);
-		let decoded = VecMap::<u32, u32>::deserialize_revisioned_with_extra(
-			&mut bytes.as_slice(),
-			(2u32, 20u32),
-		)
-		.unwrap();
-		assert_eq!(decoded.len(), 3);
+			let mut ours: &[u8] = &bytes;
+			VecSet::<String>::skip_indexed_set(&mut ours).unwrap();
+
+			let mut reference: &[u8] = &bytes;
+			skip_indexed_set::<String, _>(&mut reference).unwrap();
+
+			assert_eq!(
+				ours.len(),
+				reference.len(),
+				"consume-length mismatch for set of {n} entries"
+			);
+			assert!(ours.is_empty(), "fast skip left {} bytes for set of {n}", ours.len());
+		}
 	}
 }

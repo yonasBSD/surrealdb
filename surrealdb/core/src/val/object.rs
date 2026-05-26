@@ -19,9 +19,9 @@ use crate::val::{IndexFormat, RecordId, Strand, Value};
 ///   Byte-identical to the legacy on-disk encoding.
 /// - **Rev 2** — optimised envelope (`u16 revision || u32_le payload_length`), inner `VecMap`
 ///   written via the indexed-map prologue past `OFFSET_TABLE_MIN_LEN = 8`. Walker descent stays
-///   zero-allocation: under PR-63's commit `a7b223a`, `walk_field_0()` on a `Wire`-repr parent
-///   borrows the field bytes directly by bracketing `skip_indexed_map` with
-///   `BorrowedReader::remaining()` snapshots, no decode + re-encode required.
+///   zero-allocation: `walk_field_0()` on a `Wire`-repr parent borrows the field bytes directly by
+///   bracketing `skip_indexed_map` with `BorrowedReader::remaining()` snapshots, no decode +
+///   re-encode required.
 #[revisioned(revision(1), revision(2, optimised))]
 #[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Hash, Encode, BorrowDecode)]
 #[storekey(format = "()")]

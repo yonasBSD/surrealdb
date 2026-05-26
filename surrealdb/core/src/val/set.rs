@@ -14,7 +14,7 @@ use crate::val::{IndexFormat, Value};
 ///   on-disk encoding.
 /// - **Rev 2** — optimised envelope (`u16 revision || u32_le payload_length`), inner `VecSet`
 ///   written via the indexed-set prologue past `OFFSET_TABLE_MIN_LEN = 8`. Walker descent stays
-///   zero-allocation through PR-63's Wire-repr fast path (skip + borrow).
+///   zero-allocation through the Wire-repr fast path (skip + borrow).
 #[revisioned(revision(1), revision(2, optimised))]
 #[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Hash, Encode, BorrowDecode)]
 #[storekey(format = "()")]
