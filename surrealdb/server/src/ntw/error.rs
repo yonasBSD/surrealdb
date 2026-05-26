@@ -84,7 +84,7 @@ impl IntoResponse for Error {
 				}.into_response(),
 			_ => ErrorMessage {
 				code: StatusCode::BAD_REQUEST,
-				details: Some("Request problems dectected".to_string()),
+				details: Some("Request problems detected".to_string()),
 				description: Some("There is a problem with your request. Refer to the documentation for further information.".to_string()),
 				information: Some(format!("{self}")),
 			}.into_response()
@@ -203,7 +203,7 @@ fn types_error_into_response(e: &surrealdb_types::Error) -> Response {
 	}
 	ErrorMessage {
 		code: StatusCode::BAD_REQUEST,
-		details: Some("Request problems dectected".to_string()),
+		details: Some("Request problems detected".to_string()),
 		description: Some("There is a problem with your request. Refer to the documentation for further information.".to_string()),
 		information: Some(e.message().to_string()),
 	}
