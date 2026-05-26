@@ -624,9 +624,9 @@ pub async fn parse_prime(parser: &mut Parser<'_, '_>) -> ParseResult<Expr> {
 		BaseTokenKind::String => Ok(Expr::String(parser.parse_sync()?)),
 		BaseTokenKind::RecordIdString => {
 			let _ = parser.next();
-			// TODO: Remove `to_owned` call.
-			let str = parser.unescape_str(peek)?.to_owned();
-			match parser.sub_parse::<ast::RecordId>(&str).await {
+			let mut unescape_buffer = String::new();
+			let str = parser.unescape_str(peek, &mut unescape_buffer)?;
+			match parser.sub_parse::<ast::RecordId>(str).await {
 				Ok(x) => {
 					let p = parser.push(x);
 					Ok(Expr::RecordId(p))

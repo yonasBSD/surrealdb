@@ -239,7 +239,19 @@ impl<'source, 'ast> Parser<'source, 'ast> {
 		Ok(self.ast.push_set_entry(str))
 	}
 
-	pub(crate) fn unescape_str(&mut self, token: Token) -> ParseResult<&str> {
+	/// Unescape a string-like token into the caller-provided `buffer`.
+	///
+	/// The returned `&str` borrows from either the original source or `buffer`,
+	/// but never from `self`, so the caller is free to re-borrow `self`
+	/// mutably while the returned slice is still alive.
+	pub(crate) fn unescape_str<'a>(
+		&self,
+		token: Token,
+		buffer: &'a mut String,
+	) -> ParseResult<&'a str>
+	where
+		'source: 'a,
+	{
 		let start_offset = match token.token {
 			BaseTokenKind::String => 1,
 			BaseTokenKind::RecordIdString
@@ -254,7 +266,7 @@ impl<'source, 'ast> Parser<'source, 'ast> {
 		slice_span.start += start_offset as u32;
 		slice_span.end -= end_offset as u32;
 
-		Self::unescape_common(slice_span, slice, self.source(), &mut self.unescape_buffer)
+		Self::unescape_common(slice_span, slice, self.source(), buffer)
 	}
 
 	pub(crate) fn unescape_str_push(&mut self, token: Token) -> ParseResult<NodeId<String>> {
