@@ -77,9 +77,10 @@ pub enum TableConfig {
 	Exclude(ExcludedTables),
 }
 
-// TODO: This should probably be removed
-// This is not a good from implementation,
-// It is not direct: What true and false mean when converted to a table config?
+// `From<bool>` exists so the SDK's `ExportBuilder::tables(impl Into<TableConfig>)`
+// accepts `tables(true)` / `tables(false)` directly. The semantics are
+// documented at the call site (`surrealdb/src/method/export.rs::tables`):
+// `true` selects all tables, `false` selects none.
 impl From<bool> for TableConfig {
 	fn from(value: bool) -> Self {
 		match value {

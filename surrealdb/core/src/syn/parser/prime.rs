@@ -383,7 +383,6 @@ impl Parser<'_> {
 	pub(super) fn parse_mock(&mut self, start_span: Span) -> ParseResult<Mock> {
 		let name: crate::val::TableName = self.parse_ident_str()?.into();
 		expected!(self, t!(":"));
-		// TODO: limit these to i64 range, it is weird that these can exceed normal number range.
 		let start = match self.peek_kind() {
 			t!("..") => {
 				self.pop_peek();
