@@ -1876,14 +1876,15 @@ impl Transactable for Transaction {
 			// above, so no new cursor can open. See `scan_cursor.rs` for
 			// the SeqCst ordering rationale.
 			drain_cursors(self).await;
-			self.run_blocking(move |guard| {
-				let inner = guard
-					.as_ref()
-					.ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-				inner.tx.rollback()?;
-				Ok(())
-			})
-			.await
+			// `rollback` on an OptimisticTransaction just clears the in-memory
+			// WriteBatchWithIndex and resets the tracked-keys set — it never
+			// touches disk. We therefore take the inner lock and run inline
+			// rather than dispatching through the inline-blocking guard.
+			let guard = self.inner.lock().await;
+			let inner =
+				guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+			inner.tx.rollback()?;
+			Ok(())
 		})
 	}
 
@@ -2067,15 +2068,18 @@ impl Transactable for Transaction {
 			if self.is_restricted(false) {
 				return Err(Error::ReadAndDeleteOnly);
 			}
-			self.run_blocking(move |guard| {
-				let inner = guard
-					.as_ref()
-					.ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-				inner.tx.put(key, val)?;
-				self.store_writes();
-				Ok(())
-			})
-			.await
+			// `put` on an OptimisticTransaction only buffers into the in-memory
+			// WriteBatchWithIndex and records the key for commit-time conflict
+			// detection — it never touches disk. We therefore take the inner
+			// lock and run inline rather than dispatching through the
+			// inline-blocking guard, which would only add a function-call hop
+			// (granted) or a wasteful thread hop (diverted) for a pure-memory op.
+			let guard = self.inner.lock().await;
+			let inner =
+				guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+			inner.tx.put(key, val)?;
+			self.store_writes();
+			Ok(())
 		})
 	}
 
@@ -2154,15 +2158,17 @@ impl Transactable for Transaction {
 			if !self.writeable() {
 				return Err(Error::TransactionReadonly);
 			}
-			self.run_blocking(move |guard| {
-				let inner = guard
-					.as_ref()
-					.ok_or_else(|| Error::Internal("expected a transaction".into()))?;
-				inner.tx.delete(key)?;
-				self.store_deletes();
-				Ok(())
-			})
-			.await
+			// `delete` on an OptimisticTransaction only buffers a tombstone into
+			// the in-memory WriteBatchWithIndex and records the key for
+			// commit-time conflict detection — it never touches disk. We
+			// therefore take the inner lock and run inline rather than
+			// dispatching through the inline-blocking guard.
+			let guard = self.inner.lock().await;
+			let inner =
+				guard.as_ref().ok_or_else(|| Error::Internal("expected a transaction".into()))?;
+			inner.tx.delete(key)?;
+			self.store_deletes();
+			Ok(())
 		})
 	}
 
