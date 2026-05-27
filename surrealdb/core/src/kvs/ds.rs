@@ -627,6 +627,15 @@ impl TransactionBuilderFactory for CommunityComposer {
 				#[cfg(not(feature = "kv-mem"))]
 				bail!(Error::Kvs(crate::kvs::Error::Datastore("Cannot connect to the `memory` storage engine as it is not enabled in this build of SurrealDB".to_owned())));
 			}
+			// The `file:` scheme has been removed. Catch it here so users
+			// with legacy paths get a targeted message instead of the
+			// generic fallback below.
+			("file", _) => {
+				bail!(Error::Kvs(crate::kvs::Error::Datastore(
+					"The `file://` scheme is no longer supported; use `rocksdb://` or `surrealkv://` instead"
+						.into()
+				)));
+			}
 			// Initiate a RocksDB datastore
 			(flavour @ "rocksdb", path) => {
 				#[cfg(feature = "kv-rocksdb")]
