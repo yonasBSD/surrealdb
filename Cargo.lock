@@ -5844,9 +5844,9 @@ dependencies = [
 
 [[package]]
 name = "revision"
-version = "0.27.0"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3884cdc5ac1de6588fd672bf0cb664df8187aceaf528af5a310b6737b85938a3"
+checksum = "e735a8c2864f0b0fd48a55d0a71c081c7cbef8c8958a4665d8de423f20f2d0cf"
 dependencies = [
  "bytes",
  "chrono",
@@ -5860,9 +5860,9 @@ dependencies = [
 
 [[package]]
 name = "revision-derive"
-version = "0.27.0"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf8e00338870f643d44ad7a19798e425f5614aeeaf1aee00d109ef2dae7ec1b6"
+checksum = "f446f8c55ba240992330b09f69fe9e5ec8a2e1ba266843cb9f59d7bc6037c821"
 dependencies = [
  "proc-macro2",
  "quote",

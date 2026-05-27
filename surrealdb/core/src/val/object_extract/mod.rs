@@ -241,23 +241,37 @@ pub(crate) fn extract_field_from_record_bytes_parts(
 /// Since the indexed_map is the **only** field, the payload IS the
 /// indexed_map body — no offset prologue, no field separator. We read the
 /// rev prefix, validate it's 2, skip the `u32_le` envelope length, and
-/// feed the remainder straight to [`IndexedMapWalker::from_payload`].
+/// feed the remainder straight to
+/// [`IndexedMapWalker::from_payload_unvalidated`].
 ///
-/// Uses the **validating** `from_payload` rather than
-/// `from_payload_unvalidated`: the workspace release profile sets
-/// `panic = 'abort'`, so a corrupted offset table sneaking past us (disk
-/// bit-rot, FS corruption, an off-path serialiser) would cause an
-/// out-of-bounds slice inside `element_bytes` / `find_value_bytes` and
-/// abort the whole `surrealdb` process. The walker contract returns a
-/// clean [`Error::OptimisedOffsetsNonMonotonic`] / similar so callers
-/// fall through to full decode — a graceful recovery we want to preserve.
-/// The validation cost is the price of that availability guarantee.
+/// Uses `from_payload_unvalidated` rather than the validating
+/// `from_payload`. The validating constructor eagerly walks the whole
+/// offset table and key region (`validate_map_prologue` +
+/// `validate_key_region_ascending`) on **every** record — O(fields), which
+/// a no-index scan profile showed costing ~6.8 % of total CPU, roughly five
+/// times the O(log fields) binary-search lookup it guards. That validation
+/// existed only because the walker's region slices were unchecked: under
+/// the workspace release profile's `panic = 'abort'`, a corrupt offset
+/// (disk bit-rot, FS corruption, an off-path serialiser) would slice out of
+/// bounds and abort the whole `surrealdb` process.
+///
+/// As of `revision` 0.28 those slices are bounds-checked at the point of
+/// use: `find_value_bytes` returns
+/// [`Error::OptimisedOffsetOutOfRange`] and `entries` clamps to an empty
+/// slice instead of panicking. So the unvalidated walker preserves the
+/// graceful-recovery contract (corruption → `Err` → caller falls through to
+/// full decode) without the per-record O(fields) tax. RocksDB block
+/// checksums already detect storage corruption upstream, so the only
+/// residual difference from the validating path — a corrupt *non-ascending*
+/// key region making a lookup report a present key as absent — is both
+/// already-guarded-against and, on the rare miss, recovered via the
+/// full-decode fallback.
 ///
 /// Returns the rev prefix-validated walker on success, or an error on
-/// non-2 rev (callers fall back to the macro-emitted path), a truncated
-/// envelope, or a corrupted offset prologue.
+/// non-2 rev (callers fall back to the macro-emitted path) or a truncated
+/// envelope.
 ///
-/// [`Error::OptimisedOffsetsNonMonotonic`]: revision::Error::OptimisedOffsetsNonMonotonic
+/// [`Error::OptimisedOffsetOutOfRange`]: revision::Error::OptimisedOffsetOutOfRange
 fn indexed_map_walker_from_object_bytes(
 	object_wire: &[u8],
 ) -> Result<IndexedMapWalker<'_, Strand, Value>, RevisionError> {
@@ -266,7 +280,7 @@ fn indexed_map_walker_from_object_bytes(
 	// construction the inner `Object` shares the rev. Skip the inner
 	// rev re-read.
 	let payload = rev2_optimised_payload_unchecked(object_wire)?;
-	IndexedMapWalker::<'_, Strand, Value>::from_payload(payload)
+	IndexedMapWalker::<'_, Strand, Value>::from_payload_unvalidated(payload)
 }
 
 /// Serialise pre-validated UTF-8 bytes to their on-wire `Strand`
