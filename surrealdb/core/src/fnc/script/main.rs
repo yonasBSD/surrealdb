@@ -56,8 +56,6 @@ pub async fn run(
 	// Scripting functions are pretty heavy so make the increase pretty heavy.
 	let opt = opt.dive(4)?;
 
-	//TODO: Maybe check memory usage?
-
 	let instant_start = Instant::now();
 	let time_limit = context.config.scripting_max_time_limit;
 

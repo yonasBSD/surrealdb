@@ -3607,7 +3607,8 @@ impl Datastore {
 
 	/// Get a db model by name.
 	///
-	/// TODO: This should not be public, but it is used in `surrealdb/src/api/engine/local/mod.rs`.
+	/// TODO: This should not be public, but it is used by callers outside the
+	/// `surrealdb-core` crate (the SDK's local engine and the server's ML route).
 	pub async fn get_db_model(
 		&self,
 		ns: &str,
@@ -3626,7 +3627,8 @@ impl Datastore {
 
 	/// Invoke an API handler.
 	///
-	/// TODO: This should not need to be public, but it is used in `src/net/api.rs`.
+	/// TODO: This should not need to be public, but it is used by the server's
+	/// HTTP API route (outside the `surrealdb-core` crate).
 	pub async fn invoke_api_handler(
 		&self,
 		ns: &str,
