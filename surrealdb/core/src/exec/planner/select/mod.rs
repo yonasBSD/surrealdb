@@ -27,12 +27,12 @@ use super::Planner;
 use super::util::{
 	SELECT_ITERATION_PARAMS, all_value_sources, derive_field_name, extract_bruteforce_knn,
 	extract_count_field_names, extract_matches_context, extract_record_id_point_lookup,
-	extract_version, fold_condition_expressions, has_knn_k_operator, has_knn_operator,
-	has_top_level_or, idiom_to_field_name, index_covers_ordering, is_bounded_topk_downstream,
-	is_count_all_eligible, is_indexed_count_eligible, order_is_scan_compatible,
-	resolve_condition_params, resolve_param_value, resolve_projection_field_idioms,
-	strip_fts_condition, strip_index_conditions, strip_knn_from_condition,
-	strip_union_index_conditions,
+	extract_version, fold_condition_expressions, has_knn_k_operator, has_knn_ktree_operator,
+	has_knn_operator, has_top_level_or, idiom_to_field_name, index_covers_ordering,
+	is_bounded_topk_downstream, is_count_all_eligible, is_indexed_count_eligible,
+	order_is_scan_compatible, resolve_condition_params, resolve_param_value,
+	resolve_projection_field_idioms, strip_fts_condition, strip_index_conditions,
+	strip_knn_from_condition, strip_union_index_conditions,
 };
 use crate::catalog::Index;
 use crate::catalog::providers::{DatabaseProvider, NamespaceProvider, TableProvider};
@@ -943,11 +943,27 @@ impl<'ctx> Planner<'ctx> {
 
 		let (cond_for_index, cond_for_filter) = if has_knn {
 			let stripped = cond.as_ref().and_then(strip_knn_from_condition);
-			if stripped.as_ref().is_some_and(|c| has_knn_operator(&c.0)) {
+			if let Some(c) = stripped.as_ref()
+				&& has_knn_operator(&c.0)
+			{
+				// `strip_knn_from_condition` removes `K` and `Approximate` from
+				// the top-level AND chain; whatever is left is either a KTree
+				// variant (no longer backed by any index) or a `K`/`Approximate`
+				// nested under OR/NOT. Disambiguate so the message is actionable.
+				let message = if has_knn_ktree_operator(&c.0) {
+					"The `<|k|>` KNN operator (KTree / M-Tree) is no longer supported. \
+					 Use `<|k, EF|>` against an HNSW index (e.g. \
+					 `DEFINE INDEX … HNSW DIMENSION N`), or `<|k, DISTANCE|>` for a \
+					 brute-force KNN with an explicit distance metric."
+						.to_string()
+				} else {
+					"KNN operators must appear at the top level of the WHERE clause \
+					 (joined with AND); nesting `<|k, …|>` inside OR or NOT is not \
+					 supported."
+						.to_string()
+				};
 				return Err(Error::Query {
-					message: "KNN operators nested in OR/NOT expressions or mixed with \
-					 unsupported KNN variants are not supported"
-						.to_string(),
+					message,
 				});
 			}
 			if brute_force_knn.is_some() {

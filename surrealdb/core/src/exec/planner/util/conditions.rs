@@ -43,12 +43,7 @@ pub(crate) fn has_top_level_or(cond: Option<&Cond>) -> bool {
 
 /// Check if an expression contains any KNN (nearest neighbor) operators.
 pub(crate) fn has_knn_operator(expr: &Expr) -> bool {
-	let mut checker = KnnOperatorChecker {
-		found_any: false,
-		found_k: false,
-	};
-	let _ = checker.visit_expr(expr);
-	checker.found_any
+	scan_knn_operators(expr).found_any
 }
 
 /// Check if an expression contains a brute-force KNN operator (`NearestNeighbor::K`).
@@ -56,18 +51,33 @@ pub(crate) fn has_knn_operator(expr: &Expr) -> bool {
 /// Used to distinguish between brute-force KNN with parameter-based vectors
 /// (where `extract_bruteforce_knn` fails) and HNSW KNN (`Approximate`).
 pub(crate) fn has_knn_k_operator(expr: &Expr) -> bool {
+	scan_knn_operators(expr).found_k
+}
+
+/// Check if an expression contains a `KTree` KNN operator (`<|k|>` form).
+///
+/// `KTree` was backed by the M-Tree index, which has been removed. The
+/// streaming planner uses this to distinguish "unsupported variant" from
+/// "KNN nested under OR/NOT" when emitting the user-facing error.
+pub(crate) fn has_knn_ktree_operator(expr: &Expr) -> bool {
+	scan_knn_operators(expr).found_ktree
+}
+
+fn scan_knn_operators(expr: &Expr) -> KnnOperatorChecker {
 	let mut checker = KnnOperatorChecker {
 		found_any: false,
 		found_k: false,
+		found_ktree: false,
 	};
 	let _ = checker.visit_expr(expr);
-	checker.found_k
+	checker
 }
 
 /// Visitor that detects the presence of KNN operators in an expression tree.
 struct KnnOperatorChecker {
 	found_any: bool,
 	found_k: bool,
+	found_ktree: bool,
 }
 
 impl Visitor for KnnOperatorChecker {
@@ -80,8 +90,10 @@ impl Visitor for KnnOperatorChecker {
 		} = expr
 		{
 			self.found_any = true;
-			if matches!(nn.as_ref(), NearestNeighbor::K(..)) {
-				self.found_k = true;
+			match nn.as_ref() {
+				NearestNeighbor::K(..) => self.found_k = true,
+				NearestNeighbor::KTree(..) => self.found_ktree = true,
+				NearestNeighbor::Approximate(..) => {}
 			}
 		}
 		expr.visit(self)
