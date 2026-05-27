@@ -220,8 +220,6 @@ impl Function {
 	}
 }
 
-///TODO(3.0): Remove after proper first class function support?
-
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub(crate) struct FunctionCall {
 	pub receiver: Function,

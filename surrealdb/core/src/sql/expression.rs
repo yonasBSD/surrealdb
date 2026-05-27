@@ -29,7 +29,6 @@ pub(crate) enum Expr {
 	Idiom(Idiom),
 	Table(TableName),
 	Mock(Mock),
-	// TODO(3.0) maybe unbox? check size.
 	Block(Box<Block>),
 	Constant(Constant),
 	Prefix {

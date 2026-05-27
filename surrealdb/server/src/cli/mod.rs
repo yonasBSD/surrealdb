@@ -367,8 +367,9 @@ pub async fn init<
 ///
 /// # Returns
 /// - `Ok(Some(version))` - A newer version is available
-/// - `Ok(None)` - No upgrade needed (current version is up-to-date or newer)
-/// - `Err(e)` - An error occurred during version checking or parsing
+/// - `Ok(None)` - No upgrade needed (current is up-to-date or newer), or the fetch failed (e.g.
+///   offline) and we couldn't confirm
+/// - `Err(e)` - Failed to parse the current or fetched version string
 async fn check_upgrade<C: VersionClient>(client: &C, pkg_version: &str) -> Result<Option<Version>> {
 	match client.fetch("latest").await {
 		Ok(version) => {
@@ -380,9 +381,8 @@ async fn check_upgrade<C: VersionClient>(client: &C, pkg_version: &str) -> Resul
 			}
 		}
 		_ => {
-			// Request failed, check against date
-			// TODO: We don't have an "expiry" set per-version, so this is a
-			// todo It would return Err(None) if the version is too old
+			// Request failed (e.g. offline) — fail open: don't warn about an
+			// upgrade when we couldn't confirm one is available.
 		}
 	}
 	Ok(None)
