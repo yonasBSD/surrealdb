@@ -37,7 +37,7 @@ use crate::val::object_extract::wire_skip::{rev2_optimised_payload_unchecked, sk
 /// workspace's `panic = 'abort'` release profile turns a corrupted offset
 /// table into a process abort instead of the clean
 /// `OptimisedOffsetsNonMonotonic` error + graceful fall-through to full
-/// decode that the pre-PR walker contract guaranteed.
+/// decode that the validating walker contract guarantees.
 ///
 /// [`object_extract`]: crate::val::object_extract
 #[inline]
@@ -196,9 +196,9 @@ impl StreamingLeafEvaluator for ArrayElementContains {
 		// Rev-2 optimised Value walker: `array_view()` borrows the variant
 		// body; build an `IndexedSeqWalker` directly from the envelope to
 		// skip the macro-emitted `walk_revisioned → into_walk_field_0 →
-		// walker()` chain (which calls `skip_indexed_seq` just to find the
-		// field boundary, walking every element via
-		// `Value::skip_revisioned`).
+		// walker()` chain, which parses the seq prologue twice (once via
+		// `skip_indexed_seq` to derive the field bytes, then again in
+		// `IndexedSeqWalker::from_payload`).
 		let Ok(array_view) = leaf.array_view() else {
 			return Evidence::Unknown;
 		};

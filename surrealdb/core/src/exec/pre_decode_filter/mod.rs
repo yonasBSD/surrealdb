@@ -333,7 +333,7 @@ impl PreDecodeFilter {
 		&self,
 		key: &[u8],
 		record_bytes: &[u8],
-		prefix: &[PathSegment],
+		prefix: &[&PathSegment],
 		node: &PredNode,
 	) -> Evidence {
 		match node {
@@ -399,9 +399,15 @@ impl PreDecodeFilter {
 				// descending. The leaf / fused / scan node responsible for the
 				// actual extraction will resolve the full path against the
 				// row's encoded bytes.
-				let mut next: Vec<PathSegment> = Vec::with_capacity(prefix.len() + 1);
+				//
+				// `prefix` is a slice of `&PathSegment` so the recursive call
+				// only grows a `Vec` of pointers — no per-record clone of the
+				// segment, which would otherwise allocate a fresh wire-bytes
+				// `Box<[u8]>` for every row that flows through a navigated
+				// leaf (the hot path on `WHERE address.city = ...` shapes).
+				let mut next: Vec<&PathSegment> = Vec::with_capacity(prefix.len() + 1);
 				next.extend_from_slice(prefix);
-				next.push(segment.clone());
+				next.push(segment);
 				self.eval_node(key, record_bytes, &next, child.as_ref())
 			}
 		}
@@ -410,7 +416,7 @@ impl PreDecodeFilter {
 	fn eval_leaf_streaming(
 		&self,
 		record_bytes: &[u8],
-		prefix: &[PathSegment],
+		prefix: &[&PathSegment],
 		path: &[PathSegment],
 		evaluator: &dyn StreamingLeafEvaluator,
 		fallback: &LeafFallback,
@@ -461,8 +467,13 @@ impl PreDecodeFilter {
 			// on NONE).
 			Err(WalkLeafErr::Missing) => evaluator.evaluate_missing(fallback),
 			Err(WalkLeafErr::Bail) => {
+				// Cold fallback: the wire-fast descent bailed (e.g. unsupported
+				// variant, corrupted offsets). Materialise `prefix ++ path` as
+				// an owned `Vec<PathSegment>` for `extract_field_from_record_bytes`,
+				// which deserialises the leaf into a `Value`. The clones are paid
+				// only here, not on the hot path.
 				let full: Vec<PathSegment> =
-					prefix.iter().cloned().chain(path.iter().cloned()).collect();
+					prefix.iter().map(|&s| s.clone()).chain(path.iter().cloned()).collect();
 				self.fallback_leaf_streaming(record_bytes, &full, fallback)
 			}
 		}
@@ -495,7 +506,7 @@ impl PreDecodeFilter {
 	fn eval_set_membership(
 		&self,
 		record_bytes: &[u8],
-		prefix: &[PathSegment],
+		prefix: &[&PathSegment],
 		path: &[PathSegment],
 		op: &BinaryOperator,
 		set: &HashSet<Value>,
@@ -533,7 +544,7 @@ impl PreDecodeFilter {
 		&self,
 		key: &[u8],
 		record_bytes: &[u8],
-		prefix: &[PathSegment],
+		prefix: &[&PathSegment],
 		path: &[PathSegment],
 		op: &BinaryOperator,
 		literal: &Value,
@@ -584,7 +595,7 @@ impl PreDecodeFilter {
 	fn eval_fused_flat(
 		&self,
 		record_bytes: &[u8],
-		prefix: &[PathSegment],
+		prefix: &[&PathSegment],
 		clauses: &FusedFlatClauses,
 	) -> Evidence {
 		if clauses.is_empty() {
@@ -669,7 +680,7 @@ impl PreDecodeFilter {
 	fn descend_with_leaf_bytes<F, T>(
 		&self,
 		record_bytes: &[u8],
-		prefix: &[PathSegment],
+		prefix: &[&PathSegment],
 		path: &[PathSegment],
 		inner: F,
 	) -> DescendResult<T>

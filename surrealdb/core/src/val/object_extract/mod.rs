@@ -184,10 +184,13 @@ pub(crate) fn extract_field_from_record_bytes(
 /// first, then `path`, without concatenating into a new [`Vec`].
 ///
 /// Lets per-record evaluators in `pre_decode_filter` avoid allocating a
-/// `Vec<PathSegment>` of `prefix ++ path` in their hot loops.
+/// `Vec<PathSegment>` of `prefix ++ path` in their hot loops. `prefix` is a
+/// slice of [`PathSegment`] references because the upstream
+/// `PreDecodeFilter::eval_node` accumulates [`NavigatePrefix`] segments by
+/// pointer, not by clone — see that file's [`PathSegment::clone`] cost note.
 pub(crate) fn extract_field_from_record_bytes_parts(
 	record_bytes: &[u8],
-	prefix: &[PathSegment],
+	prefix: &[&PathSegment],
 	path: &[PathSegment],
 	depth_limit: u32,
 ) -> Extracted {
@@ -216,15 +219,16 @@ pub(crate) fn extract_field_from_record_bytes_parts(
 
 /// Construct an [`IndexedMapWalker`] directly from an [`Object`]'s rev-2
 /// wire bytes, **bypassing** the macro-generated
-/// `Object::walk_revisioned` → `into_walk_field_0` chain.
+/// `Object::walk_revisioned` → `into_walk_field_0` → `walker()` chain.
 ///
-/// Why: the macro-emitted accessor takes the `fast_path_wire` arm for
-/// `Wire`-backed parents, which calls
-/// `<VecMap as IndexedMapEncoded>::skip_indexed_map` just to **find the
-/// field's byte boundary** before slicing. `skip_indexed_map` walks every
-/// entry, invoking `Strand::skip_revisioned` and
-/// `Value::skip_revisioned` per pair — exactly what showed up as
-/// `Value::skip_revisioned (11.35%)` in the scan profile.
+/// Why: the macro path parses the indexed-map prologue twice per descent.
+/// `into_walk_field_0` runs `skip_indexed_map` (O(1) on indexed bodies
+/// since revision 0.26.0, but it still reads the offset table and dense-
+/// region lengths to derive the field's exact bytes for the
+/// `IndexedMapView`). Then [`IndexedMapView::walker`] calls
+/// [`IndexedMapWalker::from_payload`] on those same bytes — re-reading and
+/// validating the prologue a second time. Constructing the walker
+/// directly from the envelope payload parses the prologue once.
 ///
 /// `Object` is `#[revisioned(revision(1), revision(2, optimised))]` with a
 /// single `#[revision(indexed_map)]` field, so its rev-2 wire layout is
@@ -238,20 +242,16 @@ pub(crate) fn extract_field_from_record_bytes_parts(
 /// indexed_map body — no offset prologue, no field separator. We read the
 /// rev prefix, validate it's 2, skip the `u32_le` envelope length, and
 /// feed the remainder straight to [`IndexedMapWalker::from_payload`].
-/// That's one pass over the body (the eventual `find_value_bytes` /
-/// `entries` call) instead of two.
 ///
 /// Uses the **validating** `from_payload` rather than
 /// `from_payload_unvalidated`: the workspace release profile sets
 /// `panic = 'abort'`, so a corrupted offset table sneaking past us (disk
 /// bit-rot, FS corruption, an off-path serialiser) would cause an
 /// out-of-bounds slice inside `element_bytes` / `find_value_bytes` and
-/// abort the whole `surrealdb` process. The pre-PR walker contract
-/// returned a clean [`Error::OptimisedOffsetsNonMonotonic`] / similar and
-/// callers fell through to full decode — a graceful recovery we want to
-/// preserve. The validation cost (~1.28 % in the scan profile under
-/// `validate_key_region_ascending`) is the price of that availability
-/// guarantee.
+/// abort the whole `surrealdb` process. The walker contract returns a
+/// clean [`Error::OptimisedOffsetsNonMonotonic`] / similar so callers
+/// fall through to full decode — a graceful recovery we want to preserve.
+/// The validation cost is the price of that availability guarantee.
 ///
 /// Returns the rev prefix-validated walker on success, or an error on
 /// non-2 rev (callers fall back to the macro-emitted path), a truncated
@@ -356,7 +356,7 @@ fn lookup_value_bytes_in_map<'p>(
 /// freed at function return.
 fn descend_value_path_parts<'r, R: BorrowedReader>(
 	value_walker: <Value as WalkRevisioned>::Walker<'r, R>,
-	prefix: &[PathSegment],
+	prefix: &[&PathSegment],
 	path: &[PathSegment],
 	depth_limit: u32,
 ) -> Extracted {
@@ -381,10 +381,10 @@ fn descend_value_path_parts<'r, R: BorrowedReader>(
 /// decoded leaf [`Value`] for success.
 fn descend_value_recursive<'r, R: BorrowedReader>(
 	walker: <Value as WalkRevisioned>::Walker<'r, R>,
-	prefix: &[PathSegment],
+	prefix: &[&PathSegment],
 	path: &[PathSegment],
 ) -> Extracted {
-	let needle = if let Some(s) = prefix.first() {
+	let needle: &PathSegment = if let Some(&s) = prefix.first() {
 		s
 	} else if let Some(s) = path.first() {
 		s
@@ -402,10 +402,11 @@ fn descend_value_recursive<'r, R: BorrowedReader>(
 		Err(_) => return Extracted::Bail,
 	};
 	// Bypass the macro-emitted `walk_revisioned → into_walk_field_0 →
-	// walker()` chain; that path calls `skip_indexed_map` per row just to
-	// find the field boundary, walking every entry via
-	// `Value::skip_revisioned`. See `indexed_map_walker_from_object_bytes`
-	// for the manual rev-2 envelope decode.
+	// walker()` chain — that path parses the indexed-map prologue twice
+	// (once via `skip_indexed_map` to derive the field's bytes, then again
+	// in `IndexedMapWalker::from_payload`). See
+	// `indexed_map_walker_from_object_bytes` for the manual rev-2 envelope
+	// decode.
 	let map_walker = match indexed_map_walker_from_object_bytes(view.as_bytes()) {
 		Ok(w) => w,
 		Err(_) => return Extracted::Bail,
@@ -415,8 +416,11 @@ fn descend_value_recursive<'r, R: BorrowedReader>(
 		Ok(None) => return Extracted::Missing,
 		Err(_) => return Extracted::Bail,
 	};
-	// One segment consumed — slice the remaining `(prefix, path)`.
-	let (next_prefix, next_path): (&[PathSegment], &[PathSegment]) = if prefix.is_empty() {
+	// One segment consumed — slice the remaining `(prefix, path)`. We pop
+	// from `prefix` first (the `NavigatePrefix` chain accumulated by the
+	// upstream pre-decode filter) and only descend into `path` once
+	// `prefix` is empty.
+	let (next_prefix, next_path): (&[&PathSegment], &[PathSegment]) = if prefix.is_empty() {
 		(&[], &path[1..])
 	} else {
 		(&prefix[1..], path)
@@ -461,14 +465,14 @@ pub(crate) enum DescendResult<T> {
 /// similar) inside the closure.
 pub(crate) fn descend_to_value_walker<T, F>(
 	value_walker: <Value as WalkRevisioned>::Walker<'_, &[u8]>,
-	path: &[PathSegment],
+	path: &[&PathSegment],
 	depth_limit: u32,
 	consume: F,
 ) -> DescendResult<T>
 where
 	F: FnOnce(&[u8]) -> T,
 {
-	descend_to_value_walker_parts(value_walker, &[], path, depth_limit, consume)
+	descend_to_value_walker_parts(value_walker, path, &[], depth_limit, consume)
 }
 
 /// Like [`descend_to_value_walker`] but walks `prefix` segments first, then
@@ -481,7 +485,7 @@ where
 /// alive — no intermediate `Vec<u8>` copy per level.
 pub(crate) fn descend_to_value_walker_parts<T, F>(
 	walker: <Value as WalkRevisioned>::Walker<'_, &[u8]>,
-	prefix: &[PathSegment],
+	prefix: &[&PathSegment],
 	path: &[PathSegment],
 	depth_limit: u32,
 	consume: F,
@@ -504,7 +508,7 @@ where
 /// the terminal step consumes it.
 fn descend_walker_recursive<'r, R, T, F>(
 	walker: <Value as WalkRevisioned>::Walker<'r, R>,
-	prefix: &[PathSegment],
+	prefix: &[&PathSegment],
 	path: &[PathSegment],
 	consume: F,
 ) -> DescendResult<T>
@@ -512,7 +516,7 @@ where
 	R: BorrowedReader,
 	F: FnOnce(&[u8]) -> T,
 {
-	let needle = if let Some(s) = prefix.first() {
+	let needle: &PathSegment = if let Some(&s) = prefix.first() {
 		s
 	} else if let Some(s) = path.first() {
 		s
@@ -537,7 +541,7 @@ where
 		Ok(None) => return DescendResult::Missing,
 		Err(_) => return DescendResult::Bail,
 	};
-	let (next_prefix, next_path): (&[PathSegment], &[PathSegment]) = if prefix.is_empty() {
+	let (next_prefix, next_path): (&[&PathSegment], &[PathSegment]) = if prefix.is_empty() {
 		(&[], &path[1..])
 	} else {
 		(&prefix[1..], path)
@@ -587,7 +591,7 @@ pub(crate) enum SlotScanResult<T> {
 /// closure).
 pub(crate) fn scan_record_object_at_path_with_slots<K, F, T>(
 	record_bytes: &[u8],
-	path: &[PathSegment],
+	path: &[&PathSegment],
 	needles_sorted: &[K],
 	depth_limit: u32,
 	on_slots: F,

@@ -133,13 +133,15 @@ pub(crate) fn skip_value_wire(reader: &mut &[u8]) -> Result<(), RevisionError> {
 /// `walk_revisioned → into_walk_field_0 → walker()` chain.
 ///
 /// The macro-emitted `into_walk_field_*` accessors call the field type's
-/// `skip_*` impl just to find the field's byte boundary, which for
-/// `indexed_map` / `indexed_seq` types walks every entry via `K::skip_revisioned`
-/// and `V::skip_revisioned` (the per-entry walk that surfaced as
-/// `Value::skip_revisioned (11.35 %)` in the scan profile).
+/// `skip_*` impl to find the field's byte boundary. Even now that the
+/// indexed-body skip is O(1) (revision 0.26.0+), the macro path still pays
+/// the prologue parse twice — once in the skip to derive the field's bytes
+/// for the `IndexedMapView`, then again in `IndexedMapWalker::from_payload`
+/// when the caller asks for a walker. Bypassing both is one fewer prologue
+/// validation per descent.
 ///
 /// Because the only field IS the payload, the envelope length already
-/// tells us where the body ends — no per-entry probing needed.
+/// tells us where the body ends — no skip pass needed at all.
 ///
 /// **Caller-asserted rev-2 invariant.** Skips the `u16 rev` re-read on
 /// the assumption that the outer walker already validated it.

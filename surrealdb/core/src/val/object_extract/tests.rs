@@ -47,7 +47,7 @@ fn wire_record_plain_object(obj: Object) -> Vec<u8> {
 /// pairing logic, so decoding the slots is harmless.
 fn scan_slots_decoded(
 	record_bytes: &[u8],
-	path: &[PathSegment],
+	path: &[&PathSegment],
 	needles: &[&[u8]],
 ) -> SlotScanResult<Vec<Value>> {
 	scan_record_object_at_path_with_slots(record_bytes, path, needles, TEST_DEPTH_LIMIT, |slots| {
@@ -307,7 +307,8 @@ fn scan_record_object_at_path_walks_nested_object() {
 
 	let needles: &[&[u8]] = &[b"a", b"b", b"missing"];
 	let path = p(&["outer"]);
-	let result = scan_slots_decoded(&rec, &path, needles);
+	let path_refs: Vec<&PathSegment> = path.iter().collect();
+	let result = scan_slots_decoded(&rec, &path_refs, needles);
 	match result {
 		SlotScanResult::Found(values) => {
 			assert_eq!(values.len(), 3);
@@ -331,7 +332,8 @@ fn scan_record_object_at_path_missing_intermediate_yields_missing() {
 
 	let needles: &[&[u8]] = &[b"a"];
 	let path = p(&["outer", "inner"]);
-	let result = scan_slots_decoded(&rec, &path, needles);
+	let path_refs: Vec<&PathSegment> = path.iter().collect();
+	let result = scan_slots_decoded(&rec, &path_refs, needles);
 	assert!(matches!(result, SlotScanResult::Missing));
 }
 
@@ -345,7 +347,8 @@ fn scan_record_object_at_path_non_object_intermediate_bails() {
 
 	let needles: &[&[u8]] = &[b"a"];
 	let path = p(&["outer", "anything"]);
-	let result = scan_slots_decoded(&rec, &path, needles);
+	let path_refs: Vec<&PathSegment> = path.iter().collect();
+	let result = scan_slots_decoded(&rec, &path_refs, needles);
 	assert!(matches!(result, SlotScanResult::Bail));
 }
 
