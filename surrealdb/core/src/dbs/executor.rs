@@ -492,7 +492,19 @@ impl Executor {
 			}
 		}
 
-		let cancellation = CancellationToken::new();
+		// Derive the streaming-exec cancellation token from the legacy
+		// context's awaitable cancel handle when one is installed (the WS
+		// RPC layer installs it; embedded callers do not). `child_token()`
+		// gives parent-cancels-child semantics, so the same connection
+		// disconnect that trips the legacy executor's `Context::done`
+		// flag also fires the streaming-exec operators' `select!` against
+		// their token (e.g. `SleepPlan`, long-running scans) — without
+		// linking the two we would silently lose WS cancellation on the
+		// streaming-exec path.
+		let cancellation = match self.ctx.cancel_token() {
+			Some(parent) => parent.child_token(),
+			None => CancellationToken::new(),
+		};
 
 		// If a query timeout is configured, spawn a task that cancels the
 		// token when the timeout expires. This lets operators that check

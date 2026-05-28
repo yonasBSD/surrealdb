@@ -26,20 +26,36 @@ impl SleepStatement {
 		ctx.is_allowed(opt, Action::Edit, ResourceKind::Table, Base::Root)?;
 		// Is there a timeout?
 		if let Some(t) = ctx.timeout() {
-			timeout(t, self.sleep()).await?;
+			timeout(t, self.sleep(ctx)).await?;
 		} else {
-			self.sleep().await;
+			self.sleep(ctx).await;
 		}
 		// Ok all good
 		Ok(Value::None)
 	}
 
-	// Sleep for the specified time
-	async fn sleep(&self) {
+	/// Sleep for the specified time, racing against any awaitable
+	/// cancellation token installed on the context. Without the
+	/// `select!`, a `SLEEP 60s` on a closing WebSocket would block the
+	/// connection's disconnect drain for the full 60 seconds before
+	/// the executor's next `ctx.done` check could observe the cancel.
+	/// After the select returns the outer compute path falls through
+	/// to the executor's normal yield, which sees the cancel flag and
+	/// bails with `Error::QueryCancelled`.
+	async fn sleep(&self, ctx: &FrozenContext) {
 		#[cfg(target_family = "wasm")]
-		wasmtimer::tokio::sleep(self.duration.0).await;
+		let sleep_fut = wasmtimer::tokio::sleep(self.duration.0);
 		#[cfg(not(target_family = "wasm"))]
-		tokio::time::sleep(self.duration.0).await;
+		let sleep_fut = tokio::time::sleep(self.duration.0);
+		match ctx.cancel_token() {
+			Some(token) => {
+				tokio::select! {
+					_ = sleep_fut => {}
+					_ = token.cancelled() => {}
+				}
+			}
+			None => sleep_fut.await,
+		}
 	}
 }
 

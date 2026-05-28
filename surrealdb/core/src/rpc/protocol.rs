@@ -6,6 +6,7 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::catalog::providers::{CatalogProvider, NamespaceProvider, RootProvider};
+use crate::ctx::CancelHandle;
 use crate::dbs::capabilities::{ExperimentalTarget, MethodTarget};
 use crate::dbs::{QueryResult, QueryType, Session};
 use crate::iam::token::Token;
@@ -96,6 +97,23 @@ pub trait RpcProtocol {
 	fn kvs(&self) -> &Datastore;
 	/// The version information for this RPC context
 	fn version_data(&self) -> DbResult;
+
+	/// Optional connection-level cancellation handle plumbed into the
+	/// executor's [`crate::ctx::Context`]. When the handle is tripped the
+	/// executor's `done`-walks short-circuit with `Reason::Canceled` at
+	/// the next yield point (statement boundary, iterator hot loop check,
+	/// HNSW/DiskANN search) and the transaction is finalised on the
+	/// executor's normal error path. Bare-await sites (e.g. `SLEEP`)
+	/// `select!` against the handle's awaitable view, so they are
+	/// interrupted instead of running to completion.
+	///
+	/// The WebSocket implementation returns its connection cancel handle
+	/// so a client disconnect cancels in-flight queries cleanly. Stateless
+	/// implementations (HTTP RPC) return `None` and inherit the
+	/// pre-cancellation behaviour.
+	fn cancel_handle(&self) -> Option<CancelHandle> {
+		None
+	}
 
 	// ------------------------------
 	// Sessions
@@ -1780,23 +1798,40 @@ where
 	}
 
 	// If a transaction UUID is provided, retrieve it and execute with it
+	let cancel = this.cancel_handle();
 	let res = if let Some(txn_id) = txn {
 		// Retrieve the transaction - fail if not found
 		let tx = this.get_tx(txn_id).await.map_err(anyhow::Error::from)?;
 		// Execute with the existing transaction by passing it through context
-		match query {
-			QueryForm::Text(query) => {
+		match (query, cancel) {
+			(QueryForm::Text(query), Some(cancel)) => {
+				this.kvs()
+					.execute_with_transaction_and_cancel(query, &session, vars, tx, cancel)
+					.await?
+			}
+			(QueryForm::Text(query), None) => {
 				this.kvs().execute_with_transaction(query, &session, vars, tx).await?
 			}
-			QueryForm::Parsed(ast) => {
+			(QueryForm::Parsed(ast), Some(cancel)) => {
+				this.kvs()
+					.process_with_transaction_and_cancel(ast, &session, vars, tx, cancel)
+					.await?
+			}
+			(QueryForm::Parsed(ast), None) => {
 				this.kvs().process_with_transaction(ast, &session, vars, tx).await?
 			}
 		}
 	} else {
 		// No transaction - execute normally
-		match query {
-			QueryForm::Text(query) => this.kvs().execute(query, &session, vars).await?,
-			QueryForm::Parsed(ast) => this.kvs().process(ast, &session, vars).await?,
+		match (query, cancel) {
+			(QueryForm::Text(query), Some(cancel)) => {
+				this.kvs().execute_with_cancel(query, &session, vars, cancel).await?
+			}
+			(QueryForm::Text(query), None) => this.kvs().execute(query, &session, vars).await?,
+			(QueryForm::Parsed(ast), Some(cancel)) => {
+				this.kvs().process_with_cancel(ast, &session, vars, cancel).await?
+			}
+			(QueryForm::Parsed(ast), None) => this.kvs().process(ast, &session, vars).await?,
 		}
 	};
 

@@ -27,6 +27,7 @@ use crate::catalog::providers::{CatalogProvider, DatabaseProvider, NamespaceProv
 use crate::catalog::{DatabaseDefinition, DatabaseId, NamespaceId};
 use crate::cnf::dynamic::DynamicConfiguration;
 use crate::cnf::{CommonConfig, PROTECTED_PARAM_NAMES};
+use crate::ctx::cancel::CancelHandle;
 use crate::ctx::canceller::Canceller;
 use crate::ctx::reason::Reason;
 #[cfg(feature = "surrealism")]
@@ -75,8 +76,15 @@ pub struct Context {
 	// that exceed a given duration threshold. This configuration is propagated
 	// from the datastore into the context for the lifetime of a request.
 	slow_log: Option<SlowLog>,
-	// Whether or not this context is cancelled.
+	// Whether or not this context is cancelled. Fast hot-path view checked
+	// by [`Self::done`] at every executor yield.
 	cancelled: Arc<AtomicBool>,
+	// Awaitable view of the external cancellation signal, when one was
+	// installed via [`Self::set_cancellation`]. Used by sites that bare-await
+	// an external timer (e.g. `SLEEP`) so they can `select!` against the
+	// cancel instead of running to completion. `None` for contexts without
+	// an external cancel source (embedded callers, internal use).
+	cancel_token: Option<tokio_util::sync::CancellationToken>,
 	// A collection of read only values stored in this context.
 	values: HashMap<Strand, Arc<Value>>,
 	// An optional query planner
@@ -165,6 +173,7 @@ impl Context {
 			deadline: None,
 			slow_log: None,
 			cancelled: Arc::new(AtomicBool::new(false)),
+			cancel_token: None,
 			query_planner: None,
 			query_executor: None,
 			iteration_stage: None,
@@ -224,6 +233,7 @@ impl Context {
 			deadline: parent.deadline,
 			slow_log: parent.slow_log.clone(),
 			cancelled: Arc::new(AtomicBool::new(false)),
+			cancel_token: None,
 			query_planner: parent.query_planner.clone(),
 			query_executor: parent.query_executor.clone(),
 			iteration_stage: parent.iteration_stage.clone(),
@@ -267,6 +277,7 @@ impl Context {
 			deadline: parent.deadline,
 			slow_log: parent.slow_log.clone(),
 			cancelled: Arc::new(AtomicBool::new(false)),
+			cancel_token: None,
 			query_planner: parent.query_planner.clone(),
 			query_executor: parent.query_executor.clone(),
 			iteration_stage: parent.iteration_stage.clone(),
@@ -310,13 +321,24 @@ impl Context {
 	/// This is used by the streaming executor to give the operator pipeline
 	/// its own `Arc<Context>` that won't interfere with the executor's
 	/// `Arc::get_mut` requirements between statements.
+	///
+	/// The cancellation flag and awaitable token are **cloned** from the
+	/// source rather than allocated fresh. Without this, any operator that
+	/// bridges back into legacy `Context::done` / `is_done` checks — e.g.
+	/// the streaming-exec KNN operator calling into
+	/// `idx::trees::hnsw::knn_search` / `idx::trees::diskann::knn_search`,
+	/// whose inner loops poll `frozen_ctx.is_done(Some(count))` — would
+	/// observe the snapshot's local (never-tripped) flag instead of the
+	/// connection-level cancel handle installed on the source root, and
+	/// would not abort on WebSocket disconnect.
 	pub(crate) fn snapshot(from: &FrozenContext) -> Self {
 		Self {
 			// Flatten all values from the parent chain into this context
 			values: from.collect_values(HashMap::default()),
 			deadline: from.deadline,
 			slow_log: from.slow_log.clone(),
-			cancelled: Arc::new(AtomicBool::new(false)),
+			cancelled: Arc::clone(&from.cancelled),
+			cancel_token: from.cancel_token.clone(),
 			query_planner: from.query_planner.clone(),
 			query_executor: from.query_executor.clone(),
 			iteration_stage: from.iteration_stage.clone(),
@@ -368,6 +390,7 @@ impl Context {
 			deadline: None,
 			slow_log: from.slow_log.clone(),
 			cancelled: Arc::new(AtomicBool::new(false)),
+			cancel_token: None,
 			query_planner: from.query_planner.clone(),
 			query_executor: from.query_executor.clone(),
 			iteration_stage: from.iteration_stage.clone(),
@@ -429,6 +452,7 @@ impl Context {
 			deadline: None,
 			slow_log,
 			cancelled: Arc::new(AtomicBool::new(false)),
+			cancel_token: None,
 			query_planner: None,
 			query_executor: None,
 			iteration_stage: None,
@@ -475,6 +499,7 @@ impl Context {
 			deadline: None,
 			slow_log: None,
 			cancelled: Arc::new(AtomicBool::new(false)),
+			cancel_token: None,
 			query_planner: None,
 			query_executor: None,
 			iteration_stage: None,
@@ -702,6 +727,42 @@ impl Context {
 	pub(crate) fn add_cancel(&mut self) -> Canceller {
 		let cancelled = Arc::clone(&self.cancelled);
 		Canceller::new(cancelled)
+	}
+
+	/// Install an externally-owned cancellation handle on this context.
+	/// Child contexts allocate their own `cancelled` flag but walk up the
+	/// parent chain in [`Self::done`], so installing the handle on the
+	/// root is enough for the entire execution tree to observe it.
+	///
+	/// Stores both views of the handle:
+	///
+	/// * The `AtomicBool` flag is moved into `self.cancelled` so the executor's hot-path `done`
+	///   walk fires `Reason::Canceled` at the next yield point.
+	/// * The `CancellationToken` is retained on `self.cancel_token` so bare-await sites (e.g.
+	///   `SLEEP`) can `select!` against it via [`Self::cancel_token`].
+	///
+	/// Used by the RPC layer so that a WebSocket disconnect cancels
+	/// in-flight queries cleanly, including ones blocked inside an
+	/// external timer.
+	pub(crate) fn set_cancellation(&mut self, handle: &CancelHandle) {
+		self.cancelled = handle.flag();
+		self.cancel_token = Some(handle.token());
+	}
+
+	/// Awaitable cancellation token installed by [`Self::set_cancellation`].
+	/// Walks up the parent chain so any child context can observe a
+	/// connection-level cancel without needing its own copy.
+	///
+	/// Returns `None` for contexts without an external cancel source
+	/// (embedded callers, internal use). Callers SHOULD treat `None` as
+	/// "no awaitable cancel" rather than failing — the `AtomicBool` view
+	/// is the primary cancel mechanism; this is the awaitable companion
+	/// for `select!`-based races.
+	pub(crate) fn cancel_token(&self) -> Option<tokio_util::sync::CancellationToken> {
+		if let Some(token) = &self.cancel_token {
+			return Some(token.clone());
+		}
+		self.parent.as_ref().and_then(|p| p.cancel_token())
 	}
 
 	/// Add a deadline to the context. If the current deadline is sooner than
@@ -1502,6 +1563,46 @@ mod tests {
 		let result = ctx.is_done(Some(1)).await;
 		assert!(result.is_ok());
 		assert_eq!(result.unwrap(), true);
+	}
+
+	/// `Context::snapshot` is called by the streaming executor at
+	/// `dbs::Executor::execute_operator_plan` and produces a ctx with
+	/// `parent: None`. Operators that bridge back into legacy
+	/// `Context::done` / `is_done` checks (HNSW/DiskANN KNN search inner
+	/// loops, etc.) read the snapshot's own `cancelled` flag — without
+	/// parent walk to fall back to. If `snapshot` allocated a fresh
+	/// `Arc<AtomicBool>` instead of sharing the source's, those legacy
+	/// checks would never observe a connection-level cancel installed
+	/// via `set_cancellation`, and a WS disconnect during e.g. a KNN
+	/// search would not abort the operation — the read loop's drain
+	/// would block until the search finished.
+	#[tokio::test]
+	async fn test_snapshot_preserves_external_cancellation() {
+		use crate::ctx::CancelHandle;
+
+		let handle = CancelHandle::new();
+		let mut ctx = Context::new_test();
+		ctx.set_cancellation(&handle);
+		let root = ctx.freeze();
+		let snap = Context::snapshot(&root).freeze();
+		assert_eq!(
+			snap.is_done(Some(1)).await.unwrap(),
+			false,
+			"snapshot reports done before cancel was tripped"
+		);
+
+		handle.trip();
+		assert_eq!(
+			snap.is_done(Some(1)).await.unwrap(),
+			true,
+			"snapshot did not observe external cancel after trip — legacy `is_done` on \
+			 streaming-exec snapshot would silently miss WebSocket disconnect"
+		);
+		assert!(
+			snap.cancel_token().is_some(),
+			"snapshot lost the awaitable cancel token — bare-await sites reached via \
+			 the snapshot (legacy SLEEP fallback, etc.) could not `select!` against cancel"
+		);
 	}
 
 	/// Test documenting the expected behavior when memory threshold is exceeded.

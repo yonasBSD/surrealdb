@@ -44,8 +44,12 @@ const SERVER_OVERLOADED: &str = "The server is unable to handle the request";
 /// An error string sent when the server is gracefully shutting down
 const SERVER_SHUTTING_DOWN: &str = "The server is gracefully shutting down";
 
-/// An error string sent when an in-flight RPC is dropped because the
-/// connection-level `canceller` fires (e.g. the WebSocket has been torn down).
+/// An error string surfaced by the `begin` RPC when the WebSocket
+/// canceller has already fired -- avoids opening a write transaction on
+/// a connection that is about to be torn down. Executor-driven RPCs
+/// (query, etc.) surface `Error::QueryCancelled` from the executor
+/// instead; this constant is `begin`-only because `begin` bypasses the
+/// executor and goes straight to `kvs().transaction(...)`.
 const REQUEST_CANCELLED: &str = "The request was cancelled because the WebSocket is closing";
 
 /// Build an OTel parent `Context` from W3C Trace Context propagation
@@ -97,13 +101,27 @@ pub struct Websocket {
 	pub(crate) transactions: DashMap<Uuid, Arc<Transaction>>,
 	/// A cancellation token called when shutting down the server
 	pub(crate) shutdown: CancellationToken,
-	/// A cancellation token for cancelling all spawned tasks
-	pub(crate) canceller: CancellationToken,
+	/// Connection-level cancellation handle. Bundles a hot-path
+	/// `AtomicBool` (consumed by the executor's `Context::done` walks) and
+	/// an awaitable `CancellationToken` (consumed by `tokio::select!`
+	/// sites such as the read/ping/write loops and `SLEEP`). Tripped in
+	/// lockstep by [`Self::cancel_all`]; there is no way to fire one view
+	/// without the other.
+	pub(crate) cancel: surrealdb_core::ctx::CancelHandle,
 	/// The channels used to send and receive WebSocket messages
 	pub(crate) channel: Sender<Message>,
 }
 
 impl Websocket {
+	/// Trip the connection cancel handle, signalling both its
+	/// `AtomicBool` flag (executor's hot-path) and `CancellationToken`
+	/// (bare-await `select!` sites) so in-flight queries short-circuit at
+	/// their next yield AND points blocked on an external timer
+	/// (`SLEEP`, etc.) wake up immediately.
+	pub(crate) fn cancel_all(&self) {
+		self.cancel.trip();
+	}
+
 	/// Serve the RPC endpoint
 	pub async fn serve(
 		id: Uuid,
@@ -127,7 +145,7 @@ impl Websocket {
 			format,
 			state: Arc::clone(&state),
 			shutdown: CancellationToken::new(),
-			canceller: CancellationToken::new(),
+			cancel: surrealdb_core::ctx::CancelHandle::new(),
 			sessions: HashMap::new(),
 			transactions: DashMap::new(),
 			channel: sender.clone(),
@@ -191,6 +209,14 @@ impl Websocket {
 		trace!("WebSocket {id} disconnected");
 		// Cleanup the live queries for this WebSocket
 		rpc.cleanup_all_lqs().await;
+		// Cancel any client-managed transactions left behind by `begin`
+		// RPCs whose `commit` / `cancel` never arrived — most commonly
+		// because the client disconnected mid-flight. Adapted from the
+		// design in <https://github.com/surrealdb/surrealdb/pull/6907>
+		// (`cleanup_all_txns`) but scoped to just the disconnect drain;
+		// the per-session limits, counter map, and `(session_id, tx)`
+		// value-type rework from 6907 are intentionally out of scope.
+		rpc.cleanup_all_txns().await;
 		// Remove this WebSocket from the list
 		state.web_sockets.write().await.remove(&id);
 		// Emit a session disconnect event including the full session
@@ -216,8 +242,9 @@ impl Websocket {
 	async fn ping(rpc: Arc<Websocket>, internal_sender: Sender<Message>) {
 		// Create the interval ticker
 		let mut interval = tokio::time::interval(WEBSOCKET_PING_FREQUENCY);
-		// Clone the WebSocket cancellation token
-		let canceller = rpc.canceller.clone();
+		// Clone the WebSocket cancellation token (awaitable view of the
+		// shared cancel handle).
+		let canceller = rpc.cancel.token();
 		// Loop, and listen for messages to write
 		loop {
 			tokio::select! {
@@ -235,8 +262,9 @@ impl Websocket {
 						if err.to_string() != CONN_CLOSED_ERR {
 							trace!("WebSocket error: {err}");
 						}
-						// Cancel the WebSocket tasks
-						canceller.cancel();
+						// Cancel the WebSocket tasks AND the executor cancel
+						// flag so in-flight queries return early.
+						rpc.cancel_all();
 						// Exit out of the loop
 						break;
 					}
@@ -253,8 +281,9 @@ impl Websocket {
 	) where
 		<S as Sink<Message>>::Error: fmt::Display,
 	{
-		// Clone the WebSocket cancellation token
-		let canceller = rpc.canceller.clone();
+		// Clone the WebSocket cancellation token (awaitable view of the
+		// shared cancel handle).
+		let canceller = rpc.cancel.token();
 		// Check if the responses are buffered
 		let buffer = *WEBSOCKET_RESPONSE_BUFFER_SIZE > 0;
 		// How often should responses be flushed
@@ -289,8 +318,9 @@ impl Websocket {
 						if err.to_string() != CONN_CLOSED_ERR {
 							trace!("WebSocket error: {err}");
 						}
-						// Cancel the WebSocket tasks
-						canceller.cancel();
+						// Cancel the WebSocket tasks AND the executor cancel
+						// flag so in-flight queries return early.
+						rpc.cancel_all();
 						// Exit out of the loop
 						break;
 					}
@@ -320,8 +350,9 @@ impl Websocket {
 						if err.to_string() != CONN_CLOSED_ERR {
 							trace!("WebSocket error: {err}");
 						}
-						// Cancel the WebSocket tasks
-						canceller.cancel();
+						// Cancel the WebSocket tasks AND the executor cancel
+						// flag so in-flight queries return early.
+						rpc.cancel_all();
 						// Exit out of the loop
 						break;
 					}
@@ -339,8 +370,9 @@ impl Websocket {
 	) {
 		// Clone the WebSocket shutdown token
 		let shutdown = rpc.shutdown.clone();
-		// Clone the WebSocket cancellation token
-		let canceller = rpc.canceller.clone();
+		// Clone the WebSocket cancellation token (awaitable view of the
+		// shared cancel handle).
+		let canceller = rpc.cancel.token();
 		// Store spawned tasks so we can wait for them
 		let mut tasks = FuturesUnordered::new();
 		// Loop, and listen for messages to write
@@ -376,8 +408,9 @@ impl Websocket {
 							if let Err(err) = internal_sender.send(Message::Close(None)).await {
 								trace!("WebSocket error when replying to the close message: {err}");
 							};
-							// Cancel the WebSocket tasks
-							canceller.cancel();
+							// Cancel the WebSocket tasks AND the executor
+							// cancel flag so in-flight queries return early.
+							rpc.cancel_all();
 							// Exit out of the loop
 							break;
 						}
@@ -391,32 +424,42 @@ impl Websocket {
 					Err(err) => {
 						// There was an error with the WebSocket
 						trace!("WebSocket error: {err}");
-						// Cancel the WebSocket tasks
-						canceller.cancel();
+						// Cancel the WebSocket tasks AND the executor cancel
+						// flag so in-flight queries return early.
+						rpc.cancel_all();
 						// Exit out of the loop
 						break;
 					}
 				}
 			}
 		}
-		// Continue with the shutdown process
-		tokio::select! {
-			// Process brances in order
-			biased;
-			// Check if we have been cancelled
-			_ = canceller.cancelled() => (),
-			// Check if we are shutting down
-			_ = shutdown.cancelled() => {
-				// Wait for all tasks to finish
-				while tasks.next().await.is_some() {
-					// Do nothing
-				}
-			},
+		// We have left the main loop -- either the connection canceller
+		// fired (client disconnect, socket error, close frame) or the
+		// server is gracefully shutting down. In either case we drain
+		// the `FuturesUnordered` of in-flight `handle_message` futures
+		// to completion rather than dropping it.
+		//
+		// Dropping the FuturesUnordered would drop each in-flight
+		// handler, which would drop the executor's open transaction
+		// mid-await and trigger `Transactor::Drop`'s
+		// "A transaction was dropped without being committed or
+		// cancelled" error log. Draining instead lets each handler's
+		// executor reach its next `Context::done` check, short-circuit
+		// with `Reason::Canceled` (the cancel flag was set in lockstep
+		// with the canceller via [`Self::cancel_all`] at every site
+		// that fires the canceller), and finalise its transaction on
+		// the normal error path. In the shutdown branch the cancel
+		// flag has NOT been set, so executors run to completion
+		// naturally before the drain returns.
+		while tasks.next().await.is_some() {
+			// Drain.
 		}
-		// Cancel the WebSocket tasks
-		canceller.cancel();
-		// Ensure everything is dropped
-		std::mem::drop(tasks);
+		// Now that the drain is done, trip the connection canceller so
+		// the `ping` and `write` tasks exit cleanly. In the cancel
+		// branch this is a no-op (the canceller was already set by the
+		// site that broke the loop); in the shutdown branch it is the
+		// only signal those two tasks observe.
+		rpc.cancel_all();
 	}
 
 	/// Handle an individual WebSocket message
@@ -426,10 +469,10 @@ impl Websocket {
 		chn: Sender<Message>,
 		rec_limit: usize,
 	) {
-		// Clone the WebSocket cancellation token
+		// Clone the WebSocket shutdown token. The connection-level canceller
+		// is NOT raced against the handler future here -- see the comment
+		// on the inline-processing path below.
 		let shutdown = rpc.shutdown.clone();
-		// Clone the WebSocket cancellation token
-		let canceller = rpc.canceller.clone();
 		// Calculate the message length and format
 		let len = match msg {
 			Message::Text(ref msg) => msg.len(),
@@ -512,76 +555,85 @@ impl Websocket {
 		async move {
 			match parsed {
 				Ok(req) => {
-					// Capture the request id, session id and a cloned channel handle up-front so we
-					// can still build a `DbResponse::failure` if the cancel branch wins the
-					// select below — by the time it fires, `req` and `chn` will have been moved
-					// into the inner `async move`.
-					let req_id = req.id.clone();
-					let req_session_id = req.session_id;
-					let cancel_chn = chn.clone();
-					let cancel_format = rpc.format;
-					// Process the message
-					tokio::select! {
-						biased;
-						// The connection-level `canceller` has fired: the in-flight handler
-						// future is about to be dropped (along with any transaction it owns).
-						// Resource cleanup is handled by each `Transactable::Drop` impl
-						// (notably `DSTransaction::Drop`, which spawns a recovery abort), so
-						// the only thing left to do here is to make sure the client receives a
-						// terminating response — without it the SDK keeps awaiting a reply
-						// that will never come and the connection deadlocks.
-						_ = canceller.cancelled() => {
-							crate::rpc::response::send(
-								DbResponse::failure(req_id, req_session_id.map(Into::into), TypesError::internal(REQUEST_CANCELLED.to_string())),
-								cancel_format,
-								cancel_chn
-							).await;
-						},
-						// Wait for the message to be processed
-						_ = async move {
-							// Don't start processing if we are gracefully shutting down
-							if shutdown.is_cancelled() {
-								// Process the response
-								crate::rpc::response::send(
-									DbResponse::failure(req.id, req.session_id.map(Into::into), TypesError::internal(SERVER_SHUTTING_DOWN.to_string())),
-									rpc.format,
-									chn
-								).await;
-							}
-							// Check to see whether we have available memory
-							else if ALLOC.is_beyond_threshold() {
-								// Process the response
-								crate::rpc::response::send(
-									DbResponse::failure(req.id, req.session_id.map(Into::into), TypesError::internal(SERVER_OVERLOADED.to_string())),
-									rpc.format,
-									chn
-								).await;
-							}
-							// Otherwise process the request message
-							else {
-								let client_session: Option<Uuid> = req.session_id.map(Into::into);
-								let session_id = client_session.unwrap_or(rpc.id);
-								// Process the message
-								let result = Self::process_message(
-									Arc::clone(rpc),
-									session_id,
-									client_session,
-									req.txn.map(Into::into),
-									req.method,
-									req.params,
-								)
-									.await;
-
-								crate::rpc::response::send(
-									match result {
-										Ok(result) => DbResponse::success(req.id, req.session_id.map(Into::into), result),
-										Err(err) => DbResponse::failure(req.id, req.session_id.map(Into::into), err),
-									},
-									rpc.format,
-									chn
-								).await;
-							}
-						} => (),
+					// Don't start processing if we are gracefully shutting
+					// down. The graceful-shutdown path drains in-flight
+					// handlers before closing, so this is observed by new
+					// arrivals only.
+					if shutdown.is_cancelled() {
+						crate::rpc::response::send(
+							DbResponse::failure(
+								req.id,
+								req.session_id.map(Into::into),
+								TypesError::internal(SERVER_SHUTTING_DOWN.to_string()),
+							),
+							rpc.format,
+							chn,
+						)
+						.await;
+					}
+					// Check to see whether we have available memory
+					else if ALLOC.is_beyond_threshold() {
+						crate::rpc::response::send(
+							DbResponse::failure(
+								req.id,
+								req.session_id.map(Into::into),
+								TypesError::internal(SERVER_OVERLOADED.to_string()),
+							),
+							rpc.format,
+							chn,
+						)
+						.await;
+					}
+					// Otherwise process the request message inline. The
+					// handler MUST NOT be raced against the connection-level
+					// canceller via `tokio::select!`: that would drop the
+					// handler future together with whatever transaction the
+					// executor has open, and `Transactor::Drop` would log
+					// "A transaction was dropped without being committed
+					// or cancelled".
+					//
+					// Instead the connection canceller's boolean view is
+					// shared with the executor's `Context` via
+					// [`Websocket::cancel_flag`] and the
+					// `*_with_transaction_and_cancel` `Datastore` entry
+					// points used by `core::rpc::protocol::run_query`. When
+					// the canceller fires the executor short-circuits at
+					// its next yield with `Reason::Canceled`, the
+					// transaction is finalised on the executor's normal
+					// error path, and this handler returns an
+					// `Err(QueryCancelled)` like any other failure.
+					//
+					// The read loop drains its `FuturesUnordered` of
+					// in-flight `handle_message` futures on cancel rather
+					// than dropping it (see `read`), so this future is
+					// never dropped mid-flight in production.
+					else {
+						let client_session: Option<Uuid> = req.session_id.map(Into::into);
+						let session_id = client_session.unwrap_or(rpc.id);
+						let result = Self::process_message(
+							Arc::clone(rpc),
+							session_id,
+							client_session,
+							req.txn.map(Into::into),
+							req.method,
+							req.params,
+						)
+						.await;
+						crate::rpc::response::send(
+							match result {
+								Ok(result) => DbResponse::success(
+									req.id,
+									req.session_id.map(Into::into),
+									result,
+								),
+								Err(err) => {
+									DbResponse::failure(req.id, req.session_id.map(Into::into), err)
+								}
+							},
+							rpc.format,
+							chn,
+						)
+						.await;
 					}
 				}
 				Err(err) => {
@@ -589,8 +641,9 @@ impl Websocket {
 					crate::rpc::response::send(
 						DbResponse::failure(None, None, err),
 						rpc.format,
-						chn
-					).await;
+						chn,
+					)
+					.await;
 				}
 			}
 		}
@@ -634,8 +687,9 @@ impl Websocket {
 		if let Err(err) = chn.send(Message::Close(Some(frame))).await {
 			debug!("WebSocket error when sending close message: {err}");
 		};
-		// Cancel the WebSocket tasks
-		rpc.canceller.cancel();
+		// Cancel the WebSocket tasks AND the executor cancel flag so any
+		// in-flight queries return early.
+		rpc.cancel_all();
 	}
 
 	/// Snapshot the connection's default session into a
@@ -670,6 +724,14 @@ impl RpcProtocol for Websocket {
 	fn version_data(&self) -> DbResult {
 		let value = Value::String(format!("{PKG_NAME}-{}", *PKG_VERSION));
 		DbResult::Other(value)
+	}
+
+	/// Expose the connection cancel handle so the executor's `Context`
+	/// can short-circuit at the next yield AND any bare-await sites
+	/// (`SLEEP`) can `select!` against it when the WebSocket is torn
+	/// down. See [`Self::cancel`] on the struct field.
+	fn cancel_handle(&self) -> Option<surrealdb_core::ctx::CancelHandle> {
+		Some(self.cancel.clone())
 	}
 
 	/// A pointer to all active sessions
@@ -794,7 +856,52 @@ impl RpcProtocol for Websocket {
 		namespace: Option<String>,
 		database: Option<String>,
 	) {
-		self.state.live_queries.write().await.insert(
+		// Defence in depth. With executor cancellation the executor's
+		// `ctx.done(true)` check between `SLEEP` (or whatever held the
+		// query open) and `LIVE SELECT` short-circuits with
+		// `Reason::Canceled` and this hook is never called for cancelled
+		// queries. The gate below guards the residual race where the
+		// executor's check has not yet caught up but the canceller has
+		// already fired -- in that case the registration would otherwise
+		// land in `state.live_queries` AFTER `serve()` had drained it
+		// (where nothing will ever remove it again) AND the
+		// executor-created live-query catalog row in the datastore
+		// would be orphaned, so notifications would be produced and
+		// silently discarded forever.
+		//
+		// The write lock here serialises with `cleanup_lqs_filtered`.
+		// `serve()` drains in-flight handlers before
+		// `cleanup_all_lqs()` runs (the read loop awaits `tasks.next()`
+		// to completion after the cancel flag is set), but during the
+		// drain the executor may still reach this hook -- so the gate
+		// observes the canceller and either:
+		//   1. Wins the lock race ahead of cleanup -> insert; cleanup then drains our entry as
+		//      normal.
+		//   2. Cleanup wins -> drains; we acquire the lock afterwards, see the canceller is set,
+		//      skip the insert, and garbage-collect the orphaned datastore-side live-query entry.
+		let mut live_queries = self.state.live_queries.write().await;
+		if self.cancel.is_cancelled() {
+			drop(live_queries);
+			if let Err(err) = self.kvs().delete_queries(vec![*lqid]).await {
+				// TODO(metrics): emit an orphan-LQ counter here. We've
+				// already lost the in-memory registration and now we've
+				// failed to clean up the datastore-side row too, so
+				// notifications for `lqid` will be produced and
+				// silently discarded by the broker for the lifetime of
+				// the datastore. A counter would let operators alert on
+				// this without grepping logs.
+				error!(
+					"Error cleaning up orphaned live query {lqid} after WebSocket cancel: {err}"
+				);
+			}
+			trace!(
+				"Refused to register live query {lqid} on closing WebSocket {}; \
+				 cleaned up the datastore entry",
+				self.id,
+			);
+			return;
+		}
+		live_queries.insert(
 			*lqid,
 			crate::rpc::LiveQueryEntry {
 				websocket_id: self.id,
@@ -803,6 +910,7 @@ impl RpcProtocol for Websocket {
 				database: database.clone(),
 			},
 		);
+		drop(live_queries);
 		if let Some(obs) = self.state.metrics_observer.as_ref() {
 			obs.adjust_live_query_active(1, namespace.as_deref(), database.as_deref());
 		}
@@ -860,12 +968,14 @@ impl RpcProtocol for Websocket {
 		_txn: Option<Uuid>,
 		_session_id: Uuid,
 	) -> Result<DbResult, surrealdb_types::Error> {
-		// Create a new transaction
-		let tx = self
-			.kvs()
-			.transaction(TransactionType::Write, LockType::Optimistic)
-			.await
-			.map_err(surrealdb_core::rpc::types_error_from_anyhow)?;
+		// `begin` bypasses the executor (which is where the
+		// `Context::done` cancel short-circuit lives), so the cancel
+		// handle has to be checked manually. `cancel_aware_transaction`
+		// encapsulates the pre-await + post-await + cancel-on-loss
+		// pattern; any future RPC method that needs to open its own
+		// transaction outside the executor SHOULD route through it.
+		let tx =
+			self.cancel_aware_transaction(TransactionType::Write, LockType::Optimistic).await?;
 		// Generate a unique transaction ID
 		let id = Uuid::now_v7();
 		debug!("WebSocket begin: created transaction {id}");
@@ -975,6 +1085,87 @@ impl Websocket {
 			error!("Error handling RPC connection: {err}");
 		}
 	}
+
+	/// Open a transaction outside the executor's cancellation scope,
+	/// while still honouring the connection-level cancel handle.
+	///
+	/// `begin` and any other RPC method that needs a fresh transaction
+	/// without going through `process_with_transaction_and_cancel` MUST
+	/// route through here. The executor's `Context::done` short-circuit
+	/// does not cover `kvs().transaction(...)` directly, so the cancel
+	/// has to be observed manually at two points:
+	///
+	/// 1. **Pre-await** — refuse to even start opening a transaction on a closing connection.
+	/// 2. **Post-await** — the storage layer yields during `transaction(...).await`, so the cancel
+	///    may have fired while we were blocked. If it did, finalise the just-created transaction
+	///    with `tx.cancel()` (instead of dropping it, which would trigger `Transactor::Drop`'s "A
+	///    transaction was dropped without being committed or cancelled" log).
+	///
+	/// `cleanup_all_txns` in `serve()` is the belt-and-suspenders drain
+	/// for transactions that *were* successfully inserted into
+	/// `self.transactions` by `begin` before the cancel landed.
+	async fn cancel_aware_transaction(
+		&self,
+		ty: TransactionType,
+		lock: LockType,
+	) -> Result<Transaction, surrealdb_types::Error> {
+		if self.cancel.is_cancelled() {
+			return Err(TypesError::internal(REQUEST_CANCELLED.to_string()));
+		}
+		let tx = self
+			.kvs()
+			.transaction(ty, lock)
+			.await
+			.map_err(surrealdb_core::rpc::types_error_from_anyhow)?;
+		if self.cancel.is_cancelled() {
+			if let Err(err) = tx.cancel().await {
+				error!("Error cancelling unused transaction after WebSocket cancel: {err}");
+			}
+			return Err(TypesError::internal(REQUEST_CANCELLED.to_string()));
+		}
+		Ok(tx)
+	}
+
+	/// Cancel every client-managed transaction left in `self.transactions`.
+	///
+	/// Invoked from `serve()` at WS teardown (alongside `cleanup_all_lqs`)
+	/// to drain transactions opened via the explicit `begin` RPC whose
+	/// `commit` / `cancel` never arrived. Without this drain, a client
+	/// that calls `begin` and then disconnects (or whose `begin` request
+	/// is processed by a spawned handler that outlives the read loop)
+	/// would leave the `Arc<Transaction>` in the map until the
+	/// `Websocket` itself is dropped — at which point `Transactor::Drop`
+	/// would emit "A transaction was dropped without being committed or
+	/// cancelled".
+	///
+	/// Adapted from <https://github.com/surrealdb/surrealdb/pull/6907>'s
+	/// `cleanup_all_txns`; intentionally scoped to just the drain (the
+	/// 6907 design also adds per-connection / per-session limits and a
+	/// counter map, which are out of scope here).
+	async fn cleanup_all_txns(&self) {
+		// Drain the map atomically into a local vec so we can release
+		// each DashMap shard lock before awaiting `tx.cancel()`. Holding
+		// shard locks across `.await` would risk a deadlock against any
+		// other code path that touches the map and then awaits.
+		let mut drained: Vec<(Uuid, Arc<Transaction>)> = Vec::new();
+		self.transactions.retain(|tid, tx| {
+			drained.push((*tid, Arc::clone(tx)));
+			false
+		});
+		if drained.is_empty() {
+			return;
+		}
+		trace!(
+			"Cancelling {} client-managed transaction(s) left on closing WebSocket {}",
+			drained.len(),
+			self.id,
+		);
+		for (tid, tx) in drained {
+			if let Err(err) = tx.cancel().await {
+				error!("Error cancelling transaction {tid} during WebSocket teardown: {err}",);
+			}
+		}
+	}
 }
 
 #[cfg(test)]
@@ -1027,7 +1218,7 @@ mod tests {
 			sessions: HashMap::new(),
 			transactions: DashMap::new(),
 			shutdown: CancellationToken::new(),
-			canceller: CancellationToken::new(),
+			cancel: surrealdb_core::ctx::CancelHandle::new(),
 			channel: tx,
 		})
 	}
@@ -1253,6 +1444,447 @@ mod tests {
 			assert!(
 				matches!(err, tracing_opentelemetry::SetParentError::AlreadyStarted),
 				"expected AlreadyStarted, got {err:?}",
+			);
+		});
+	}
+
+	/// Run a future on a dedicated OS thread + multi-threaded runtime
+	/// with a 24 MiB stack. The executor and parser carry large stack
+	/// frames in debug builds that overflow tokio's default 2 MiB worker
+	/// stack; same pattern as `surrealdb/core/tests/helpers::with_enough_stack`.
+	fn with_big_stack<F, Fut>(body: F)
+	where
+		F: FnOnce() -> Fut + Send + 'static,
+		Fut: std::future::Future<Output = ()>,
+	{
+		std::thread::Builder::new()
+			.stack_size(24 * 1024 * 1024)
+			.spawn(move || {
+				let runtime = tokio::runtime::Builder::new_multi_thread()
+					.enable_all()
+					.worker_threads(2)
+					.thread_stack_size(24 * 1024 * 1024)
+					.build()
+					.unwrap();
+				runtime.block_on(body());
+			})
+			.expect("spawn test thread")
+			.join()
+			.expect("test thread");
+	}
+
+	/// Regression test for the WebSocket cancel-leak bug.
+	///
+	/// When the connection canceller fires while a write request is
+	/// mid-flight, the executor's `Context::done` walks must short-circuit
+	/// with `Reason::Canceled` at the next yield point and the executor's
+	/// BEGIN/COMMIT block must `txn.cancel()` the held transaction rather
+	/// than dropping it. `Transactor::Drop` (which emits the noisy
+	/// "A transaction was dropped without being committed or cancelled"
+	/// error log) must NOT fire.
+	///
+	/// `TransactionEvent` is only emitted from `Transaction::commit` and
+	/// `Transaction::cancel`, never from `Drop`. So a zero count of write-tx
+	/// completion events after the cancel scenario proves the regression.
+	#[test]
+	fn cancelling_websocket_handler_does_not_leak_in_flight_write_transaction() {
+		use std::sync::Mutex;
+		use std::time::Duration as StdDuration;
+
+		use surrealdb_core::dbs::Session;
+		use surrealdb_core::dbs::capabilities::Capabilities;
+
+		#[derive(Default)]
+		struct WriteTxCompletionCounter {
+			count: Mutex<u32>,
+		}
+		impl ExecutionObserver for WriteTxCompletionCounter {
+			fn on_statement_complete(&self, _e: &StatementEvent) {}
+			fn on_query_complete(&self, _e: &QueryEvent) {}
+			fn on_transaction_complete(&self, e: &TransactionEvent) {
+				if e.safe.write {
+					*self.count.lock().unwrap() += 1;
+				}
+			}
+			fn on_rpc_complete(&self, _e: &RpcEvent) {}
+			fn on_auth_event(&self, _e: &AuthEvent) {}
+			fn on_session_event(&self, _e: &SessionEvent) {}
+			fn on_network_bytes(&self, _e: &NetworkBytesEvent) {}
+		}
+
+		with_big_stack(|| async {
+			let observer = Arc::new(WriteTxCompletionCounter::default());
+			let ds = Arc::new(
+				Datastore::builder()
+					.with_capabilities(Capabilities::all())
+					.with_observer(Arc::clone(&observer) as Arc<dyn ExecutionObserver>)
+					.build_with_path("memory")
+					.await
+					.unwrap(),
+			);
+			// Pre-define NS/DB and warm up the datastore so the in-flight
+			// query resolves against an existing scope and metadata write
+			// txs (table definitions, sequence allocations, etc.) do not
+			// show up as false positives in the assertion below. After
+			// the warm-up the metadata is cached and only the cancelled
+			// in-flight tx contributes to the counter.
+			let owner = Session::owner();
+			ds.execute("DEFINE NS `test`", &owner, None).await.unwrap();
+			let owner_ns = owner.clone().with_ns("test");
+			ds.execute("DEFINE DB `test`", &owner_ns, None).await.unwrap();
+			let sess_test = Session::owner().with_ns("test").with_db("test");
+			ds.execute("BEGIN; CREATE foo SET x = 1; SLEEP 1ms; COMMIT;", &sess_test, None)
+				.await
+				.unwrap();
+			*observer.count.lock().unwrap() = 0;
+
+			let state = Arc::new(crate::rpc::RpcState::new(Arc::clone(&ds)));
+			let id = Uuid::new_v4();
+			let (chn_internal, _chn_internal_rx) = channel::<Message>(8);
+			let rpc = Arc::new(Websocket {
+				id,
+				format: Format::Json,
+				state,
+				datastore: ds,
+				sessions: HashMap::new(),
+				transactions: DashMap::new(),
+				shutdown: CancellationToken::new(),
+				cancel: surrealdb_core::ctx::CancelHandle::new(),
+				channel: chn_internal,
+			});
+
+			// Pin the owner session under the connection's default session
+			// id so `process_message` resolves it via `get_session(rpc.id)`.
+			let sess = Session::owner().with_ns("test").with_db("test");
+			rpc.set_session(rpc.id, Arc::new(RwLock::new(sess)));
+
+			// Fire the connection-level cancel mid-SLEEP. `cancel_all`
+			// sets both the canceller token and the executor cancel flag.
+			let cancel_jh = tokio::spawn({
+				let rpc = Arc::clone(&rpc);
+				async move {
+					tokio::time::sleep(StdDuration::from_millis(50)).await;
+					rpc.cancel_all();
+				}
+			});
+
+			// Multi-statement explicit transaction:
+			//   BEGIN  -- starts a write tx
+			//   CREATE -- writes (marks the tx as writeable for the observer)
+			//   SLEEP  -- holds the tx open across the cancel window
+			//   COMMIT -- would finalise it, but the cancel fires first.
+			// With cancellation-aware SLEEP, the cancel wakes the SLEEP
+			// immediately; the executor's next `ctx.done` check between
+			// SLEEP and COMMIT then fires `txn.cancel()` and emits the
+			// `TransactionEvent`.
+			let sql = "BEGIN; CREATE foo SET x = 1; SLEEP 200ms; COMMIT;";
+			let body = serde_json::json!({
+				"id": "1",
+				"method": "query",
+				"params": [sql],
+			});
+			let msg = Message::Text(body.to_string().into());
+
+			let (chn_tx, mut chn_rx) = channel::<Message>(8);
+			// `handle_message` runs inline now -- no spawn, no JoinHandle.
+			// Awaiting it returns once the executor has finished cancelling
+			// the transaction and the failure response has been queued.
+			Websocket::handle_message(&rpc, msg, chn_tx, 1024).await;
+
+			// PROOF OF CANCELLATION (vs. proof of "no leak"):
+			// `observer.count > 0` only proves the tx was finalised
+			// (either commit-on-success or cancel-on-race), which the
+			// FuturesUnordered drain alone is enough to achieve. To
+			// prove that the *cancel plumbing* fired (i.e. the executor
+			// short-circuited rather than running to completion), we
+			// also assert that the response we sent back to the
+			// "client" carries a Cancelled-class error. A normal
+			// successful COMMIT would carry no such error.
+			let response = chn_rx.recv().await.expect("response sent over channel");
+			let response_text = match response {
+				Message::Text(t) => t.to_string(),
+				other => panic!("expected Text response from Json format, got {other:?}"),
+			};
+			assert!(
+				response_text.contains("cancelled"),
+				"expected Cancelled-class error in response (cancel-plumbing fired); \
+				 got response without 'cancelled' substring: {response_text}",
+			);
+
+			let count = *observer.count.lock().unwrap();
+			assert!(
+				count > 0,
+				"in-flight write transaction was dropped without commit or cancel -- \
+				 a WebSocket cancel during a write request leaked the transaction \
+				 and would emit the 'A transaction was dropped without being \
+				 committed or cancelled' error from `Transactor::Drop`",
+			);
+
+			let _ = cancel_jh.await;
+		});
+	}
+
+	/// Regression test for the LIVE-after-WS-cancel leak.
+	///
+	/// A long-running query (e.g. `SLEEP …; LIVE SELECT …`) running on a
+	/// WebSocket that is then cancelled must NOT register a live-query
+	/// entry that survives the cancel. With executor cancellation the
+	/// executor short-circuits between SLEEP and LIVE SELECT, so the
+	/// `handle_live` post-processing in `run_query` is never reached and
+	/// `state.live_queries` stays empty.
+	///
+	/// The `handle_live` canceller gate is retained as defence in depth
+	/// for any future code path that could reach the post-processing with
+	/// the cancel flag already set.
+	#[test]
+	fn cancelling_websocket_handler_does_not_leak_live_query_registration() {
+		use std::time::Duration as StdDuration;
+
+		use surrealdb_core::dbs::Session;
+		use surrealdb_core::dbs::capabilities::Capabilities;
+
+		with_big_stack(|| async {
+			let ds = Arc::new(
+				Datastore::builder()
+					.with_capabilities(Capabilities::all())
+					.build_with_path("memory")
+					.await
+					.unwrap(),
+			);
+			// Pre-define NS/DB and create the target table.
+			let owner = Session::owner();
+			ds.execute("DEFINE NS `test`", &owner, None).await.unwrap();
+			let owner_ns = owner.clone().with_ns("test");
+			ds.execute("DEFINE DB `test`", &owner_ns, None).await.unwrap();
+			let sess_setup = Session::owner().with_ns("test").with_db("test");
+			ds.execute("CREATE foo SET x = 1", &sess_setup, None).await.unwrap();
+
+			let state = Arc::new(crate::rpc::RpcState::new(Arc::clone(&ds)));
+			let id = Uuid::new_v4();
+			let (chn_internal, _chn_internal_rx) = channel::<Message>(8);
+			let rpc = Arc::new(Websocket {
+				id,
+				format: Format::Json,
+				state: Arc::clone(&state),
+				datastore: ds,
+				sessions: HashMap::new(),
+				transactions: DashMap::new(),
+				shutdown: CancellationToken::new(),
+				cancel: surrealdb_core::ctx::CancelHandle::new(),
+				channel: chn_internal,
+			});
+
+			// LIVE queries require a realtime-enabled session.
+			let sess = Session::owner().with_ns("test").with_db("test").with_rt(true);
+			rpc.set_session(rpc.id, Arc::new(RwLock::new(sess)));
+
+			// Fire the connection-level cancel mid-SLEEP. `cancel_all`
+			// sets both the canceller token and the executor cancel flag.
+			let cancel_jh = tokio::spawn({
+				let rpc = Arc::clone(&rpc);
+				async move {
+					tokio::time::sleep(StdDuration::from_millis(50)).await;
+					rpc.cancel_all();
+				}
+			});
+
+			// SLEEP holds the executor open across the cancel window.
+			// With cancellation-aware SLEEP, the cancel wakes the
+			// SLEEP immediately; the executor's `ctx.done(true)` check
+			// between SLEEP and LIVE SELECT then short-circuits with
+			// `Reason::Canceled` -- LIVE SELECT is never executed and
+			// `handle_live` is never called.
+			let sql = "SLEEP 200ms; LIVE SELECT * FROM foo;";
+			let body = serde_json::json!({
+				"id": "1",
+				"method": "query",
+				"params": [sql],
+			});
+			let msg = Message::Text(body.to_string().into());
+			let (chn_tx, mut chn_rx) = channel::<Message>(8);
+
+			// Await `handle_message` to completion. With the inline
+			// handler, dropping this future mid-flight would drop the
+			// executor and its open transaction, so we MUST NOT
+			// `timeout`-and-drop it the way the previous spawn-based test
+			// did.
+			Websocket::handle_message(&rpc, msg, chn_tx, 1024).await;
+
+			// PROOF OF CANCELLATION: assert the response carries a
+			// Cancelled-class error. Without the cancel-plumbing
+			// firing (e.g. if SLEEP ran to completion), this query
+			// would succeed and return a LIVE-SELECT uuid -- the
+			// leak-empty check below would still pass, but the
+			// response-text check would fail, exposing the regression.
+			let response = chn_rx.recv().await.expect("response sent over channel");
+			let response_text = match response {
+				Message::Text(t) => t.to_string(),
+				other => panic!("expected Text response from Json format, got {other:?}"),
+			};
+			assert!(
+				response_text.contains("cancelled"),
+				"expected Cancelled-class error in response (cancel-plumbing fired); \
+				 got response without 'cancelled' substring: {response_text}",
+			);
+
+			let leaked: Vec<Uuid> = state
+				.live_queries
+				.read()
+				.await
+				.iter()
+				.filter_map(|(lqid, entry)| (entry.websocket_id == rpc.id).then_some(*lqid))
+				.collect();
+			assert!(
+				leaked.is_empty(),
+				"leaked live-query registrations after WS cancel: {leaked:?} -- \
+				 the executor reached LIVE SELECT post-processing despite the cancel flag",
+			);
+
+			let _ = cancel_jh.await;
+		});
+	}
+
+	/// Defence-in-depth test for the `handle_live` canceller gate.
+	///
+	/// Directly drives `handle_live` with the cancel flag set, bypassing
+	/// the executor. The gate must refuse the registration and garbage
+	/// collect any datastore-side live-query row that the executor may
+	/// have created before the cancel landed.
+	#[test]
+	fn handle_live_gate_refuses_registration_when_canceller_is_set() {
+		use surrealdb_core::dbs::Session;
+		use surrealdb_core::dbs::capabilities::Capabilities;
+
+		with_big_stack(|| async {
+			let ds = Arc::new(
+				Datastore::builder()
+					.with_capabilities(Capabilities::all())
+					.build_with_path("memory")
+					.await
+					.unwrap(),
+			);
+			let owner = Session::owner();
+			ds.execute("DEFINE NS `test`", &owner, None).await.unwrap();
+			let owner_ns = owner.clone().with_ns("test");
+			ds.execute("DEFINE DB `test`", &owner_ns, None).await.unwrap();
+
+			let state = Arc::new(crate::rpc::RpcState::new(Arc::clone(&ds)));
+			let id = Uuid::new_v4();
+			let (chn_internal, _chn_internal_rx) = channel::<Message>(8);
+			let rpc = Arc::new(Websocket {
+				id,
+				format: Format::Json,
+				state: Arc::clone(&state),
+				datastore: ds,
+				sessions: HashMap::new(),
+				transactions: DashMap::new(),
+				shutdown: CancellationToken::new(),
+				cancel: surrealdb_core::ctx::CancelHandle::new(),
+				channel: chn_internal,
+			});
+
+			// Set the canceller before calling handle_live.
+			rpc.cancel_all();
+
+			// Drive handle_live with a fake lqid. The gate must skip the
+			// insert and delete the datastore-side row (a no-op here since
+			// we didn't actually run a LIVE SELECT, but the call must
+			// succeed without error).
+			let lqid = Uuid::new_v4();
+			RpcProtocol::handle_live(
+				rpc.as_ref(),
+				&lqid,
+				rpc.id,
+				Some("test".to_string()),
+				Some("test".to_string()),
+			)
+			.await;
+
+			let leaked: Vec<Uuid> = state
+				.live_queries
+				.read()
+				.await
+				.iter()
+				.filter_map(|(k, entry)| (entry.websocket_id == rpc.id).then_some(*k))
+				.collect();
+			assert!(
+				leaked.is_empty(),
+				"handle_live inserted into state.live_queries despite the cancel flag: {leaked:?}",
+			);
+		});
+	}
+
+	/// Regression test for the explicit-`begin`-on-cancel leak (Codex P2,
+	/// PR #286 [discussion_r3311900647](https://github.com/surrealdb/surrealdb-private/pull/286#discussion_r3311900647)).
+	///
+	/// `begin` does NOT go through the executor (it calls
+	/// `kvs().transaction(...)` directly), so the executor cancellation
+	/// flag the rest of the WS layer plumbs does NOT cover it. The
+	/// dedicated canceller gate in `begin()` must observe a set
+	/// canceller and refuse to open the transaction.
+	#[test]
+	fn begin_rpc_after_cancel_does_not_leak_transaction() {
+		use surrealdb_core::dbs::Session;
+		use surrealdb_core::dbs::capabilities::Capabilities;
+
+		with_big_stack(|| async {
+			let ds = Arc::new(
+				Datastore::builder()
+					.with_capabilities(Capabilities::all())
+					.build_with_path("memory")
+					.await
+					.unwrap(),
+			);
+			let owner = Session::owner();
+			ds.execute("DEFINE NS `test`", &owner, None).await.unwrap();
+			let owner_ns = owner.clone().with_ns("test");
+			ds.execute("DEFINE DB `test`", &owner_ns, None).await.unwrap();
+
+			let state = Arc::new(crate::rpc::RpcState::new(Arc::clone(&ds)));
+			let id = Uuid::new_v4();
+			let (chn_internal, _chn_internal_rx) = channel::<Message>(8);
+			let rpc = Arc::new(Websocket {
+				id,
+				format: Format::Json,
+				state,
+				datastore: ds,
+				sessions: HashMap::new(),
+				transactions: DashMap::new(),
+				shutdown: CancellationToken::new(),
+				cancel: surrealdb_core::ctx::CancelHandle::new(),
+				channel: chn_internal,
+			});
+			let sess = Session::owner().with_ns("test").with_db("test");
+			rpc.set_session(rpc.id, Arc::new(RwLock::new(sess)));
+
+			// Cancel BEFORE the begin request: the handler's `begin()`
+			// will hit the pre-await canceller gate and refuse to open
+			// the transaction.
+			rpc.cancel_all();
+
+			let body = serde_json::json!({
+				"id": "1",
+				"method": "begin",
+				"params": [],
+			});
+			let msg = Message::Text(body.to_string().into());
+			let (chn_tx, _chn_rx) = channel::<Message>(8);
+
+			Websocket::handle_message(&rpc, msg, chn_tx, 1024).await;
+
+			// Belt-and-suspenders: invoke `cleanup_all_txns` explicitly
+			// to mirror `serve()`'s teardown order. In the
+			// cancel-before-begin path the map should already be empty
+			// (the gate prevented the insert); in a slower variant where
+			// the gate's TOCTOU lost the race, this drain would catch
+			// the late insert.
+			rpc.cleanup_all_txns().await;
+
+			assert!(
+				rpc.transactions.is_empty(),
+				"begin() on a closing WebSocket leaked a transaction into \
+				 self.transactions: {} entries",
+				rpc.transactions.len(),
 			);
 		});
 	}

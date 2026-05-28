@@ -47,7 +47,7 @@ use crate::catalog::providers::{
 use crate::catalog::{ApiDefinition, Index, NodeLiveQuery, SubscriptionDefinition};
 use crate::cnf::dynamic::DynamicConfiguration;
 use crate::cnf::{CommonConfig, ConfigMap};
-use crate::ctx::Context;
+use crate::ctx::{CancelHandle, Context};
 #[cfg(feature = "jwks")]
 use crate::dbs::capabilities::NetTarget;
 use crate::dbs::capabilities::{
@@ -3015,6 +3015,24 @@ impl Datastore {
 		self.process(ast, sess, vars).await
 	}
 
+	/// Execute a SurrealQL query with an externally-owned cancellation
+	/// handle. See [`Self::process_with_transaction_and_cancel`] for the
+	/// cancellation semantics.
+	#[instrument(level = "debug", target = "surrealdb::core::kvs::ds", skip_all)]
+	pub async fn execute_with_cancel(
+		&self,
+		txt: &str,
+		sess: &Session,
+		vars: Option<PublicVariables>,
+		cancel: CancelHandle,
+	) -> std::result::Result<Vec<QueryResult>, TypesError> {
+		// Parse the SQL query text
+		let ast = syn::parse_with_capabilities(txt, &self.capabilities, &self.config)
+			.map_err(|e| TypesError::validation(e.to_string(), None))?;
+		// Process the AST
+		self.process_with_cancel(ast, sess, vars, cancel).await
+	}
+
 	/// Execute a query with an existing transaction
 	#[instrument(level = "debug", target = "surrealdb::core::kvs::ds", skip_all)]
 	pub async fn execute_with_transaction(
@@ -3031,6 +3049,25 @@ impl Datastore {
 		self.process_with_transaction(ast, sess, vars, tx).await
 	}
 
+	/// Execute a query with an existing transaction and an externally-owned
+	/// cancellation handle. See [`Self::process_with_transaction_and_cancel`]
+	/// for the cancellation semantics.
+	#[instrument(level = "debug", target = "surrealdb::core::kvs::ds", skip_all)]
+	pub async fn execute_with_transaction_and_cancel(
+		&self,
+		txt: &str,
+		sess: &Session,
+		vars: Option<PublicVariables>,
+		tx: Arc<Transaction>,
+		cancel: CancelHandle,
+	) -> std::result::Result<Vec<QueryResult>, TypesError> {
+		// Parse the SQL query text
+		let ast = syn::parse_with_capabilities(txt, &self.capabilities, &self.config)
+			.map_err(|e| TypesError::validation(e.to_string(), None))?;
+		// Process the AST with the transaction
+		self.process_with_transaction_and_cancel(ast, sess, vars, tx, cancel).await
+	}
+
 	/// Process an AST with an existing transaction
 	#[instrument(level = "debug", target = "surrealdb::core::kvs::ds", skip_all)]
 	pub async fn process_with_transaction(
@@ -3039,6 +3076,46 @@ impl Datastore {
 		sess: &Session,
 		vars: Option<PublicVariables>,
 		tx: Arc<Transaction>,
+	) -> std::result::Result<Vec<QueryResult>, TypesError> {
+		self.process_with_transaction_inner(ast, sess, vars, tx, None).await
+	}
+
+	/// Process an AST with an existing transaction and an externally-owned
+	/// cancellation handle. When the handle is tripped the executor's
+	/// `Context::done` walks short-circuit with `Reason::Canceled` at the
+	/// next yield point (statement boundary, iterator hot loop check, etc.)
+	/// and the transaction is finalised on the executor's normal error path.
+	/// Bare-await sites (e.g. `SLEEP`) `select!` against the handle's
+	/// awaitable view, so they are also interrupted instead of running to
+	/// completion.
+	///
+	/// Used by the WebSocket RPC layer so a client disconnect cancels the
+	/// in-flight query without waiting for it to run to completion. The
+	/// caller owns the [`CancelHandle`] and is responsible for tripping it.
+	#[instrument(level = "debug", target = "surrealdb::core::kvs::ds", skip_all)]
+	pub async fn process_with_transaction_and_cancel(
+		&self,
+		ast: Ast,
+		sess: &Session,
+		vars: Option<PublicVariables>,
+		tx: Arc<Transaction>,
+		cancel: CancelHandle,
+	) -> std::result::Result<Vec<QueryResult>, TypesError> {
+		self.process_with_transaction_inner(ast, sess, vars, tx, Some(cancel)).await
+	}
+
+	/// Shared body for [`Self::process_with_transaction`] and
+	/// [`Self::process_with_transaction_and_cancel`]. The two public
+	/// variants exist to keep the non-cancel API stable for SDK / embedded
+	/// callers; `cancel: None` reproduces the pre-cancellation behaviour
+	/// exactly.
+	async fn process_with_transaction_inner(
+		&self,
+		ast: Ast,
+		sess: &Session,
+		vars: Option<PublicVariables>,
+		tx: Arc<Transaction>,
+		cancel: Option<CancelHandle>,
 	) -> std::result::Result<Vec<QueryResult>, TypesError> {
 		// Check if the session has expired
 		if sess.expired() {
@@ -3069,6 +3146,16 @@ impl Datastore {
 				.map(crate::err::into_types_error)
 				.unwrap_or_else(|e| TypesError::internal(e.to_string()))
 		})?;
+
+		// Install the external cancellation handle if one was supplied.
+		// The executor checks `Context::done` between statements and in
+		// iterator hot loops, so flipping the flag mid-query causes the
+		// next yield to return `Error::QueryCancelled` and the executor's
+		// error path finalises the transaction cleanly. Bare-await sites
+		// (`SLEEP`) `select!` against the handle's awaitable view.
+		if let Some(cancel) = cancel {
+			ctx.set_cancellation(&cancel);
+		}
 
 		// Start an execution context
 		ctx.attach_session(sess).map_err(crate::err::into_types_error)?;
@@ -3212,7 +3299,21 @@ impl Datastore {
 		vars: Option<PublicVariables>,
 	) -> std::result::Result<Vec<QueryResult>, TypesError> {
 		//TODO: Insert planner here.
-		self.process_plan(ast.into(), sess, vars).await
+		self.process_plan_inner(ast.into(), sess, vars, None).await
+	}
+
+	/// Execute a pre-parsed SQL query with an externally-owned cancellation
+	/// handle. See [`Self::process_with_transaction_and_cancel`] for the
+	/// cancellation semantics.
+	#[instrument(level = "debug", target = "surrealdb::core::kvs::ds", skip_all)]
+	pub async fn process_with_cancel(
+		&self,
+		ast: Ast,
+		sess: &Session,
+		vars: Option<PublicVariables>,
+		cancel: CancelHandle,
+	) -> std::result::Result<Vec<QueryResult>, TypesError> {
+		self.process_plan_inner(ast.into(), sess, vars, Some(cancel)).await
 	}
 
 	pub(crate) async fn process_plan(
@@ -3220,6 +3321,16 @@ impl Datastore {
 		plan: LogicalPlan,
 		sess: &Session,
 		vars: Option<PublicVariables>,
+	) -> Result<Vec<QueryResult>, TypesError> {
+		self.process_plan_inner(plan, sess, vars, None).await
+	}
+
+	async fn process_plan_inner(
+		&self,
+		plan: LogicalPlan,
+		sess: &Session,
+		vars: Option<PublicVariables>,
+		cancel: Option<CancelHandle>,
 	) -> Result<Vec<QueryResult>, TypesError> {
 		// Check if the session has expired
 		if sess.expired() {
@@ -3251,6 +3362,12 @@ impl Datastore {
 				.map(crate::err::into_types_error)
 				.unwrap_or_else(|e| TypesError::internal(e.to_string()))
 		})?;
+
+		// Install the external cancellation flag if one was supplied. See
+		// [`Self::process_with_transaction_and_cancel`].
+		if let Some(cancel) = cancel {
+			ctx.set_cancellation(&cancel);
+		}
 
 		// Start an execution context
 		ctx.attach_session(sess).map_err(crate::err::into_types_error)?;
