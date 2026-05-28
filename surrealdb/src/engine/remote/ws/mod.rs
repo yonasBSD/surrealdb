@@ -404,7 +404,7 @@ where
 	match result {
 		Ok(DbResult::Query(results)) => {
 			if let Some(command) = pending.command {
-				session_state.replay.push(command);
+				super::record_replayable(&session_state.replay, command);
 			}
 			if let Err(err) = pending.response_channel.send(Ok(results)).await {
 				tracing::error!("Failed to send query results to channel: {err:?}");
@@ -415,14 +415,14 @@ where
 		}
 		Ok(DbResult::Other(mut value)) => {
 			if let Some(command) = pending.command {
-				session_state.replay.push(command.clone());
 				if let Command::Authenticate {
 					token,
 					..
-				} = command
+				} = &command
 				{
-					value = token.into_value();
+					value = token.clone().into_value();
 				}
+				super::record_replayable(&session_state.replay, command);
 			}
 			let result = QueryResultBuilder::started_now().finish_with_result(Ok(value));
 			if let Err(err) = pending.response_channel.send(Ok(vec![result])).await {

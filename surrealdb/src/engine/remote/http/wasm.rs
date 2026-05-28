@@ -133,8 +133,9 @@ pub(crate) async fn run_router(
 					)
 					.await;
 
-					// On success, add replayable commands to the replay list
-					// boxcar::Vec is lock-free, so this is safe to do concurrently
+					// On success, add replayable commands to the replay list.
+					// boxcar::Vec is lock-free, so this is safe to do concurrently.
+					// NOTE: see native.rs for why HTTP doesn't coalesce Use entries.
 					if result.is_ok() && command.replayable() {
 						session_state.replay.push(command);
 					}

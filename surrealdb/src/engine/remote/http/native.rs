@@ -193,8 +193,13 @@ pub(crate) async fn run_router(
 					)
 					.await;
 
-					// On success, add replayable commands to the replay list
-					// boxcar::Vec is lock-free, so this is safe to do concurrently
+					// On success, add replayable commands to the replay list.
+					// boxcar::Vec is lock-free, so this is safe to do concurrently.
+					// NOTE: unlike the WS engine we do not coalesce idempotent Use
+					// entries here. HTTP requests are processed in spawned tasks, so
+					// a tail-check + push isn't atomic — a concurrent task could
+					// drop a still-pending Use whose result hasn't been recorded
+					// yet. Append-only push is safe under that concurrency.
 					if result.is_ok() && command.replayable() {
 						session_state.replay.push(command);
 					}
