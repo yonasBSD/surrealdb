@@ -6,8 +6,12 @@ use crate::sql::ToSql;
 use crate::{Geometry, Number, Value};
 
 impl Value {
-	/// Converts the value into a json representation of the value.
-	/// Returns None if there are non serializable values present in the value.
+	/// Converts the value into its JSON representation.
+	///
+	/// This is a total conversion: every value variant maps to a `JsonValue`, so
+	/// it never fails. Types without a native JSON counterpart are encoded on a
+	/// best-effort basis (for example record ids, ranges, durations and datetimes
+	/// become strings, and a non-finite float becomes `null`).
 	// TODO: Remove the JsonValue intermediate and implement a json formatter for
 	// Value.
 	pub fn into_json_value(self) -> JsonValue {
