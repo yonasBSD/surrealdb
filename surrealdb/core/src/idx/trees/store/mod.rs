@@ -1,4 +1,4 @@
-#[cfg(not(target_family = "wasm"))]
+#[cfg(diskann)]
 pub(crate) mod diskann;
 pub(crate) mod hnsw;
 mod mapper;
@@ -7,17 +7,17 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(diskann)]
 use crate::catalog::DiskAnnParams;
 use crate::catalog::{
 	DatabaseId, HnswParams, Index, IndexDefinition, NamespaceId, TableDefinition, TableId,
 };
 use crate::ctx::FrozenContext;
 use crate::idx::IndexKeyBase;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(diskann)]
 use crate::idx::trees::diskann::cache::DiskAnnCache;
 use crate::idx::trees::hnsw::cache::VectorCache;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(diskann)]
 use crate::idx::trees::store::diskann::{DiskAnnIndexes, SharedDiskAnnIndex};
 use crate::idx::trees::store::hnsw::{HnswIndexes, SharedHnswIndex};
 use crate::idx::trees::store::mapper::Mappers;
@@ -26,10 +26,10 @@ use crate::idx::trees::store::mapper::Mappers;
 pub struct IndexStores(Arc<Inner>);
 
 struct Inner {
-	#[cfg(not(target_family = "wasm"))]
+	#[cfg(diskann)]
 	diskann_indexes: DiskAnnIndexes,
 	/// Shared hot graph-data cache for all loaded DiskANN indexes.
-	#[cfg(not(target_family = "wasm"))]
+	#[cfg(diskann)]
 	diskann_cache: DiskAnnCache,
 	hnsw_indexes: HnswIndexes,
 	mappers: Mappers,
@@ -38,12 +38,12 @@ struct Inner {
 
 impl IndexStores {
 	pub(crate) fn new(hnsw_cache_size: u64, diskann_cache_size: u64) -> Self {
-		#[cfg(target_family = "wasm")]
+		#[cfg(not(diskann))]
 		let _ = diskann_cache_size;
 		Self(Arc::new(Inner {
-			#[cfg(not(target_family = "wasm"))]
+			#[cfg(diskann)]
 			diskann_indexes: DiskAnnIndexes::default(),
-			#[cfg(not(target_family = "wasm"))]
+			#[cfg(diskann)]
 			diskann_cache: DiskAnnCache::new(diskann_cache_size),
 			hnsw_indexes: HnswIndexes::default(),
 			mappers: Mappers::default(),
@@ -65,7 +65,7 @@ impl IndexStores {
 	}
 
 	/// Returns the process-local DiskANN wrapper for an index, creating it and sharing the cache.
-	#[cfg(not(target_family = "wasm"))]
+	#[cfg(diskann)]
 	pub(crate) async fn get_index_diskann(
 		&self,
 		ns: NamespaceId,
@@ -104,7 +104,7 @@ impl IndexStores {
 			let ikb = IndexKeyBase::new(ns, db, ix.table_name.clone(), ix.index_id);
 			self.remove_hnsw_index(tb, ikb).await?;
 		}
-		#[cfg(not(target_family = "wasm"))]
+		#[cfg(diskann)]
 		if matches!(ix.index, Index::DiskAnn(_)) {
 			let ikb = IndexKeyBase::new(ns, db, ix.table_name.clone(), ix.index_id);
 			self.remove_diskann_index(tb, ikb).await?;
@@ -120,7 +120,7 @@ impl IndexStores {
 	}
 
 	/// Evicts the loaded DiskANN graph and its cached KV-backed graph data for one table index.
-	#[cfg(not(target_family = "wasm"))]
+	#[cfg(diskann)]
 	pub(crate) async fn remove_diskann_index(&self, tb: TableId, ikb: IndexKeyBase) -> Result<()> {
 		self.0.diskann_indexes.remove(tb, &ikb).await?;
 		self.0.diskann_cache.remove_index(ikb.ns(), ikb.db(), tb, ikb.index()).await;

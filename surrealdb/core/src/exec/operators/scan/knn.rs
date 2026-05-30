@@ -289,7 +289,7 @@ impl ExecOperator for KnnScan {
 						.await
 						.context("HNSW KNN search failed")?
 				}
-				#[cfg(not(target_family = "wasm"))]
+				#[cfg(diskann)]
 				Index::DiskAnn(diskann_params) => {
 					let diskann_index = frozen_ctx
 						.get_index_stores()
@@ -331,6 +331,13 @@ impl ExecOperator for KnnScan {
 						.finish()
 						.await
 						.context("DiskANN KNN search failed")?
+				}
+				#[cfg(not(diskann))]
+				Index::DiskAnn(_) => {
+					Err(ControlFlow::Err(anyhow::anyhow!(
+						"DISKANN indexes require a 64-bit, non-WASM platform"
+					)))?;
+					unreachable!()
 				}
 				_ => {
 					Err(ControlFlow::Err(anyhow::anyhow!(

@@ -2386,7 +2386,7 @@ impl Datastore {
 					// drain semantics separately from full-text/count compaction.
 					self.process_hnsw_compaction(ikb, &canceller).await?;
 				}
-				#[cfg(not(target_family = "wasm"))]
+				#[cfg(diskann)]
 				Index::DiskAnn(_) => {
 					self.process_diskann_compaction(ikb, &canceller).await?;
 				}
@@ -2567,7 +2567,7 @@ impl Datastore {
 		}
 	}
 
-	#[cfg(not(target_family = "wasm"))]
+	#[cfg(diskann)]
 	/// Runs DiskANN compaction as bounded read-plan/write-apply batches.
 	async fn process_diskann_compaction(
 		&self,

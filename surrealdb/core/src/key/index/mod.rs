@@ -14,26 +14,26 @@
 //! the correct boundaries when decoding.
 pub mod all;
 pub mod dc;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(diskann)]
 pub mod dd;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(diskann)]
 pub mod de;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(diskann)]
 pub mod dg;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(diskann)]
 pub mod dh;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(diskann)]
 pub mod di;
 pub mod dl;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(diskann)]
 pub mod dn;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(diskann)]
 pub mod dp;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(diskann)]
 pub mod dq;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(diskann)]
 pub mod dr;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(diskann)]
 pub mod ds;
 pub mod dv;
 pub mod hd;

@@ -30,7 +30,7 @@ use crate::idx::planner::plan::IndexOperator::Matches;
 use crate::idx::planner::plan::{IndexOperator, IndexOption, RangeValue};
 use crate::idx::planner::tree::{IdiomPosition, IndexReference};
 use crate::idx::planner::{IterationStage, ScanDirection};
-#[cfg(not(target_family = "wasm"))]
+#[cfg(diskann)]
 use crate::idx::trees::store::diskann::SharedDiskAnnIndex;
 use crate::idx::trees::store::hnsw::SharedHnswIndex;
 use crate::val::{Array, Number, Object, RecordId, TableName, Value};
@@ -68,7 +68,7 @@ pub(crate) struct QueryExecutor(Arc<InnerQueryExecutor>);
 enum PerIndexReferenceIndex {
 	FullText(FullTextIndex),
 	Hnsw(SharedHnswIndex),
-	#[cfg(not(target_family = "wasm"))]
+	#[cfg(diskann)]
 	DiskAnn(SharedDiskAnnIndex),
 }
 
@@ -77,7 +77,7 @@ enum PerIndexReferenceIndex {
 enum PerExpressionEntry {
 	FullText(FullTextEntry),
 	Hnsw(HnswEntry),
-	#[cfg(not(target_family = "wasm"))]
+	#[cfg(diskann)]
 	DiskAnn(DiskAnnEntry),
 	KnnBruteForce(KnnBruteForceEntry),
 }
@@ -263,7 +263,7 @@ impl InnerQueryExecutor {
 						}
 					}
 				}
-				#[cfg(not(target_family = "wasm"))]
+				#[cfg(diskann)]
 				Index::DiskAnn(p) => {
 					if let IndexOperator::Ann(a, k, ef) = io.op() {
 						let de = match ir_map.entry(index_reference.clone()) {
@@ -470,10 +470,10 @@ impl QueryExecutor {
 				..
 			} => self.new_fulltext_index_iterator(irf, io.clone()).await,
 			Index::Hnsw(_) => Ok(self.new_hnsw_index_ann_iterator(irf)),
-			#[cfg(not(target_family = "wasm"))]
+			#[cfg(diskann)]
 			Index::DiskAnn(_) => Ok(self.new_diskann_index_ann_iterator(irf)),
-			#[cfg(target_family = "wasm")]
-			Index::DiskAnn(_) => Ok(None),
+			#[cfg(not(diskann))]
+			Index::DiskAnn(_) => Err(anyhow::anyhow!("DISKANN indexes require a 64-bit, non-WASM platform")),
 		}
 	}
 
@@ -738,7 +738,7 @@ impl QueryExecutor {
 		None
 	}
 
-	#[cfg(not(target_family = "wasm"))]
+	#[cfg(diskann)]
 	fn new_diskann_index_ann_iterator(&self, ir: IteratorRef) -> Option<RecordIterator> {
 		if let Some(IteratorEntry::Single(Some(exp), ..)) = self.0.it_entries.get(ir)
 			&& let Some(PerExpressionEntry::DiskAnn(de)) = self.0.exp_entries.get(exp)
@@ -985,7 +985,7 @@ impl HnswEntry {
 	}
 }
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(diskann)]
 /// Execution-time DiskANN KNN results for one expression.
 #[derive(Clone)]
 pub(super) struct DiskAnnEntry {
@@ -993,7 +993,7 @@ pub(super) struct DiskAnnEntry {
 	res: VecDeque<KnnIteratorResult>,
 }
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(diskann)]
 impl DiskAnnEntry {
 	/// Executes one DiskANN KNN lookup and stores the iterator-ready result queue.
 	#[expect(clippy::too_many_arguments)]

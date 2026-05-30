@@ -32,7 +32,7 @@ use crate::expr::{Cond, Part};
 use crate::idx::IndexKeyBase;
 use crate::idx::ft::fulltext::{FullTextCompactionPlan, FullTextIndex};
 use crate::idx::planner::iterators::{IndexCountCompactionPlan, IndexCountThingIterator};
-#[cfg(not(target_family = "wasm"))]
+#[cfg(diskann)]
 use crate::idx::trees::diskann::index::{DiskAnnCompactionPlan, DiskAnnIndex};
 use crate::idx::trees::hnsw::index::{HnswCompactionPlan, HnswIndex};
 use crate::idx::trees::store::IndexStores;
@@ -343,7 +343,7 @@ impl<'a> IndexOperation<'a> {
 		Ok(false)
 	}
 
-	#[cfg(not(target_family = "wasm"))]
+	#[cfg(diskann)]
 	/// Creates the read-phase plan for DiskANN pending compaction.
 	pub(crate) async fn prepare_diskann_compaction(
 		ctx: &FrozenContext,
@@ -352,7 +352,7 @@ impl<'a> IndexOperation<'a> {
 		DiskAnnIndex::prepare_compaction(ctx, ikb).await
 	}
 
-	#[cfg(not(target_family = "wasm"))]
+	#[cfg(diskann)]
 	/// Applies a prepared DiskANN pending compaction plan.
 	pub(crate) async fn apply_diskann_compaction(
 		ctx: &FrozenContext,
@@ -498,12 +498,12 @@ impl<'a> IndexOperation<'a> {
 		p: &DiskAnnParams,
 		require_compaction: &mut bool,
 	) -> Result<()> {
-		#[cfg(target_family = "wasm")]
+		#[cfg(not(diskann))]
 		{
 			let _ = (p, require_compaction);
-			bail!("DISKANN indexes are not supported on WASM targets")
+			bail!("DISKANN indexes require a 64-bit, non-WASM platform")
 		}
-		#[cfg(not(target_family = "wasm"))]
+		#[cfg(diskann)]
 		{
 			let diskann = self
 				.ctx

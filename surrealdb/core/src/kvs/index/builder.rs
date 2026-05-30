@@ -1295,7 +1295,7 @@ impl Building {
 		.await?;
 		self.mark_durable_online(generation, initial_count, updates_count).await?;
 		self.compact_hnsw_pendings(&mut last_prepare_remove_check).await?;
-		#[cfg(not(target_family = "wasm"))]
+		#[cfg(diskann)]
 		self.compact_diskann_pendings(&mut last_prepare_remove_check).await?;
 		Ok(())
 	}
@@ -1374,7 +1374,7 @@ impl Building {
 		}
 	}
 
-	#[cfg(not(target_family = "wasm"))]
+	#[cfg(diskann)]
 	/// Drains pending DiskANN updates while a blocking `DEFINE INDEX` build is still running.
 	async fn compact_diskann_pendings(
 		&self,
