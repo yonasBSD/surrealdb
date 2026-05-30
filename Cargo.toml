@@ -489,6 +489,22 @@ unwrap_used = "warn"
 used_underscore_binding = "warn"
 
 # Profiles
+
+# Plain `cargo build`/`cargo test` (the default dev profile) emitted full
+# DWARF (`debug = 2`) for every workspace crate, including the ~300k-LOC
+# `surrealdb-core`. Full local-variable debuginfo is a sizable share of
+# codegen + final link cost and is rarely used in day-to-day iteration.
+# `line-tables-only` keeps backtraces with file:line resolution (panics,
+# `RUST_BACKTRACE`, profilers) while dropping local-variable DWARF, and
+# `unpacked` keeps debuginfo in the per-object files so no `dsymutil` pass
+# runs. This matches the debug settings already used by `[profile.make]`
+# and `[profile.profiling]`. Runtime behaviour is unchanged — only the
+# emitted DWARF differs. Use `cargo build --config 'profile.dev.debug=2'`
+# for a one-off full-debuginfo build under a debugger.
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
 [profile.release]
 codegen-units = 1
 lto = true
