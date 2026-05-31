@@ -91,33 +91,34 @@ impl<'a> StatementContext<'a> {
 		})
 	}
 
+	/// Classify the statement-specific permission granted on `tb`.
+	///
+	/// Returns one of:
+	/// - `Full` — no permission check applies (root/owner session) or the table grants the action
+	///   unconditionally; also returned when the table is absent here, since callers verify table
+	///   existence before invoking this method.
+	/// - `Specific` — the table defines a per-record permission expression for this statement type;
+	///   callers must fetch record values so the expression can be evaluated.
+	/// - `None` — the statement is denied on this table; iterator preparation in
+	///   [`crate::dbs::iterator`] short-circuits on this result and skips ingesting any iterable
+	///   for the table.
 	pub(crate) async fn check_table_permission(&self, tb: &TableName) -> Result<GrantedPermission> {
 		if !self.is_perm {
 			return Ok(GrantedPermission::Full);
 		}
 		let (ns, db) = self.ctx.get_ns_db_ids(self.opt).await?;
-		// Get the table for this planner
 		match self.ctx.tx().get_tb(ns, db, tb, None).await? {
 			Some(table) => {
-				// TODO(tobiemh): we should really
-				// not even get here if the table
-				// permissions are NONE, because
-				// there is no point in processing
-				// a table which we can't access.
 				let perms = self.stm.permissions(&table, self.stm.is_create());
-				// If permissions are specific, we
-				// need to fetch the record content.
 				if perms.is_specific() {
 					return Ok(GrantedPermission::Specific);
 				}
-				// If permissions are NONE, we also
-				// need to fetch the record content.
 				if perms.is_none() {
 					return Ok(GrantedPermission::None);
 				}
 			}
 			None => {
-				// Fall through to full permissions.
+				// Table not visible at this point; fall through to Full.
 			}
 		}
 		Ok(GrantedPermission::Full)
