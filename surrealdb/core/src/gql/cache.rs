@@ -14,13 +14,13 @@
 //! new key and the next request transparently regenerates the schema. See
 //! GitHub issue #6942.
 
-use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use anyhow::Result;
 use async_graphql::dynamic::Schema;
+use async_graphql::dynamic::indexmap::IndexMap;
 use tokio::sync::RwLock;
 
 use super::error::GqlError;
@@ -54,7 +54,7 @@ const SCHEMA_CACHE_MAX_ENTRIES: usize = 256;
 /// schema concurrently, and writes (insert/remove) acquire exclusive access.
 #[derive(Clone, Default)]
 pub struct GraphQLSchemaCache {
-	ns_db_schema_cache: Arc<RwLock<HashMap<CacheKey, Schema>>>,
+	ns_db_schema_cache: Arc<RwLock<IndexMap<CacheKey, Schema>>>,
 }
 
 impl Debug for GraphQLSchemaCache {
@@ -127,7 +127,7 @@ impl GraphQLSchemaCache {
 				// schema errors from missing tables, etc.), clear the cache entry
 				if matches!(e, GqlError::DbError(_) | GqlError::SchemaError(_)) {
 					let mut guard = self.ns_db_schema_cache.write().await;
-					guard.remove(&cache_key);
+					guard.shift_remove(&cache_key);
 				}
 				return Err(e);
 			}
@@ -135,30 +135,37 @@ impl GraphQLSchemaCache {
 
 		{
 			let mut guard = self.ns_db_schema_cache.write().await;
-			// Evict stale fingerprints for this (ns, db, config) — only the
-			// most recent fingerprint can be served once we've observed it, so
-			// older entries for the same prefix are dead weight.
-			let (ns_key, db_key, cfg_key, _) = &cache_key;
-			guard.retain(|(n, d, c, _), _| !(n == ns_key && d == db_key && c == cfg_key));
-			// Hard cap: if the map is still oversize (many distinct ns/db/cfg
-			// tuples), drop arbitrary entries until we're back under the
-			// limit. We don't track recency, so eviction order is
-			// implementation-defined — the practical effect is "stop growing
-			// without bound." TODO: swap for an LRU (e.g. `IndexMap` with
-			// `shift_remove` of the oldest entry) if real workloads start
-			// thrashing many distinct (ns, db, cfg) tuples.
-			while guard.len() >= SCHEMA_CACHE_MAX_ENTRIES {
-				if let Some(k) = guard.keys().next().cloned() {
-					guard.remove(&k);
-				} else {
-					break;
-				}
-			}
-			guard.insert(cache_key, schema.clone());
+			insert_bounded(&mut guard, cache_key, schema.clone());
 		}
 
 		Ok(schema)
 	}
+}
+
+/// Insert `value` under `key`, keeping the cache bounded by
+/// [`SCHEMA_CACHE_MAX_ENTRIES`].
+///
+/// Two things keep the map from growing without bound:
+///
+/// 1. **Stale-fingerprint eviction.** Only the most recent fingerprint for a given `(ns, db,
+///    config)` prefix can ever be served, so any older entries sharing that prefix are dead weight
+///    and are dropped first.
+/// 2. **Hard cap (FIFO).** If the map is still at capacity — because many *distinct* `(ns, db,
+///    config)` tuples are live — the oldest-inserted entries are evicted until the new key fits.
+///    [`IndexMap`] preserves insertion order, so `shift_remove_index(0)` always removes the oldest
+///    entry while keeping the relative order of the rest intact. This is deterministic, unlike
+///    `HashMap` iteration order, so eviction never drops the just-inserted entry while leaving an
+///    older one behind.
+///
+/// Generic over the value type so the bounding logic can be unit-tested
+/// without constructing a full [`Schema`].
+fn insert_bounded<V>(cache: &mut IndexMap<CacheKey, V>, key: CacheKey, value: V) {
+	let (ns_key, db_key, cfg_key, _) = &key;
+	cache.retain(|(n, d, c, _), _| !(n == ns_key && d == db_key && c == cfg_key));
+	while cache.len() >= SCHEMA_CACHE_MAX_ENTRIES {
+		cache.shift_remove_index(0);
+	}
+	cache.insert(key, value);
 }
 
 /// Hash the catalog entries that influence GraphQL schema generation.
@@ -229,4 +236,56 @@ async fn compute_schema_fingerprint(
 	}
 
 	Ok(hasher.finish())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn key(ns: &str, db: &str, fingerprint: u64) -> CacheKey {
+		(ns.to_owned(), db.to_owned(), GraphQLConfig::default(), fingerprint)
+	}
+
+	#[test]
+	fn insert_bounded_evicts_oldest_first() {
+		let mut cache: IndexMap<CacheKey, usize> = IndexMap::new();
+		// Fill the cache to capacity with distinct (ns, db) prefixes.
+		for i in 0..SCHEMA_CACHE_MAX_ENTRIES {
+			insert_bounded(&mut cache, key("ns", &format!("db{i}"), 0), i);
+		}
+		assert_eq!(cache.len(), SCHEMA_CACHE_MAX_ENTRIES);
+
+		// Inserting one more must stay at the cap and evict the oldest entry
+		// (db0), never the freshly inserted one.
+		insert_bounded(&mut cache, key("ns", "db-new", 0), 9999);
+		assert_eq!(cache.len(), SCHEMA_CACHE_MAX_ENTRIES);
+		assert!(!cache.contains_key(&key("ns", "db0", 0)), "oldest entry should be evicted");
+		assert!(cache.contains_key(&key("ns", "db1", 0)), "second-oldest entry should survive");
+		assert!(cache.contains_key(&key("ns", "db-new", 0)), "newest entry must be retained");
+	}
+
+	#[test]
+	fn insert_bounded_replaces_stale_fingerprint_for_same_prefix() {
+		let mut cache: IndexMap<CacheKey, usize> = IndexMap::new();
+		insert_bounded(&mut cache, key("ns", "db", 1), 1);
+		insert_bounded(&mut cache, key("ns", "db", 2), 2);
+
+		// A new fingerprint for the same (ns, db, config) prefix supersedes the
+		// old one rather than accumulating alongside it.
+		assert_eq!(cache.len(), 1);
+		assert!(!cache.contains_key(&key("ns", "db", 1)));
+		assert_eq!(cache.get(&key("ns", "db", 2)), Some(&2));
+	}
+
+	#[test]
+	fn insert_bounded_keeps_distinct_prefixes() {
+		let mut cache: IndexMap<CacheKey, usize> = IndexMap::new();
+		insert_bounded(&mut cache, key("ns", "db_a", 1), 1);
+		insert_bounded(&mut cache, key("ns", "db_b", 1), 2);
+
+		// Different databases share no prefix, so both entries are retained.
+		assert_eq!(cache.len(), 2);
+		assert_eq!(cache.get(&key("ns", "db_a", 1)), Some(&1));
+		assert_eq!(cache.get(&key("ns", "db_b", 1)), Some(&2));
+	}
 }
