@@ -496,7 +496,9 @@ impl<'js> Request<'js> {
 			let headers = &headers.inner;
 			let key = HeaderName::from_static("content-type");
 			let types = headers.get_all(key);
-			// TODO: This is not according to spec.
+			// Spec-divergent: the Blob's `type` should be the parsed
+			// Content-Type, or "" when the header is absent or unparseable.
+			// We fall back to "text/html" in both cases.
 			types
 				.iter()
 				.next()

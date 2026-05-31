@@ -109,8 +109,10 @@ pub async fn fetch<'js>(
 			}
 			BodyKind::Blob(mime) => {
 				if let Ok(x) = HeaderValue::from_bytes(mime.as_bytes()) {
-					// TODO: Not according to spec, figure out the specific Mime -> Content-Type
-					// -> Mime conversion process.
+					// `or_insert_with` matches the spec's "set Content-Type
+					// only if absent" rule for Blob bodies. The Blob's MIME
+					// is passed through verbatim instead of being round-tripped
+					// through the MIME-type grammar the spec requires.
 					headers.entry(CONTENT_TYPE).or_insert_with(|| x);
 				}
 			}

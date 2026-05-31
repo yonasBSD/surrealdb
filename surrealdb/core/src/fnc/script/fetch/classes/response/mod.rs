@@ -173,7 +173,9 @@ impl<'js> Response<'js> {
 			let headers = headers.borrow();
 			let headers = &headers.inner;
 			let types = headers.get_all(reqwest::header::CONTENT_TYPE);
-			// TODO: This is not according to spec.
+			// Spec-divergent: the Blob's `type` should be the parsed
+			// Content-Type, or "" when the header is absent or unparseable.
+			// We fall back to "text/html" in both cases.
 			types
 				.iter()
 				.next()
