@@ -318,9 +318,108 @@ mod http_integration {
 		Ok(())
 	}
 
+	// Exercise each `--client-ip` mode end-to-end: send a `RETURN session::ip()`
+	// over HTTP and verify the value matches what the configured extractor
+	// would produce. Unit tests in `ntw::client_ip` already cover the
+	// `Forwarded` header parser exhaustively; these tests cover the wiring
+	// from the CLI flag through `ExtractClientIP` to the SurrealQL session.
+
+	async fn fetch_session_ip(
+		addr: &str,
+		extra_headers: &[(&str, &str)],
+	) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+		let mut headers = reqwest::header::HeaderMap::new();
+		headers.insert(header::ACCEPT, "application/json".parse()?);
+		for (name, value) in extra_headers {
+			headers.insert(
+				reqwest::header::HeaderName::from_bytes(name.as_bytes())?,
+				HeaderValue::from_str(value)?,
+			);
+		}
+		let client = reqwest::Client::builder()
+			.connect_timeout(Duration::from_millis(10))
+			.default_headers(headers)
+			.build()?;
+		let res = client
+			.post(format!("http://{addr}/sql"))
+			.basic_auth(USER, Some(PASS))
+			.body("RETURN session::ip()")
+			.send()
+			.await?;
+		assert_eq!(res.status(), 200, "body: {}", res.text().await?);
+		let body: serde_json::Value = res.json().await?;
+		Ok(body[0]["result"].clone())
+	}
+
 	#[test(tokio::test)]
-	async fn client_ip_extractor() -> Result<(), Box<dyn std::error::Error>> {
-		// TODO: test the client IP extractor
+	async fn client_ip_socket() -> Result<(), Box<dyn std::error::Error>> {
+		// Default mode (`--client-ip socket`) reports the raw peer address.
+		// The test client always connects from 127.0.0.1, so the extracted
+		// IP should match — independent of any forwarding headers we set.
+		let (addr, _server) = common::start_server_with_defaults().await?;
+		let result = fetch_session_ip(&addr, &[("X-Forwarded-For", "203.0.113.7")]).await?;
+		assert_eq!(result, serde_json::json!("127.0.0.1"));
+		Ok(())
+	}
+
+	#[test(tokio::test)]
+	async fn client_ip_x_forwarded_for() -> Result<(), Box<dyn std::error::Error>> {
+		let (addr, _server) = common::start_server(StartServerArguments {
+			args: "--client-ip X-Forwarded-For".to_string(),
+			..Default::default()
+		})
+		.await?;
+
+		// With the header present, the extractor returns its value verbatim
+		// (`X-Forwarded-For` is not parsed beyond reading the header — the
+		// raw string flows through, matching the historical behaviour
+		// callers rely on for chained-proxy values).
+		let result = fetch_session_ip(&addr, &[("X-Forwarded-For", "203.0.113.7")]).await?;
+		assert_eq!(result, serde_json::json!("203.0.113.7"));
+
+		// Without the header the extractor yields no value, so `session::ip()`
+		// returns NONE (serialised as JSON `null`).
+		let result = fetch_session_ip(&addr, &[]).await?;
+		assert_eq!(result, serde_json::Value::Null);
+
+		Ok(())
+	}
+
+	#[test(tokio::test)]
+	async fn client_ip_forwarded_rfc7239() -> Result<(), Box<dyn std::error::Error>> {
+		let (addr, _server) = common::start_server(StartServerArguments {
+			args: "--client-ip Forwarded".to_string(),
+			..Default::default()
+		})
+		.await?;
+
+		// `Forwarded` is parsed per RFC 7239: take the first forwarded-element
+		// and return its `for=` identifier. Quoted IPv6 forms (`for="[...]"`)
+		// are unquoted by the parser.
+		let result =
+			fetch_session_ip(&addr, &[("Forwarded", r#"for="[2001:db8::1]:4711";proto=https"#)])
+				.await?;
+		assert_eq!(result, serde_json::json!("[2001:db8::1]:4711"));
+
+		// A `Forwarded` header without a `for=` parameter yields no IP.
+		let result =
+			fetch_session_ip(&addr, &[("Forwarded", "by=203.0.113.43;proto=http")]).await?;
+		assert_eq!(result, serde_json::Value::Null);
+
+		Ok(())
+	}
+
+	#[test(tokio::test)]
+	async fn client_ip_none() -> Result<(), Box<dyn std::error::Error>> {
+		// `--client-ip none` short-circuits the extractor regardless of what
+		// headers (or socket address) are visible.
+		let (addr, _server) = common::start_server(StartServerArguments {
+			args: "--client-ip none".to_string(),
+			..Default::default()
+		})
+		.await?;
+		let result = fetch_session_ip(&addr, &[("X-Forwarded-For", "203.0.113.7")]).await?;
+		assert_eq!(result, serde_json::Value::Null);
 		Ok(())
 	}
 
