@@ -528,8 +528,8 @@ impl StatementStream {
 	/// updates the line and column offset after consuming bytes.
 	fn accumulate_line_col(&mut self, bytes: &[u8]) {
 		// The parser should have ensured that bytes is a valid utf-8 string.
-		// TODO: Maybe change this to unsafe cast once we have more convidence in the
-		// parsers correctness.
+		// TODO: Maybe change this to unsafe cast once we have more confidence in the
+		// parser's correctness.
 		let (line_num, remaining) = std::str::from_utf8(bytes)
 			.expect("parser validated utf8")
 			.lines()

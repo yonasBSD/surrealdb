@@ -111,7 +111,7 @@ impl Options {
 		self
 	}
 
-	/// Specify wether tables/events should re-run
+	/// Specify whether tables/events should re-run
 	pub fn with_force(mut self, force: Force) -> Self {
 		self.force = force;
 		self

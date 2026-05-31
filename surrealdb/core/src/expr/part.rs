@@ -27,7 +27,7 @@ pub(crate) enum Part {
 	Where(Expr),
 	Lookup(Box<Lookup>),
 	Value(Expr),
-	/// TODO: Remove, start and move it out of part to elimite invalid state.
+	/// TODO: Remove, start and move it out of part to eliminate invalid state.
 	Start(Expr),
 	Method(Strand, Vec<Expr>),
 	Destructure(Vec<DestructurePart>),

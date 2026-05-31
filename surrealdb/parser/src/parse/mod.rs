@@ -287,9 +287,9 @@ impl<'source, 'ast> Parser<'source, 'ast> {
 
 	/// Parse a parsable type in partial mode.
 	///
-	/// In partial mode if the parser encounters an error which happend due to a sudden end of the
-	/// source it will return `Ok(None)` instead of an error assuming the error can fixed by adding
-	/// more data to the source.
+	/// In partial mode if the parser encounters an error which happened due to a sudden end of the
+	/// source it will return `Ok(None)` instead of an error assuming the error can be fixed by
+	/// adding more data to the source.
 	pub fn enter_partial_parse<P: Parse + Node>(
 		source: &str,
 		stack: &mut Stack,
