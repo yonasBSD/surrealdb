@@ -38,7 +38,7 @@ use isready::IsReadyCommandArguments;
 use mcp::McpCommandArguments;
 use ml::MlCommand;
 #[cfg(feature = "surrealism")]
-use module::ModuleCommand;
+use module::ModuleCommandArgs;
 use semver::Version;
 #[cfg(feature = "cli")]
 use sql::SqlCommandArguments;
@@ -186,8 +186,7 @@ enum Commands {
 	#[command(subcommand, about = "Manage SurrealML models within an existing database")]
 	Ml(MlCommand),
 	#[cfg(feature = "surrealism")]
-	#[command(subcommand, about = "Manage and execute WASM modules", name = "module")]
-	Module(ModuleCommand),
+	Module(ModuleCommandArgs),
 	#[command(
 		about = "Check if the SurrealDB server is ready to accept connections",
 		visible_alias = "isready"
