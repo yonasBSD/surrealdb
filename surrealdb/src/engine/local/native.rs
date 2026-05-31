@@ -223,24 +223,20 @@ async fn router_loop(
 				let Ok(session_id) = session else {
 					break
 				};
-				match session_id {
-					SessionId::Initial(session_id) => {
-						router_state.handle_session_initial(session_id);
-					}
-					SessionId::Clone { old, new } => {
-						router_state.handle_session_clone(old, new).await;
-					}
-					SessionId::Drop(session_id) => {
-						router_state.handle_session_drop(session_id);
-					}
-				}
+				router_state.handle_session(session_id).await;
 			}
 			route = route_rx.recv() => {
 				let Ok(route) = route else {
 					break
 				};
-				match router_state.sessions.get(&route.request.session_id) {
-					Some(Ok(state)) => {
+				// `resolve_route_session` drains any session-lifecycle events enqueued
+				// before this route, so a freshly registered/cloned session is applied
+				// before the lookup (see its docs for the ordering guarantee).
+				match router_state
+					.resolve_route_session(&session_rx, route.request.session_id)
+					.await
+				{
+					Ok(state) => {
 						let kvs = Arc::clone(&router_state.kvs);
 						tokio::spawn(async move {
 							match super::router(&kvs, &state, route.request.command)
@@ -255,12 +251,8 @@ async fn router_loop(
 							}
 						});
 					}
-					Some(Err(error)) => {
+					Err(error) => {
 						route.response.send(Err(crate::engine::session_error_to_error(error))).await.ok();
-					}
-					None => {
-						let error = crate::engine::session_error_to_error(SessionError::NotFound(route.request.session_id));
-						route.response.send(Err(error)).await.ok();
 					}
 				}
 			}

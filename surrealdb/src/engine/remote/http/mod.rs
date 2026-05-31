@@ -261,6 +261,18 @@ impl RouterState {
 		}
 		self.sessions.remove(&session_id);
 	}
+
+	/// Dispatch a session-lifecycle event to the appropriate handler.
+	async fn handle_session(&self, session_id: crate::SessionId) {
+		match session_id {
+			crate::SessionId::Initial(id) => self.handle_session_initial(id).await,
+			crate::SessionId::Clone {
+				old,
+				new,
+			} => self.handle_session_clone(old, new).await,
+			crate::SessionId::Drop(id) => self.handle_session_drop(id).await,
+		}
+	}
 }
 
 /// The HTTP scheme used to connect to `http://` endpoints.

@@ -147,22 +147,21 @@ pub(crate) async fn run_router(
 				let Ok(session_id) = session else {
 					break
 				};
-				match session_id {
-					SessionId::Initial(session_id) => {
-						state.handle_session_initial(session_id).await;
-					}
-					SessionId::Clone { old, new } => {
-						state.handle_session_clone(old, new).await;
-					}
-					SessionId::Drop(session_id) => {
-						state.handle_session_drop(session_id).await;
-					}
-				}
+				state.handle_session(session_id).await;
 			}
 			route = route_rx.recv() => {
 				let Ok(route) = route else {
 					break
 				};
+
+				// Apply any session-lifecycle events that were enqueued before this
+				// query. The session channel is separate from the route channel, so a
+				// freshly registered or cloned session may not have been processed yet;
+				// receiving this route establishes a happens-before with the sender, so
+				// those earlier events are now observable and one drain pass suffices.
+				while let Ok(session_id) = session_rx.try_recv() {
+					state.handle_session(session_id).await;
+				}
 
 				let session_id = route.request.session_id;
 				let command = route.request.command.clone();

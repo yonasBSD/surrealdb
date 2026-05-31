@@ -659,6 +659,28 @@ async fn handle_session_drop<M, S, E>(
 	sessions.remove(&session_id);
 }
 
+/// Dispatch a session-lifecycle event to the appropriate handler.
+async fn handle_session<M, S, E>(
+	session_id: crate::SessionId,
+	sessions: &HashMap<Uuid, Result<Arc<SessionState>, SessionError>>,
+	sink: &RwLock<S>,
+) where
+	M: WsMessage,
+	S: Sink<M, Error = E> + Unpin,
+	E: std::fmt::Debug,
+{
+	match session_id {
+		crate::SessionId::Initial(id) => {
+			handle_session_initial::<M, S, E>(id, sessions, sink).await
+		}
+		crate::SessionId::Clone {
+			old,
+			new,
+		} => handle_session_clone::<M, S, E>(old, new, sessions, sink).await,
+		crate::SessionId::Drop(id) => handle_session_drop::<M, S, E>(id, sessions, sink).await,
+	}
+}
+
 /// Clear all pending requests on connection reset.
 async fn clear_pending_requests(sessions: &HashMap<Uuid, Result<Arc<SessionState>, SessionError>>) {
 	for state in sessions.values().into_iter().flatten() {
