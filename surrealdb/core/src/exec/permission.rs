@@ -88,6 +88,16 @@ pub(crate) fn resolve_select_permission(table_def: Option<&TableDefinition>) -> 
 pub(crate) fn should_check_perms(db_ctx: &DatabaseContext, action: Action) -> Result<bool, Error> {
 	let root = &db_ctx.ns_ctx.root;
 
+	// Inside a permission predicate (`skip_fetch_perms`), enforcement is
+	// bypassed so the definer-authored predicate can read freely — matching the
+	// legacy `Options::new_with_perms(false)` path. This is the single gate
+	// every scan, graph and reference operator consults, so exempting it here
+	// disables the whole-scan `Deny` short-circuits, per-row table/field
+	// permission filtering, and edge/target enforcement in one place.
+	if root.skip_fetch_perms {
+		return Ok(false);
+	}
+
 	// Check if server auth is disabled
 	if !root.ctx.auth_enabled() && root.auth.is_anon() {
 		return Ok(false);
