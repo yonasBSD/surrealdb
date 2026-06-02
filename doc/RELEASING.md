@@ -5,6 +5,7 @@ This document describes the SurrealDB release workflow, including how to perform
 ## Table of Contents
 
 - [Overview](#overview)
+- [Rolling Builds](#rolling-builds)
 - [Release Types](#release-types)
 - [Workflow Inputs](#workflow-inputs)
 - [Branching Strategy](#branching-strategy)
@@ -28,6 +29,26 @@ The workflow is **fully idempotent**, meaning you can safely retry any release w
 > For per-release operational notes that administrators should read before
 > deploying a new build (wire-format rotations, removed features, etc.),
 > see [`UPGRADING.md`](./UPGRADING.md).
+
+## Rolling Builds
+
+Separately from the versioned/nightly release workflow described below,
+`rolling-build.yml` runs on every push to `main` and to `releases/v*` branches.
+It builds the full binary matrix and Docker images for that commit and publishes
+them by commit SHA — binaries to `s3://download.surrealdb.com/rolling/<sha>/`
+and images to `surrealdb/surrealdb:rolling-<sha>` plus a moving
+`surrealdb/surrealdb:<branch-slug>` tag (e.g. `:main`, `:releases-v3-1`).
+
+Rolling builds do **not** publish crates (crates.io versions are write-once) and
+do **not** re-run the CI quality/test matrix — correctness is gated by `ci.yml`
+on the same commit. The baked binary version comes from `Cargo.toml` plus build
+metadata, so a `releases/v*` commit already carries its intended release version.
+Every job is guarded by `github.repository`, so the workflow never runs in the
+public mirror.
+
+Official releases are still cut via the versioned workflow documented below; the
+tag-to-promote model that re-tags these rolling artifacts is being introduced
+incrementally.
 
 ## Release Types
 
