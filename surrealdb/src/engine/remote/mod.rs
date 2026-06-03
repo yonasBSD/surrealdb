@@ -377,6 +377,7 @@ impl Command {
 	/// (unreachable from the SDK) clears the session. If a future change adds
 	/// a clearing variant to `Command::Use` or maps `None` to `Value::Null` on
 	/// the wire, revisit this method and the corresponding tests.
+	#[cfg(feature = "protocol-ws")]
 	fn is_replay_noop_after(&self, prev: &Command) -> bool {
 		match (prev, self) {
 			(
@@ -410,6 +411,7 @@ impl Command {
 /// for a given session (e.g. the WS engine's single-threaded response loop).
 /// The HTTP engine handles each request in a spawned task and must keep using
 /// a plain `replay.push(command)`.
+#[cfg(feature = "protocol-ws")]
 fn record_replayable(replay: &boxcar::Vec<Command>, command: Command) {
 	debug_assert!(
 		command.replayable(),
@@ -478,7 +480,12 @@ mod test {
 			|b| surrealdb_core::rpc::format::flatbuffers::decode(&b).unwrap(),
 		);
 	}
+}
 
+// Replay coalescing is only used by the WS engine, so gate these tests on the
+// same feature that compiles `record_replayable` / `is_replay_noop_after`.
+#[cfg(all(test, feature = "protocol-ws"))]
+mod replay_test {
 	use super::{Command, record_replayable};
 
 	fn use_cmd(ns: Option<&str>, db: Option<&str>) -> Command {

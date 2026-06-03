@@ -47,7 +47,10 @@ runs:
   using: 'composite'
   steps:
     - name: Free disk space
-      if: inputs.free-disk-space == 'true'
+      # The cleanup commands are Linux-specific (sudo + GNU paths). Running them
+      # on macOS/Windows runners only produces noise (read-only volume / missing
+      # sudo), so restrict the step to Linux where it actually frees space.
+      if: inputs.free-disk-space == 'true' && runner.os == 'Linux'
       shell: bash
       run: |
         echo "Disk space before cleanup:"
@@ -99,7 +102,7 @@ runs:
 
     - name: Setup sccache
       if: inputs.enable-sccache == 'true'
-      uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+      uses: mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e # v0.0.10
 
     - name: Configure sccache environment
       if: inputs.enable-sccache == 'true'
