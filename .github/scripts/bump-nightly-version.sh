@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 set -e
 
-VERSION="$1"
-PUBLISH="${2:-false}"
-MAIN_VERSION_INPUT="${3:-}"
+PUBLISH="${1:-false}"
+MAIN_VERSION_INPUT="${2:-}"
 
-if [[ -z "$VERSION" ]]; then
-	echo "Error: Version argument required"
-	echo "Usage: $0 <version> [publish] [main-version]"
+# The released version is taken from the code on the currently checked-out
+# git ref, not passed in as an argument.
+VERSION=$(cargo metadata --format-version 1 --no-deps | \
+	jq -r '.packages | map(select(.name == "surrealdb"))[0].version')
+
+if [[ -z "$VERSION" || "$VERSION" == "null" ]]; then
+	echo "Error: Could not determine the released version from the code"
 	exit 1
 fi
+
+echo "Released version (from code): ${VERSION}"
 
 # Determine the appropriate version for main
 if [[ -n "$MAIN_VERSION_INPUT" ]]; then
@@ -22,22 +27,23 @@ else
 	minor=$(echo $VERSION | tr "." "\n" | sed -n 2p)
 	patch=$(echo $VERSION | tr "." "\n" | sed -n 3p)
 
-	# Check if this is a stable x.y.0 release (no hyphen = no pre-release)
+	# Only a stable x.y.0 release moves main forward (to the next minor nightly).
+	# Pre-releases (e.g. 3.0.0-beta.1) and patch releases (e.g. 3.0.1) never change
+	# main - main always stays on its -nightly development version.
 	if [[ "$patch" == "0" ]] && [[ ! "$VERSION" =~ - ]]; then
-		# Stable x.y.0 release -> bump main to next minor alpha
+		# Stable x.y.0 release -> bump main to next minor nightly
 		next_minor=$((minor + 1))
-		MAIN_VERSION="${major}.${next_minor}.0-alpha"
+		MAIN_VERSION="${major}.${next_minor}.0-nightly"
 		echo "Stable release: auto-bumping main from ${VERSION} to ${MAIN_VERSION} for next development cycle"
-	elif [[ "$VERSION" =~ - ]]; then
-		# Pre-release (contains hyphen) -> strip to first 3 parts (e.g., 3.0.0-beta.1 -> 3.0.0-beta)
-		MAIN_VERSION="${major}.${minor}.${patch}"
-		echo "Pre-release: auto-stripping patch from ${VERSION} to ${MAIN_VERSION} for main branch"
 	else
-		# Other stable releases (e.g., 3.0.1) - use as-is
-		MAIN_VERSION="$VERSION"
-		echo "Using full version ${MAIN_VERSION} for main branch"
+		echo "Release ${VERSION} does not change the main branch version (main stays on -nightly); nothing to do"
+		exit 0
 	fi
 fi
+
+# Configure git identity for the commit (fresh runners have none)
+git config user.name "github-actions[bot]"
+git config user.email "github-actions[bot]@users.noreply.github.com"
 
 # Fetch and check out main (may not exist locally if we're on a patch branch)
 git fetch origin main
@@ -65,7 +71,7 @@ else
 fi
 
 # Create a branch for the PR
-PR_BRANCH="chore/bump-main-to-v${MAIN_VERSION}"
+PR_BRANCH="dev/ci/v${MAIN_VERSION}"
 
 # Delete PR branch if it exists (idempotency)
 if git ls-remote --exit-code --heads origin "${PR_BRANCH}" >/dev/null 2>&1; then
@@ -114,4 +120,3 @@ Review and merge this PR to prepare main for the next phase of development."
 else
 	echo "[Dry-run] Would create PR to update main branch to ${MAIN_VERSION}"
 fi
-

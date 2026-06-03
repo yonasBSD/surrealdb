@@ -4105,7 +4105,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "surrealdb-collections"
-version = "3.2.0-alpha"
+version = "3.2.0-nightly"
 dependencies = [
  "revision 0.28.0",
  "storekey",
@@ -4113,7 +4113,7 @@ dependencies = [
 
 [[package]]
 name = "surrealdb-core"
-version = "3.2.0-alpha"
+version = "3.2.0-nightly"
 dependencies = [
  "addr",
  "affinitypool",
@@ -4261,7 +4261,7 @@ dependencies = [
 
 [[package]]
 name = "surrealdb-strand"
-version = "3.2.0-alpha"
+version = "3.2.0-nightly"
 dependencies = [
  "revision 0.28.0",
  "serde",
@@ -4298,7 +4298,7 @@ dependencies = [
 
 [[package]]
 name = "surrealdb-types"
-version = "3.2.0-alpha"
+version = "3.2.0-nightly"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4323,7 +4323,7 @@ dependencies = [
 
 [[package]]
 name = "surrealdb-types-derive"
-version = "3.2.0-alpha"
+version = "3.2.0-nightly"
 dependencies = [
  "heck 0.4.1",
  "proc-macro2",
