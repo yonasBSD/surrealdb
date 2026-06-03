@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use reblessive::TreeStack;
+use surrealdb_types::ToSql;
 
 use super::common::fetch_and_filter_records_batch;
 use super::pipeline::{ScanPipeline, build_field_state};
@@ -113,12 +114,22 @@ impl ExecOperator for KnnScan {
 	}
 
 	fn attrs(&self) -> Vec<(String, String)> {
-		vec![
+		let mut attrs = vec![
 			("index".to_string(), self.index_ref.name.to_string()),
 			("k".to_string(), self.k.to_string()),
 			("ef".to_string(), self.ef.to_string()),
 			("dimension".to_string(), self.vector.len().to_string()),
-		]
+		];
+		// Surface the residual WHERE that is pushed into the ANN search as a
+		// cond filter, so EXPLAIN shows it on the KnnScan line — mirroring how
+		// `TableScan` exposes its `predicate`. Without this, an indexed KNN
+		// with a pushed-down filter is indistinguishable in the plan from one
+		// without. Render the inner expression rather than the `Cond` to avoid
+		// a redundant `WHERE` prefix (matching TableScan's `to_sql()` output).
+		if let Some(cond) = &self.residual_cond {
+			attrs.push(("predicate".to_string(), cond.0.to_sql()));
+		}
+		attrs
 	}
 
 	fn required_context(&self) -> ContextLevel {
